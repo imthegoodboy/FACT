@@ -156,6 +156,11 @@ impl std::fmt::Debug for PipeListener {
     }
 }
 
+// SAFETY: a listener is owned by exactly one thread after creation. The raw
+// pointer inside `security` refers to an owned security-descriptor blob; it is
+// only read synchronously while creating pipe instances, never shared.
+unsafe impl Send for PipeListener {}
+
 impl PipeListener {
     /// Bind the first instance. Fails if another process has already created an
     /// instance with this name.
@@ -394,7 +399,10 @@ fn token_user_sid(process: HANDLE) -> io::Result<Vec<u8>> {
         if needed == 0 {
             return Err(io::Error::last_os_error());
         }
-        let mut buffer = vec![0u8; needed as usize];
+        // `TOKEN_USER` contains pointers, so the buffer must be aligned for
+        // `usize`, not merely for `u8`.
+        let word = std::mem::size_of::<usize>();
+        let mut buffer = vec![0usize; (needed as usize).div_ceil(word)];
         let ok = unsafe {
             GetTokenInformation(
                 token,
@@ -406,6 +414,12 @@ fn token_user_sid(process: HANDLE) -> io::Result<Vec<u8>> {
         };
         if ok == 0 {
             return Err(io::Error::last_os_error());
+        }
+        if needed as usize > buffer.len() * word {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "token information buffer is too small",
+            ));
         }
         let token_user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
         sid_bytes(token_user.User)

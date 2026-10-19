@@ -243,6 +243,7 @@ pub enum ResponsePayload {
         json: String,
     },
     Imported(SessionSummary),
+    Search(SearchResult),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -486,6 +487,14 @@ pub struct ProtocolError {
     pub code: ErrorCode,
     pub message: String,
 }
+
+impl std::fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ProtocolError {}
 
 impl ProtocolError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
