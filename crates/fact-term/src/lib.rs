@@ -360,6 +360,10 @@ impl TerminalModel {
         self.sink.title()
     }
 
+    pub fn bell_seq(&self) -> u64 {
+        self.sink.bell_seq()
+    }
+
     pub fn snapshot(&self) -> TerminalSnapshot {
         let render = self.term.renderable_content();
         let mut cells: Vec<CellDto> = Vec::with_capacity(self.cols as usize * self.rows as usize);
@@ -501,6 +505,11 @@ impl TerminalModel {
             line -= 1;
         }
         lines.reverse();
+        // Blank rows below the last visible content must not be replayed: each
+        // one would scroll the real content off the top of the restored screen.
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
         let mut ansi = lines.join("\r\n");
         if truncated {
             ansi.insert_str(
@@ -532,7 +541,9 @@ impl TerminalModel {
             return Err(RestoreError::Invalid("snapshot contains NUL".into()));
         }
         self.feed(ansi.as_bytes());
-        self.feed(b"\x1b[0m\r\n");
+        // Reset styling without moving the cursor: an extra newline on the
+        // last screen row would scroll restored content off the top.
+        self.feed(b"\x1b[0m");
         self.mark_cold_restored();
         Ok(())
     }
@@ -931,6 +942,20 @@ mod tests {
         let text = target.plain_text();
         assert!(text.contains("alpha"));
         assert!(text.contains("beta"));
+    }
+
+    #[test]
+    fn snapshot_does_not_replay_blank_bottom_rows() {
+        let mut source = term(40, 20);
+        source.feed(b"top-marker\r\nsecond-line\r\n");
+        let snap = source.recovery_snapshot(64 * 1024, 1234);
+        assert!(!snap.ansi.ends_with("\r\n"));
+        assert!(snap.ansi.lines().count() <= 2);
+        let mut target = term(40, 20);
+        target.restore_snapshot(&snap.ansi).unwrap();
+        target.feed(b"\r\n[FACT] recovered\r\n");
+        let text = target.plain_text();
+        assert!(text.contains("top-marker"), "restored text: {text}");
     }
 
     #[test]
