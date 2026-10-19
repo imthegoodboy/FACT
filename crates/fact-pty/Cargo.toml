@@ -1,0 +1,26 @@
+[package]
+name = "fact-pty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ConPTY process engine for FACT"
+
+[dependencies]
+thiserror.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_Environment",
+    "Win32_Security",
+] }
+
+[dev-dependencies]
+fact-config = { path = "../fact-config" }

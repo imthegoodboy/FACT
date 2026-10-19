@@ -1,0 +1,682 @@
+//! Configuration, filesystem locations and shell profiles for FACT.
+
+pub mod keys;
+
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+pub use keys::{compile, CompiledKeybinds, KeyChord, KeyParseError, KeybindError};
+
+pub const CONFIG_VERSION: u32 = 1;
+pub const DEFAULT_CONFIG_FILE: &str = "config.toml";
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("could not determine a usable FACT data directory")]
+    NoDataDirectory,
+    #[error("could not read config '{path}': {source}")]
+    Read {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not write config '{path}': {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("config '{path}' is not valid TOML: {source}")]
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: Box<toml::de::Error>,
+    },
+    #[error("config version {found} is not supported (expected {expected})")]
+    Version { found: u32, expected: u32 },
+    #[error("configuration is invalid: {0}")]
+    Invalid(String),
+    #[error("profile '{0}' does not exist")]
+    UnknownProfile(String),
+    #[error("could not resolve a shell for profile '{0}': {1}")]
+    NoShell(String, String),
+    #[error("config path already exists: {0}")]
+    Exists(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub struct Paths {
+    pub base: PathBuf,
+    pub config_file: PathBuf,
+    pub db_file: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub log_dir: PathBuf,
+    pub daemon_json: PathBuf,
+    pub daemon_log: PathBuf,
+    pub client_log: PathBuf,
+    pub exports_dir: PathBuf,
+}
+
+impl Paths {
+    pub fn resolve(
+        config_override: Option<PathBuf>,
+        data_override: Option<PathBuf>,
+    ) -> Result<Self, ConfigError> {
+        let base = data_override
+            .or_else(|| std::env::var_os("FACT_HOME").map(PathBuf::from))
+            .or_else(default_data_dir)
+            .ok_or(ConfigError::NoDataDirectory)?;
+        let config_file = config_override.unwrap_or_else(|| base.join(DEFAULT_CONFIG_FILE));
+        Ok(Self::from_parts(base, config_file))
+    }
+
+    pub fn from_parts(base: PathBuf, config_file: PathBuf) -> Self {
+        let runtime_dir = base.join("runtime");
+        let log_dir = base.join("logs");
+        Self {
+            db_file: base.join("sessions.db"),
+            daemon_json: runtime_dir.join("daemon.json"),
+            daemon_log: log_dir.join("daemon.log"),
+            client_log: log_dir.join("client.log"),
+            exports_dir: base.join("exports"),
+            base,
+            config_file,
+            runtime_dir,
+            log_dir,
+        }
+    }
+
+    pub fn ensure(&self) -> std::io::Result<()> {
+        fs::create_dir_all(&self.base)?;
+        fs::create_dir_all(&self.runtime_dir)?;
+        fs::create_dir_all(&self.log_dir)?;
+        Ok(())
+    }
+
+    pub fn ensure_exports(&self) -> std::io::Result<()> {
+        fs::create_dir_all(&self.exports_dir)
+    }
+}
+
+fn default_data_dir() -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    if let Some(local) = local {
+        return Some(local.join("FACT"));
+    }
+    std::env::current_dir().ok().map(|cwd| cwd.join(".fact"))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    pub config_version: u32,
+    /// Chord that arms the FACT command prefix.
+    pub prefix: String,
+    /// One of `fact-dark`, `fact-light`, `dracula`, `nord`, `gruvbox`.
+    pub theme: String,
+    pub scrollback_lines: usize,
+    pub min_pane_width: u16,
+    pub min_pane_height: u16,
+    pub mouse: bool,
+    pub confirm_close: bool,
+    pub copy_on_select: bool,
+    pub persist_interval_secs: u64,
+    pub snapshot_interval_secs: u64,
+    pub snapshot_max_bytes: usize,
+    pub max_sessions: usize,
+    pub max_frame_cells: usize,
+    pub daemon_log_level: String,
+    pub default_profile: String,
+    pub keybinds: BTreeMap<String, String>,
+    pub profiles: BTreeMap<String, Profile>,
+    /// Extra environment values applied to every pane. Values never appear in logs.
+    pub env: BTreeMap<String, String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            config_version: CONFIG_VERSION,
+            prefix: "ctrl+space".to_string(),
+            theme: "fact-dark".to_string(),
+            scrollback_lines: 8000,
+            min_pane_width: 24,
+            min_pane_height: 5,
+            mouse: true,
+            confirm_close: true,
+            copy_on_select: false,
+            persist_interval_secs: 10,
+            snapshot_interval_secs: 20,
+            snapshot_max_bytes: 256 * 1024,
+            max_sessions: 32,
+            max_frame_cells: 2_000_000,
+            daemon_log_level: "info".to_string(),
+            default_profile: "auto".to_string(),
+            keybinds: BTreeMap::new(),
+            profiles: BTreeMap::new(),
+            env: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct Profile {
+    /// Executable name or absolute path. Empty/omitted auto-detects a shell.
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub title: Option<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedProfile {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub env: BTreeMap<String, String>,
+    pub title: Option<String>,
+}
+
+impl ResolvedProfile {
+    pub fn label(&self) -> String {
+        self.title.clone().unwrap_or_else(|| {
+            Path::new(&self.command)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&self.command)
+                .to_string()
+        })
+    }
+}
+
+impl Config {
+    pub fn load(paths: &Paths) -> Result<Self, ConfigError> {
+        if !paths.config_file.exists() {
+            return Ok(Self::default());
+        }
+        Self::load_file(&paths.config_file)
+    }
+
+    pub fn load_file(path: &Path) -> Result<Self, ConfigError> {
+        let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let config: Config = toml::from_str(&text).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source: Box::new(source),
+        })?;
+        if config.config_version != CONFIG_VERSION {
+            return Err(ConfigError::Version {
+                found: config.config_version,
+                expected: CONFIG_VERSION,
+            });
+        }
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let mut issues = Vec::new();
+        if !(100..=100_000).contains(&self.scrollback_lines) {
+            issues.push("scrollback_lines must be in 100..=100000".to_string());
+        }
+        if self.min_pane_width < 12 {
+            issues.push("min_pane_width must be at least 12".to_string());
+        }
+        if self.min_pane_height < 3 {
+            issues.push("min_pane_height must be at least 3".to_string());
+        }
+        if !(1..=600).contains(&self.persist_interval_secs) {
+            issues.push("persist_interval_secs must be in 1..=600".to_string());
+        }
+        if !(1..=3600).contains(&self.snapshot_interval_secs) {
+            issues.push("snapshot_interval_secs must be in 1..=3600".to_string());
+        }
+        if !(16 * 1024..=4 * 1024 * 1024).contains(&self.snapshot_max_bytes) {
+            issues.push("snapshot_max_bytes must be in 16384..=4194304".to_string());
+        }
+        if !(1..=128).contains(&self.max_sessions) {
+            issues.push("max_sessions must be in 1..=128".to_string());
+        }
+        if !(10_000..=50_000_000).contains(&self.max_frame_cells) {
+            issues.push("max_frame_cells must be in 10000..=50000000".to_string());
+        }
+        if !["trace", "debug", "info", "warn", "error"].contains(&self.daemon_log_level.as_str()) {
+            issues.push("daemon_log_level must be trace, debug, info, warn or error".to_string());
+        }
+        if !["fact-dark", "fact-light", "dracula", "nord", "gruvbox"].contains(&self.theme.as_str())
+        {
+            issues.push(format!(
+                "theme '{}' is unknown (expected fact-dark, fact-light, dracula, nord or gruvbox)",
+                self.theme
+            ));
+        }
+        if self.default_profile.trim().is_empty() {
+            issues.push("default_profile may not be empty".to_string());
+        }
+        if let Err(err) = keys::parse_prefix(&self.prefix) {
+            issues.push(format!("prefix '{}' is invalid: {err}", self.prefix));
+        }
+        if let Err(err) = keys::compile(
+            keys::parse_prefix(&self.prefix).unwrap_or(keys::KeyChord::new(
+                keys::Modifiers::CONTROL,
+                keys::KeyCode::Space,
+            )),
+            &self.keybinds,
+        ) {
+            issues.push(err.to_string());
+        }
+        for (name, profile) in &self.profiles {
+            if name.trim().is_empty() || name.len() > 64 {
+                issues.push("profile names must be 1..=64 characters".to_string());
+                continue;
+            }
+            if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            {
+                issues.push(format!("profile name '{name}' contains invalid characters"));
+            }
+            if !profile.enabled {
+                continue;
+            }
+            if let Some(command) = &profile.command {
+                if command.trim().is_empty() {
+                    issues.push(format!("profile '{name}' has an empty command"));
+                }
+                if command.chars().any(|c| c == '\0' || c == '\r' || c == '\n') {
+                    issues.push(format!(
+                        "profile '{name}' command contains control characters"
+                    ));
+                }
+            }
+            for arg in &profile.args {
+                if arg.contains('\0') {
+                    issues.push(format!("profile '{name}' has an argument containing NUL"));
+                }
+            }
+            if let Some(cwd) = &profile.cwd {
+                if cwd.contains('\0') {
+                    issues.push(format!("profile '{name}' cwd contains NUL"));
+                }
+            }
+            validate_env_map(&format!("profile '{name}'"), &profile.env, &mut issues);
+        }
+        validate_env_map("global env", &self.env, &mut issues);
+        if !issues.is_empty() {
+            return Err(ConfigError::Invalid(issues.join("; ")));
+        }
+        Ok(())
+    }
+
+    pub fn prefix_chord(&self) -> Result<KeyChord, ConfigError> {
+        keys::parse_prefix(&self.prefix)
+            .map_err(|e| ConfigError::Invalid(format!("prefix '{}': {e}", self.prefix)))
+    }
+
+    pub fn compiled_keybinds(&self) -> Result<CompiledKeybinds, ConfigError> {
+        keys::compile(self.prefix_chord()?, &self.keybinds)
+            .map_err(|e| ConfigError::Invalid(e.to_string()))
+    }
+
+    /// Resolve a profile by name. `None` uses `default_profile`.
+    pub fn resolve_profile(&self, requested: Option<&str>) -> Result<ResolvedProfile, ConfigError> {
+        let name = requested
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(self.default_profile.as_str());
+        if name.eq_ignore_ascii_case("auto") {
+            let command = detect_shell().ok_or_else(|| {
+                ConfigError::NoShell(
+                    "auto".to_string(),
+                    "could not find pwsh.exe, powershell.exe or cmd.exe on PATH".to_string(),
+                )
+            })?;
+            return Ok(ResolvedProfile {
+                name: "auto".to_string(),
+                command,
+                args: Vec::new(),
+                cwd: home_dir(),
+                env: self.env.clone(),
+                title: None,
+            });
+        }
+        let profile = self
+            .profiles
+            .get(name)
+            .ok_or_else(|| ConfigError::UnknownProfile(name.to_string()))?;
+        if !profile.enabled {
+            return Err(ConfigError::Invalid(format!(
+                "profile '{name}' is disabled"
+            )));
+        }
+        let command = match profile.command.as_deref().map(str::trim) {
+            Some(c) if !c.is_empty() => c.to_string(),
+            _ => detect_shell().ok_or_else(|| {
+                ConfigError::NoShell(
+                    name.to_string(),
+                    "profile has no command and no supported shell was found".to_string(),
+                )
+            })?,
+        };
+        let mut env = self.env.clone();
+        env.extend(profile.env.clone());
+        Ok(ResolvedProfile {
+            name: name.to_string(),
+            command,
+            args: profile.args.clone(),
+            cwd: profile
+                .cwd
+                .as_deref()
+                .map(expand_path)
+                .transpose()
+                .map_err(ConfigError::Invalid)?
+                .or_else(home_dir),
+            env,
+            title: profile.title.clone(),
+        })
+    }
+
+    pub fn has_profile(&self, name: &str) -> bool {
+        name.eq_ignore_ascii_case("auto") || self.profiles.contains_key(name)
+    }
+
+    pub fn profile_names(&self) -> Vec<String> {
+        let mut names = vec!["auto".to_string()];
+        names.extend(self.profiles.keys().cloned());
+        names
+    }
+}
+
+fn validate_env_map(label: &str, env: &BTreeMap<String, String>, issues: &mut Vec<String>) {
+    for (key, value) in env {
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            issues.push(format!("{label} has an invalid environment variable name"));
+        }
+        if value.contains('\0') {
+            issues.push(format!("{label} environment variable '{key}' contains NUL"));
+        }
+    }
+}
+
+pub fn detect_shell() -> Option<String> {
+    if let Some(comspec) = std::env::var_os("COMSPEC") {
+        // Prefer PowerShell 7, then Windows PowerShell, then CMD.
+        if let Some(pwsh) = find_on_path("pwsh.exe") {
+            return Some(pwsh);
+        }
+        if let Some(ps) = find_on_path("powershell.exe") {
+            return Some(ps);
+        }
+        return Some(PathBuf::from(comspec).to_string_lossy().into_owned());
+    }
+    find_on_path("pwsh.exe")
+        .or_else(|| find_on_path("powershell.exe"))
+        .or_else(|| find_on_path("cmd.exe"))
+}
+
+pub fn find_on_path(exe: &str) -> Option<String> {
+    if Path::new(exe).is_absolute() && Path::new(exe).is_file() {
+        return Some(exe.to_string());
+    }
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(exe);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let drive = std::env::var_os("HOMEDRIVE")?;
+            let path = std::env::var_os("HOMEPATH")?;
+            let mut result = drive;
+            result.push(path);
+            Some(PathBuf::from(result))
+        })
+}
+
+/// Expand `~`, `%VAR%` and `$env:VAR`-style references used in profile cwd values.
+pub fn expand_path(input: &str) -> Result<PathBuf, String> {
+    if input.contains('\0') {
+        return Err("path contains NUL".to_string());
+    }
+    let mut expanded = if let Some(rest) = input.strip_prefix("~") {
+        let home = home_dir().ok_or_else(|| "could not determine home directory".to_string())?;
+        let rest = rest.trim_start_matches(['/', '\\']);
+        if rest.is_empty() {
+            home
+        } else {
+            home.join(rest)
+        }
+    } else {
+        PathBuf::from(input)
+    };
+    let mut text = expanded.to_string_lossy().into_owned();
+    let mut start = 0;
+    while let Some(open) = text[start..].find('%') {
+        let open = start + open;
+        let Some(close_rel) = text[open + 1..].find('%') else {
+            break;
+        };
+        let close = open + 1 + close_rel;
+        let var = &text[open + 1..close];
+        if var.is_empty() || var.len() > 128 {
+            start = close + 1;
+            continue;
+        }
+        if let Some(value) = std::env::var_os(var) {
+            let value = value.to_string_lossy();
+            text.replace_range(open..=close, &value);
+            start = open + value.len();
+        } else {
+            start = close + 1;
+        }
+    }
+    expanded = PathBuf::from(text);
+    Ok(expanded)
+}
+
+pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# FACT — Fast, Advanced, Reliable Terminal Workspace
+# Configuration reference: https://github.com/imthegoodboy/FACT/blob/main/docs/configuration.md
+config_version = 1
+
+# Prefix chord arms FACT commands. Press it, then a command key (prefix+k = palette).
+prefix = "ctrl+space"
+theme = "fact-dark"
+
+scrollback_lines = 8000
+min_pane_width = 24
+min_pane_height = 5
+mouse = true
+confirm_close = true
+copy_on_select = false
+
+persist_interval_secs = 10
+snapshot_interval_secs = 20
+snapshot_max_bytes = 262144
+max_sessions = 32
+max_frame_cells = 2000000
+daemon_log_level = "info"
+
+# "auto" chooses pwsh.exe, then powershell.exe, then cmd.exe.
+default_profile = "auto"
+
+[keybinds]
+# Override any documented action, for example:
+# split_right = "prefix+\\"
+# palette = "prefix+k"
+
+# [profiles.pwsh]
+# command = "pwsh.exe"
+# args = ["-NoLogo"]
+# cwd = "~"
+#
+# [profiles.wsl]
+# command = "wsl.exe"
+# args = ["-d", "Ubuntu", "--cd", "~"]
+#
+# [profiles.cmd]
+# command = "cmd.exe"
+
+[env]
+# TERM_PROGRAM is set by FACT itself. Add per-user defaults here if desired.
+"#;
+
+pub fn write_default_config(path: &Path, force: bool) -> Result<(), ConfigError> {
+    if path.exists() && !force {
+        return Err(ConfigError::Exists(path.to_path_buf()));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let temp = path.with_extension("toml.tmp");
+    {
+        let mut file = fs::File::create(&temp).map_err(|source| ConfigError::Write {
+            path: temp.clone(),
+            source,
+        })?;
+        file.write_all(DEFAULT_CONFIG_TEMPLATE.as_bytes())
+            .and_then(|_| file.sync_all())
+            .map_err(|source| ConfigError::Write {
+                path: temp.clone(),
+                source,
+            })?;
+    }
+    fs::rename(&temp, path).map_err(|source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(())
+}
+
+/// Stable theme names accepted by the client.
+pub const THEMES: &[&str] = &["fact-dark", "fact-light", "dracula", "nord", "gruvbox"];
+
+pub fn is_valid_theme(name: &str) -> bool {
+    THEMES.contains(&name)
+}
+
+/// A profile's environment merged with process defaults for a pane.
+pub fn pane_environment(profile: &ResolvedProfile) -> BTreeMap<String, String> {
+    let mut env = profile.env.clone();
+    env.entry("TERM".to_string())
+        .or_insert_with(|| "xterm-256color".to_string());
+    env.entry("COLORTERM".to_string())
+        .or_insert_with(|| "truecolor".to_string());
+    env.entry("TERM_PROGRAM".to_string())
+        .or_insert_with(|| "FACT".to_string());
+    env.entry("TERM_PROGRAM_VERSION".to_string())
+        .or_insert_with(|| env!("CARGO_PKG_VERSION").to_string());
+    env.entry("FACT".to_string())
+        .or_insert_with(|| "1".to_string());
+    env
+}
+
+pub fn warning_env_names(env: &BTreeMap<String, String>) -> HashSet<String> {
+    env.keys().map(|k| k.to_ascii_uppercase()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_valid() {
+        Config::default().validate().unwrap();
+        assert!(Config::default().compiled_keybinds().is_ok());
+    }
+
+    #[test]
+    fn bad_config_values_fail() {
+        let config = Config {
+            scrollback_lines: 3,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+        let config = Config {
+            theme: "neon".to_string(),
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+        let config = Config {
+            prefix: "ctrl+".to_string(),
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "config_version = 1\nnot_a_setting = true\n").unwrap();
+        assert!(Config::load_file(&path).is_err());
+    }
+
+    #[test]
+    fn env_expansion_and_profile_resolution() {
+        std::env::set_var("FACT_TEST_EXPAND", "expanded");
+        assert_eq!(
+            expand_path("%FACT_TEST_EXPAND%\\child").unwrap(),
+            PathBuf::from("expanded\\child")
+        );
+        let mut config = Config::default();
+        config.profiles.insert(
+            "test".to_string(),
+            Profile {
+                command: Some("cmd.exe".to_string()),
+                args: vec!["/K".to_string(), "echo hi".to_string()],
+                cwd: None,
+                env: BTreeMap::new(),
+                title: Some("Test".to_string()),
+                enabled: true,
+            },
+        );
+        let p = config.resolve_profile(Some("test")).unwrap();
+        assert_eq!(p.command, "cmd.exe");
+        assert_eq!(p.label(), "Test");
+        assert!(config.resolve_profile(Some("missing")).is_err());
+    }
+
+    #[test]
+    fn default_config_round_trips() {
+        let parsed: Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE).unwrap();
+        parsed.validate().unwrap();
+        assert_eq!(parsed.default_profile, "auto");
+    }
+
+    #[test]
+    fn disabled_profile_rejected() {
+        let mut config = Config::default();
+        let profile = Profile {
+            enabled: false,
+            ..Profile::default()
+        };
+        config.profiles.insert("x".into(), profile);
+        assert!(config.resolve_profile(Some("x")).is_err());
+    }
+}

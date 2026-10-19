@@ -1,0 +1,19 @@
+[package]
+name = "fact-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FACT terminal user interface"
+
+[dependencies]
+anyhow.workspace = true
+arboard.workspace = true
+crossterm.workspace = true
+fact-config = { path = "../fact-config" }
+fact-ipc = { path = "../fact-ipc" }
+fact-layout = { path = "../fact-layout" }
+fact-protocol = { path = "../fact-protocol" }
+ratatui.workspace = true
+serde.workspace = true

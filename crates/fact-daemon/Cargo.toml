@@ -1,0 +1,30 @@
+[package]
+name = "fact-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Per-user FACT session daemon"
+
+[dependencies]
+anyhow.workspace = true
+fact-config = { path = "../fact-config" }
+fact-ipc = { path = "../fact-ipc" }
+fact-layout = { path = "../fact-layout" }
+fact-protocol = { path = "../fact-protocol" }
+fact-pty = { path = "../fact-pty" }
+fact-session = { path = "../fact-session" }
+fact-term = { path = "../fact-term" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_IO",
+] }

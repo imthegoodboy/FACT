@@ -1,0 +1,27 @@
+[package]
+name = "fact-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "FACT command line interface"
+
+[[bin]]
+name = "fact"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+fact-client = { path = "../fact-client" }
+fact-config = { path = "../fact-config" }
+fact-daemon = { path = "../fact-daemon" }
+fact-ipc = { path = "../fact-ipc" }
+fact-protocol = { path = "../fact-protocol" }
+fact-session = { path = "../fact-session" }
+serde_json.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"

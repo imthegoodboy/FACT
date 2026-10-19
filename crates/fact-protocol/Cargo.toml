@@ -1,0 +1,12 @@
+[package]
+name = "fact-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Versioned client/daemon wire protocol for FACT"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true

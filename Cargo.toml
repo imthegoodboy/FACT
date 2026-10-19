@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fact-cli",
+    "crates/fact-client",
+    "crates/fact-config",
+    "crates/fact-daemon",
+    "crates/fact-ipc",
+    "crates/fact-layout",
+    "crates/fact-protocol",
+    "crates/fact-pty",
+    "crates/fact-session",
+    "crates/fact-term",
+    "crates/fact-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+authors = ["FACT contributors"]
+license = "MIT"
+repository = "https://github.com/imthegoodboy/FACT"
+homepage = "https://github.com/imthegoodboy/FACT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+arboard = { version = "3.6", default-features = false }
+bincode = "1.3"
+clap = { version = "4.6", features = ["derive", "wrap_help"] }
+criterion = "0.7"
+crossterm = "0.29"
+hex = "0.4"
+ratatui = "0.30"
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.23"
+thiserror = "2.0"
+toml = "0.8"
+uuid = { version = "1.18", features = ["v4"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
