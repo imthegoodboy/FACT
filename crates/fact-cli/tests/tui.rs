@@ -35,6 +35,14 @@ fn fact_exe() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_fact")))
 }
 
+fn powershell_path() -> String {
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+    format!(
+        "{}/System32/WindowsPowerShell/v1.0/powershell.exe",
+        system_root.replace('\\', "/")
+    )
+}
+
 struct TestHome {
     path: PathBuf,
 }
@@ -51,11 +59,7 @@ impl TestHome {
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("create test home");
-        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
-        let powershell = format!(
-            "{}/System32/WindowsPowerShell/v1.0/powershell.exe",
-            system_root.replace('\\', "/")
-        );
+        let powershell = powershell_path();
         fs::write(
             path.join("config.toml"),
             format!(
@@ -398,6 +402,107 @@ fn scroll_mode_reads_history_without_sending_keys_to_the_shell() {
         process.wait_for_exit(Duration::from_secs(15)),
         Some(0),
         "the scroll test TUI did not detach cleanly:\n{}",
+        tail(&output)
+    );
+    home.shutdown();
+}
+
+#[test]
+fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
+    const APP_MARKER: &str = "FACT_ALT_SCREEN_APP";
+    const KEY_MARKER: &str = "FACT_APP_KEY_PageUp";
+
+    let home = TestHome::new("tui-app-scroll");
+    let config = format!(
+        "config_version = 1\nprefix = \"ctrl+b\"\ndefault_profile = \"alt-shell\"\n\n\
+         [profiles.alt-shell]\ncommand = \"{}\"\nargs = ['-NoLogo', '-NoProfile', '-Command', \
+         '$e=[char]27; [Console]::Write(\"$e[?1049h$e[2J$e[H{APP_MARKER}\"); \
+         while($true){{ $k=[Console]::ReadKey($true); \
+         [Console]::Write(\"$e[2J$e[H{KEY_MARKER}_$($k.Key)\") }}']\n",
+        powershell_path()
+    );
+    fs::write(home.path.join("config.toml"), config).expect("write alt-screen config");
+
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--session".into(),
+        "app-scroll-smoke".into(),
+        "--grid".into(),
+        "1".into(),
+    ];
+    let process = PtyProcess::spawn(options).expect("start the app-scroll test TUI");
+    let mut output = Vec::new();
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            APP_MARKER,
+            120,
+            35,
+            Duration::from_secs(30)
+        ),
+        "the full-screen test app did not start:\n{}",
+        tail(&output)
+    );
+
+    let screen = screen_text(&output, 120, 35);
+    assert!(
+        screen.contains('▐') || screen.contains('▴') || screen.contains('▾'),
+        "the app-scroll rail was not visible:\n{}",
+        screen
+    );
+
+    process.write(b"\x02[").expect("enter app scroll mode");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "APP SCROLL",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "app scroll mode did not identify itself:\n{}",
+        tail(&output)
+    );
+
+    process
+        .write(b"\x1b[5~")
+        .expect("page up in app scroll mode");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            KEY_MARKER,
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "PageUp was not forwarded to the full-screen app:\n{}",
+        tail(&output)
+    );
+
+    process.write(b"\x1b").expect("leave app scroll mode");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "App scroll closed",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "app scroll mode did not close with Esc:\n{}",
+        tail(&output)
+    );
+
+    process.write(b"\x02d").expect("detach the app-scroll TUI");
+    assert_eq!(
+        process.wait_for_exit(Duration::from_secs(15)),
+        Some(0),
+        "the app-scroll TUI did not detach cleanly:\n{}",
         tail(&output)
     );
     home.shutdown();

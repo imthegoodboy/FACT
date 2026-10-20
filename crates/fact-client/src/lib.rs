@@ -424,6 +424,41 @@ fn minimized_tray_rect(width: u16, height: u16, count: usize) -> Option<RectDto>
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollbarMode {
+    /// FACT owns the scrollback and the thumb reflects the current offset.
+    History,
+    /// A full-screen application owns its viewport. The rail becomes a visible
+    /// control that pages the application itself.
+    App,
+}
+
+impl ScrollbarMode {
+    fn is_app(self) -> bool {
+        matches!(self, Self::App)
+    }
+}
+
+/// How scrolling should be routed for a pane.
+///
+/// Full-screen applications such as Claude Code, Codex and OpenCode use the
+/// alternate screen by default. That screen has no FACT history, so pretending
+/// there is scrollback would be misleading. Instead, expose an app-scroll mode
+/// that forwards the standard terminal scroll gestures to the application.
+fn pane_scroll_mode(pane: &PaneView) -> Option<ScrollbarMode> {
+    if pane.history_lines > 0 {
+        Some(ScrollbarMode::History)
+    } else if pane.modes & pane_modes::ALT_SCREEN != 0 {
+        Some(ScrollbarMode::App)
+    } else {
+        None
+    }
+}
+
+fn app_tracks_mouse(modes: u32) -> bool {
+    modes & (pane_modes::MOUSE_CLICK | pane_modes::MOUSE_DRAG | pane_modes::MOUSE_MOTION) != 0
+}
+
 #[derive(Debug, Clone)]
 struct ScrollbarGeometry {
     pane: u64,
@@ -432,30 +467,54 @@ struct ScrollbarGeometry {
     thumb_height: u16,
     max_offset: usize,
     scroll_offset: usize,
+    mode: ScrollbarMode,
 }
 
 fn scrollbar_geometry(pane: &PaneView) -> Option<ScrollbarGeometry> {
-    let height = pane.slot.height.min(pane.content_rows);
-    // Only show the bar once scrollback is meaningful. One or two prompt lines
-    // would otherwise render a near-full-height thumb that reads as a border.
-    let meaningful = (usize::from(pane.content_rows) / 2).max(1);
-    if pane.history_lines < meaningful || height == 0 || pane.slot.width < 2 {
+    let track_height = pane.slot.height.min(pane.content_rows);
+    if track_height == 0 || pane.slot.width < 2 {
         return None;
     }
-    let total = pane
-        .history_lines
-        .saturating_add(usize::from(pane.content_rows));
-    if total == 0 {
-        return None;
-    }
-    let track_height = height;
-    let thumb_height = ((usize::from(track_height) * usize::from(track_height) / total)
-        .max(1)
-        .min(usize::from(track_height))) as u16;
-    let span = track_height.saturating_sub(thumb_height);
-    let offset = pane.scroll_offset.min(pane.history_lines);
-    let thumb_top =
-        span.saturating_sub(((u64::from(span) * offset as u64) / pane.history_lines as u64) as u16);
+    // A rail is always drawn. An idle pane gets a one-cell thumb at the bottom;
+    // a full-screen app gets a centred grip plus paging caps. Neither looks like
+    // a pane border, and both keep the right edge discoverable.
+    let mode = pane_scroll_mode(pane).unwrap_or(ScrollbarMode::History);
+    let (thumb_height, thumb_top, max_offset, scroll_offset) = match mode {
+        ScrollbarMode::App => {
+            let thumb_height = track_height.min(3);
+            let thumb_top = track_height.saturating_sub(thumb_height) / 2;
+            (thumb_height, thumb_top, 0, 0)
+        }
+        ScrollbarMode::History => {
+            let history = pane.history_lines;
+            let total = history.saturating_add(usize::from(pane.content_rows));
+            if total == 0 {
+                return None;
+            }
+            let thumb_height = if history == 0 {
+                1_u16.min(track_height)
+            } else {
+                // Keep a small history from painting a near-full-height bar
+                // that reads as another pane border. Large histories remain
+                // proportional; tiny ones get a clear grip of at most half the
+                // track.
+                let minimum = 2_u16.min(track_height);
+                let maximum = (track_height / 2).max(minimum);
+                let proportional =
+                    (usize::from(track_height) * usize::from(track_height) / total) as u16;
+                proportional.clamp(minimum, maximum)
+            };
+            let span = track_height.saturating_sub(thumb_height);
+            let offset = pane.scroll_offset.min(history);
+            // Offset 0 is the live bottom, so the thumb sits at the bottom.
+            let thumb_top = if history == 0 {
+                span
+            } else {
+                span.saturating_sub(((u64::from(span) * offset as u64) / history as u64) as u16)
+            };
+            (thumb_height, thumb_top, history, offset)
+        }
+    };
     Some(ScrollbarGeometry {
         pane: pane.id,
         track: RectDto {
@@ -470,8 +529,9 @@ fn scrollbar_geometry(pane: &PaneView) -> Option<ScrollbarGeometry> {
         },
         thumb_y: pane.slot.y.saturating_add(thumb_top),
         thumb_height,
-        max_offset: pane.history_lines,
-        scroll_offset: offset,
+        max_offset,
+        scroll_offset,
+        mode,
     })
 }
 
@@ -509,12 +569,19 @@ fn scrollbar_drag_offset(
     (base_offset as i64 - moved).clamp(0, geometry.max_offset as i64) as usize
 }
 
+/// Dragging the app-scroll rail two rows sends one page to the application.
+/// Moving upward pages back through the app's own transcript.
+fn app_scroll_pages(anchor_y: u16, content_y: u16) -> i32 {
+    (i32::from(content_y) - i32::from(anchor_y)) / 2
+}
+
 #[derive(Debug, Clone)]
 struct ScrollDrag {
     geometry: ScrollbarGeometry,
     last_sent: Instant,
     anchor_y: u16,
     base_offset: usize,
+    app_pages: i32,
 }
 
 #[derive(Debug)]
@@ -791,52 +858,182 @@ impl App {
         };
         let pane_id = pane.id;
         let history = pane.history_lines;
-        if history == 0 {
-            self.set_status("No scrollback above this pane yet.");
-            return;
+        let mode = pane_scroll_mode(pane);
+        match mode {
+            Some(ScrollbarMode::History) => {
+                self.selection = None;
+                self.scroll_mode = Some(pane_id);
+                self.set_status(format!(
+                    "Scroll mode: {history} lines. Up/Down, PgUp/PgDn, Home/End, Esc exits."
+                ));
+            }
+            Some(ScrollbarMode::App) => {
+                self.selection = None;
+                self.scroll_mode = Some(pane_id);
+                self.set_status(
+                    "App scroll: the full-screen app owns its history. PgUp/PgDn, Home/End, wheel; Esc exits.",
+                );
+            }
+            None => self.set_status("No scrollback above this pane yet."),
         }
-        self.selection = None;
-        self.scroll_mode = Some(pane_id);
-        self.set_status(format!(
-            "Scroll mode: {history} lines. Up/Down, PgUp/PgDn, Home/End, Esc exits."
-        ));
     }
 
     fn handle_scroll_key(&mut self, key: KeyEvent) {
         let Some(pane_id) = self.scroll_mode else {
             return;
         };
-        let Some((history, rows)) = self
+        let Some((mode, app_cursor, history, rows)) = self
             .frame
             .as_ref()
             .and_then(|frame| frame.panes.iter().find(|pane| pane.id == pane_id))
-            .map(|pane| (pane.history_lines, pane.content_rows))
+            .map(|pane| {
+                (
+                    pane_scroll_mode(pane),
+                    pane.modes & pane_modes::APP_CURSOR != 0,
+                    pane.history_lines,
+                    pane.content_rows,
+                )
+            })
         else {
             self.scroll_mode = None;
             self.set_status("The scrolled pane closed; scroll mode ended.");
             return;
         };
-        let page = i64::from(rows.max(1));
+        match mode {
+            Some(ScrollbarMode::App) => self.handle_app_scroll_key(pane_id, key, app_cursor),
+            Some(ScrollbarMode::History) => {
+                let page = i64::from(rows.max(1));
+                match key.code {
+                    CKeyCode::Esc => {
+                        self.scroll_mode = None;
+                        self.set_status("Scroll mode closed.");
+                    }
+                    CKeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
+                        self.scroll_mode = None;
+                        self.set_status("Scroll mode closed.");
+                    }
+                    CKeyCode::Up => self.scroll_relative(pane_id, 1),
+                    CKeyCode::Down => self.scroll_relative(pane_id, -1),
+                    CKeyCode::PageUp => self.scroll_relative(pane_id, page),
+                    CKeyCode::PageDown => self.scroll_relative(pane_id, -page),
+                    CKeyCode::Home | CKeyCode::Char('g') => {
+                        self.scroll_to(pane_id, history, history);
+                    }
+                    CKeyCode::End | CKeyCode::Char('G') => {
+                        self.scroll_to(pane_id, 0, history);
+                    }
+                    _ => self
+                        .set_status("Scroll mode: Up/Down, PgUp/PgDn, Home/End (g/G), Esc exits."),
+                }
+            }
+            None => {
+                self.scroll_mode = None;
+                self.set_status("Scroll mode closed; this pane no longer has scrollback.");
+            }
+        }
+    }
+
+    /// Forward a standard terminal scroll key to a full-screen application.
+    /// This mirrors how mainstream terminals page an alternate-screen app while
+    /// FACT keeps its own rail visible.
+    fn handle_app_scroll_key(&mut self, pane: u64, key: KeyEvent, app_cursor: bool) {
         match key.code {
             CKeyCode::Esc => {
                 self.scroll_mode = None;
-                self.set_status("Scroll mode closed.");
+                self.set_status("App scroll closed.");
             }
             CKeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
                 self.scroll_mode = None;
-                self.set_status("Scroll mode closed.");
+                self.set_status("App scroll closed.");
             }
-            CKeyCode::Up => self.scroll_relative(pane_id, 1),
-            CKeyCode::Down => self.scroll_relative(pane_id, -1),
-            CKeyCode::PageUp => self.scroll_relative(pane_id, page),
-            CKeyCode::PageDown => self.scroll_relative(pane_id, -page),
-            CKeyCode::Home | CKeyCode::Char('g') => {
-                self.scroll_to(pane_id, history, history);
+            CKeyCode::Up
+            | CKeyCode::Down
+            | CKeyCode::PageUp
+            | CKeyCode::PageDown
+            | CKeyCode::Home
+            | CKeyCode::End => {
+                if let Some(bytes) =
+                    keymap::encode_key(KeyEvent::new(key.code, key.modifiers), app_cursor)
+                {
+                    let _ = self.send(Command::Input { pane, data: bytes });
+                }
             }
-            CKeyCode::End | CKeyCode::Char('G') => {
-                self.scroll_to(pane_id, 0, history);
+            _ => self.set_status("App scroll: PgUp/PgDn, Up/Down, Home/End or wheel; Esc exits."),
+        }
+    }
+
+    fn send_app_scroll(&mut self, pane: u64, up: bool, page: bool) {
+        let app_cursor = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+            .is_some_and(|view| view.modes & pane_modes::APP_CURSOR != 0);
+        let code = if page {
+            if up {
+                CKeyCode::PageUp
+            } else {
+                CKeyCode::PageDown
             }
-            _ => self.set_status("Scroll mode: Up/Down, PgUp/PgDn, Home/End (g/G), Esc exits."),
+        } else if up {
+            CKeyCode::Up
+        } else {
+            CKeyCode::Down
+        };
+        if let Some(bytes) = keymap::encode_key(KeyEvent::new(code, KeyModifiers::NONE), app_cursor)
+        {
+            let _ = self.send(Command::Input { pane, data: bytes });
+        }
+    }
+
+    /// Wheel events over the rail have no meaningful cell coordinate. If the
+    /// app asked for mouse reporting, synthesize the wheel at the centre of its
+    /// viewport; otherwise use the standard alternate-scroll arrow keys.
+    fn send_app_wheel(&mut self, pane: u64, up: bool) {
+        let geometry = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+            .map(|view| {
+                (
+                    app_tracks_mouse(view.modes),
+                    view.content_cols / 2,
+                    view.content_rows / 2,
+                )
+            });
+        match geometry {
+            Some((true, x, y)) => {
+                let data = keymap::sgr_wheel(up, x, y, KeyModifiers::NONE);
+                let _ = self.send(Command::Input { pane, data });
+            }
+            _ => self.send_app_scroll(pane, up, false),
+        }
+    }
+
+    /// Page the app without requiring it to understand PageUp/PageDown. Mouse
+    /// UIs get a short burst of wheel events; keyboard UIs get the page key.
+    fn send_app_page(&mut self, pane: u64, up: bool) {
+        let geometry = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+            .map(|view| {
+                (
+                    app_tracks_mouse(view.modes),
+                    view.content_cols / 2,
+                    view.content_rows / 2,
+                )
+            });
+        match geometry {
+            Some((true, x, y)) => {
+                let data = keymap::sgr_wheel(up, x, y, KeyModifiers::NONE);
+                for _ in 0..5 {
+                    let _ = self.send(Command::Input {
+                        pane,
+                        data: data.clone(),
+                    });
+                }
+            }
+            _ => self.send_app_scroll(pane, up, true),
         }
     }
 
@@ -1587,6 +1784,22 @@ impl App {
                     self.bells.remove(&geometry.pane);
                     let on_thumb = content_y >= geometry.thumb_y
                         && content_y < geometry.thumb_y.saturating_add(geometry.thumb_height);
+                    if geometry.mode.is_app() {
+                        if !on_thumb {
+                            self.send_app_page(geometry.pane, content_y < geometry.thumb_y);
+                        }
+                        self.scroll_drag = Some(ScrollDrag {
+                            geometry,
+                            last_sent: Instant::now() - Duration::from_millis(100),
+                            anchor_y: content_y,
+                            base_offset: 0,
+                            app_pages: 0,
+                        });
+                        return;
+                    }
+                    if geometry.max_offset == 0 {
+                        return;
+                    }
                     let base_offset = if on_thumb {
                         geometry.scroll_offset
                     } else {
@@ -1602,6 +1815,7 @@ impl App {
                         last_sent: Instant::now() - Duration::from_millis(100),
                         anchor_y: content_y,
                         base_offset,
+                        app_pages: 0,
                     });
                     return;
                 }
@@ -1758,47 +1972,60 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                    3
-                } else {
-                    -3
-                };
+                let up = matches!(mouse.kind, MouseEventKind::ScrollUp);
+                let delta = if up { 3 } else { -3 };
                 if let Some(pane) = self.scroll_mode {
-                    let exists = self
+                    let mode = self
                         .frame
                         .as_ref()
-                        .is_some_and(|frame| frame.panes.iter().any(|view| view.id == pane));
-                    if exists {
-                        let _ = self.send(Command::ScrollPane { pane, delta });
-                    } else {
-                        self.scroll_mode = None;
-                        self.set_status("The scrolled pane closed; scroll mode ended.");
+                        .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+                        .and_then(pane_scroll_mode);
+                    match mode {
+                        Some(ScrollbarMode::App) => self.send_app_wheel(pane, up),
+                        Some(ScrollbarMode::History) => {
+                            let _ = self.send(Command::ScrollPane { pane, delta });
+                        }
+                        None => {
+                            self.scroll_mode = None;
+                            self.set_status("The scrolled pane closed; scroll mode ended.");
+                        }
                     }
                     return;
                 }
                 if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
-                    let _ = self.send(Command::ScrollPane {
-                        pane: geometry.pane,
-                        delta,
-                    });
+                    if geometry.mode.is_app() {
+                        self.send_app_wheel(geometry.pane, up);
+                    } else {
+                        let _ = self.send(Command::ScrollPane {
+                            pane: geometry.pane,
+                            delta,
+                        });
+                    }
                     return;
                 }
                 let Some((pane, x, y)) = self.pane_at(mouse.column, content_y) else {
                     return;
                 };
-                let app_mouse = !mouse.modifiers.contains(KeyModifiers::SHIFT)
-                    && self
-                        .frame
-                        .as_ref()
-                        .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-                        .is_some_and(|view| view.modes & pane_modes::MOUSE_CLICK != 0);
-                if app_mouse {
-                    let data = keymap::sgr_wheel(
-                        matches!(mouse.kind, MouseEventKind::ScrollUp),
-                        x,
-                        y,
-                        mouse.modifiers,
-                    );
+                let (app_mouse, mode) = self
+                    .frame
+                    .as_ref()
+                    .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+                    .map(|view| (app_tracks_mouse(view.modes), pane_scroll_mode(view)))
+                    .unwrap_or((false, None));
+                if mode == Some(ScrollbarMode::App) {
+                    if app_mouse {
+                        let mut modifiers = mouse.modifiers;
+                        modifiers.remove(KeyModifiers::SHIFT);
+                        let data = keymap::sgr_wheel(up, x, y, modifiers);
+                        let _ = self.send(Command::Input { pane, data });
+                    } else {
+                        // The app owns the viewport but did not request mouse
+                        // reporting. Standard terminal alternate-scroll keys are
+                        // the portable way to page it.
+                        self.send_app_wheel(pane, up);
+                    }
+                } else if app_mouse && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    let data = keymap::sgr_wheel(up, x, y, mouse.modifiers);
                     let _ = self.send(Command::Input { pane, data });
                 } else {
                     let _ = self.send(Command::ScrollPane { pane, delta });
@@ -1829,6 +2056,35 @@ impl App {
     }
 
     fn scroll_drag_to(&mut self, drag: &ScrollDrag, content_y: u16) {
+        if drag.geometry.mode.is_app() {
+            let still_app = self
+                .frame
+                .as_ref()
+                .and_then(|frame| {
+                    frame
+                        .panes
+                        .iter()
+                        .find(|view| view.id == drag.geometry.pane)
+                })
+                .is_some_and(|view| pane_scroll_mode(view) == Some(ScrollbarMode::App));
+            if !still_app {
+                return;
+            }
+            let pages = app_scroll_pages(drag.anchor_y, content_y);
+            // Keep a single mouse tick bounded; a fast drag can otherwise send
+            // dozens of page keys before the daemon has repainted once.
+            let next = pages.clamp(drag.app_pages.saturating_sub(6), drag.app_pages + 6);
+            let delta = next - drag.app_pages;
+            if delta != 0 {
+                for _ in 0..delta.unsigned_abs() {
+                    self.send_app_page(drag.geometry.pane, delta < 0);
+                }
+                if let Some(active) = &mut self.scroll_drag {
+                    active.app_pages = next;
+                }
+            }
+            return;
+        }
         let offset =
             scrollbar_drag_offset(&drag.geometry, drag.anchor_y, drag.base_offset, content_y);
         let _ = self.send(Command::SetScrollOffset {
@@ -2020,9 +2276,9 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
         "prefix+C, or click + when the tab strip is visible".into(),
     ));
     lines.push((
-        "Scrollback".into(),
+        "Scrollback / app scroll".into(),
         format!(
-            "wheel, Shift+wheel, or {} then arrows / PgUp / PgDn",
+            "wheel or Shift+wheel; {} then arrows / PgUp / PgDn",
             keys.describe("scroll_mode")
         ),
     ));
@@ -2286,11 +2542,48 @@ mod tests {
     }
 
     #[test]
+    fn scrollbar_remains_visible_for_small_and_empty_history() {
+        let mut view = test_view(40);
+        view.history_lines = 0;
+        let idle = scrollbar_geometry(&view).expect("idle panes keep the rail");
+        assert_eq!(idle.mode, ScrollbarMode::History);
+        assert_eq!(idle.max_offset, 0);
+        assert_eq!(idle.thumb_height, 1);
+        assert_eq!(
+            idle.thumb_y,
+            idle.track.y + idle.track.height - idle.thumb_height
+        );
+
+        view.history_lines = 2;
+        let small = scrollbar_geometry(&view).expect("small history keeps the rail");
+        assert_eq!(small.mode, ScrollbarMode::History);
+        assert_eq!(small.max_offset, 2);
+        assert!(small.thumb_height >= 2);
+        assert!(small.thumb_height < small.track.height);
+    }
+
+    #[test]
+    fn full_screen_panes_use_an_app_scroll_rail() {
+        let mut view = test_view(40);
+        view.history_lines = 0;
+        view.modes = pane_modes::ALT_SCREEN;
+        assert_eq!(pane_scroll_mode(&view), Some(ScrollbarMode::App));
+        let app = scrollbar_geometry(&view).expect("full-screen panes keep the rail");
+        assert_eq!(app.mode, ScrollbarMode::App);
+        assert_eq!(app.max_offset, 0);
+        assert_eq!(app.thumb_height, 3);
+        assert_eq!(
+            app.thumb_y,
+            app.track.y + (app.track.height.saturating_sub(app.thumb_height)) / 2
+        );
+        assert_eq!(app_scroll_pages(10, 10), 0);
+        assert_eq!(app_scroll_pages(10, 8), -1);
+        assert_eq!(app_scroll_pages(10, 12), 1);
+    }
+
+    #[test]
     fn scrollbar_maps_pointer_to_scrollback_offset() {
         let mut view = test_view(40);
-        view.history_lines = 2;
-        view.content_rows = 10;
-        assert!(scrollbar_geometry(&view).is_none());
         view.history_lines = 100;
         view.content_rows = 10;
         view.slot.height = 11;

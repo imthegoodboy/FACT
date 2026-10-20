@@ -11,8 +11,9 @@ use ratatui::layout::Position;
 
 use crate::{
     action_label, filtered_palette, fit_text as fit, help_lines, minimized_tray_rect, new_tab_rect,
-    palette_items, scrollbar_geometry, tab_ranges, utc_clock, App, ContextState, HelpState,
-    Overlay, PaletteState, PromptKind, PromptState, SearchState, SessionsState,
+    palette_items, pane_scroll_mode, scrollbar_geometry, tab_ranges, utc_clock, App, ContextState,
+    HelpState, Overlay, PaletteState, PromptKind, PromptState, ScrollbarMode, SearchState,
+    SessionsState,
 };
 
 impl App {
@@ -186,8 +187,9 @@ impl App {
 
         self.render_cursor(frame, pane, content);
         self.render_scrollbar(frame, main, pane);
-        // A pane with scrollback signals a bell through an amber scrollbar
-        // thumb. Only panes without a track use the reserved top-right cell.
+        // A pane with a scrollbar rail signals a bell through an amber thumb.
+        // Only panes too narrow or short for a rail use the reserved top-right
+        // cell.
         if bell && scrollbar_geometry(pane).is_none() && slot.width > 0 && slot.height > 0 {
             let buffer = frame.buffer_mut();
             buffer[(slot.x + slot.width - 1, slot.y)]
@@ -296,16 +298,36 @@ impl App {
         let start = main.y.saturating_add(thumb_top).max(track.y);
         let end = main.y.saturating_add(thumb_bottom).min(track.bottom());
         let bell = self.bells.contains(&pane.id);
+        let thumb_fg = if bell {
+            self.theme.warning
+        } else if pane.focused {
+            self.theme.accent
+        } else {
+            self.theme.title_fg
+        };
+        if geometry.mode.is_app() {
+            // A full-screen app owns its scroll position. Draw a centred grip
+            // with paging caps instead of a lying thumb position.
+            let cap_fg = if bell {
+                self.theme.warning
+            } else if pane.focused {
+                self.theme.accent
+            } else {
+                self.theme.muted
+            };
+            if track.height >= 3 {
+                buffer[(track.x, track.y)]
+                    .set_symbol("▴")
+                    .set_style(Style::default().bg(self.theme.title_bg).fg(cap_fg));
+                buffer[(track.x, track.bottom().saturating_sub(1))]
+                    .set_symbol("▾")
+                    .set_style(Style::default().bg(self.theme.title_bg).fg(cap_fg));
+            }
+        }
         for y in start..end {
-            buffer[(track.x, y)].set_symbol("▐").set_style(
-                Style::default().bg(self.theme.terminal_bg).fg(if bell {
-                    self.theme.warning
-                } else if pane.focused {
-                    self.theme.accent
-                } else {
-                    self.theme.title_fg
-                }),
-            );
+            buffer[(track.x, y)]
+                .set_symbol("▐")
+                .set_style(Style::default().bg(self.theme.terminal_bg).fg(thumb_fg));
         }
     }
 
@@ -384,19 +406,25 @@ impl App {
                 right_edge = tray_x;
             }
 
-            if let Some((offset, history)) = self.scroll_mode.and_then(|pane_id| {
+            if let Some((mode, offset, history)) = self.scroll_mode.and_then(|pane_id| {
                 self.frame
                     .as_ref()?
                     .panes
                     .iter()
                     .find(|pane| pane.id == pane_id)
-                    .map(|pane| (pane.scroll_offset, pane.history_lines))
+                    .and_then(|pane| {
+                        pane_scroll_mode(pane)
+                            .map(|mode| (mode, pane.scroll_offset, pane.history_lines))
+                    })
             }) {
                 let available = right_edge.saturating_sub(area.x);
-                let message = fit(
-                    &format!(" SCROLL {offset}/{history}  Esc "),
-                    usize::from(available),
-                );
+                let message = match mode {
+                    ScrollbarMode::History => {
+                        format!(" SCROLL {offset}/{history}  Esc ")
+                    }
+                    ScrollbarMode::App => " APP SCROLL  PgUp/PgDn  Esc ".to_string(),
+                };
+                let message = fit(&message, usize::from(available));
                 let width = (message.chars().count() as u16).min(available);
                 let message_x = right_edge.saturating_sub(width);
                 if width > 0 {

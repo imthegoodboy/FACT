@@ -7,7 +7,7 @@ running when the UI detaches or the terminal window closes.
 FACT is not a wrapper around Windows Terminal or tmux. It owns its ConPTY
 processes, terminal models, layout tree and session database.
 
-> **Status:** v0.3.0. Windows 11 is the primary, continuously tested target.
+> **Status:** v0.3.1. Windows 11 is the primary, continuously tested target.
 > Windows 10 1809+ is intended to work but is not yet verified; see
 > [Compatibility](#compatibility). Release artifacts are produced only from
 > version tags after every gate in this repository passes.
@@ -94,13 +94,33 @@ right-click a pane for split, maximize/show-all, minimize, restart, close and
 copy. `Alt+M` maximizes the focused pane, `Alt+N` restores the full grid, and
 `Alt+T` terminates the active grid after confirmation. `Ctrl+Space` then `[`
 enters scroll mode for the focused pane; use arrows, PgUp/PgDn or Home/End and
-press Esc to return. Shift+wheel scrolls FACT's history even when an application
-captures the mouse. Use `Alt+N` when a narrow window would otherwise leave you in
+press Esc to return. In a shell this browses FACT's searchable history. A
+full-screen app owns its viewport, so the same gestures page the app's own
+transcript. Use `Alt+N` when a narrow window would otherwise leave you in
 focused-pane mode. `Ctrl+M` is Enter in terminal input, so it is not available as
 a direct shortcut.
 Mouse wheel scrollback works in shells, and the scrollbar can be clicked or
 dragged. `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` remain available alongside `Ctrl+Insert` / `Shift+Insert`.
+
+### Full-screen apps and agent CLIs
+
+The pane rail is always visible. A shell with no history shows a one-cell thumb
+at the bottom; a full-screen app shows a centred grip with `▴`/`▾` paging caps.
+When a full-screen app has no FACT history, the wheel, Shift+wheel, the rail and
+`Ctrl+Space` then `[` all page the app. Its own transcript is the source of truth
+in that mode.
+
+Claude Code, Codex and OpenCode use the alternate screen by default. For a true
+terminal history with FACT search and a position thumb, launch them in their
+main-screen/inline mode:
+
+- **Codex:** `codex --no-alt-screen`
+- **Claude Code:** run `/tui default` once to use its classic main-screen renderer
+- **OpenCode:** set `OTUI_USE_ALTERNATE_SCREEN=false` before launching it
+
+Their output then flows into FACT's scrollback instead of a private alternate
+screen.
 
 Running `fact` inside a FACT pane is rejected with a clear message instead of
 nesting a second UI into the same terminal. Use a separate terminal window for a
@@ -222,7 +242,7 @@ original shell processes and their scrollback untouched.
   GitHub's current Windows Server image, which is not Windows 11 itself.
 - **Windows 10 1809+:** expected to work because FACT uses ConPTY and Win32 APIs
   available since 1809. It has not been verified on a physical Windows 10
-  machine, so v0.3.0 does not claim Windows 10 support.
+  machine, so v0.3.1 does not claim Windows 10 support.
 - **Windows on ARM:** not tested.
 - **Linux/macOS:** not supported. The IPC and ConPTY layers are Windows-only.
 

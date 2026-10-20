@@ -28,7 +28,7 @@ The full threat model, controls and limitations are in
 - administrators and SYSTEM can bypass file and pipe ACLs;
 - terminal output may contain secrets but is kept in daemon memory, not SQLite;
 - legacy v0.2 databases are migrated to clear old snapshot columns;
-- release artifacts are checksummed but not code-signed in v0.3.0.
+- release artifacts are checksummed but not code-signed in v0.3.1.
 
 ## Token rotation
 
