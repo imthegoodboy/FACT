@@ -437,6 +437,10 @@ fn split_tabs_focus_and_search_drive_real_panes() {
         frame.panes.len() == 1 && frame.panes[0].cells.is_some()
     })
     .expect("initial frame");
+    assert_eq!(
+        first.viewport.slot_rows, 35,
+        "a one-tab session must use the full viewport height"
+    );
     let original_pane = first.panes[0].id;
     let original_tab = first.active_tab;
 
@@ -496,6 +500,10 @@ fn split_tabs_focus_and_search_drive_real_panes() {
         frame.tabs.len() == 2 && frame.session.pane_count == 3
     })
     .expect("new tab frame");
+    assert_eq!(
+        two_tabs.viewport.slot_rows, 34,
+        "the tab strip must reserve exactly one row"
+    );
     let new_tab = two_tabs.active_tab;
     let active_tab = two_tabs.active_tab;
 

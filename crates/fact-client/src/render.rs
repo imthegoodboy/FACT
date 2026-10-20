@@ -1,21 +1,18 @@
 //! Rendering for the FACT terminal UI.
 
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use fact_protocol::{
-    cell_flags, friendly_title, semantic_color, CellDto, ColorDto, CursorShape, PaneView,
-};
+use fact_protocol::{cell_flags, semantic_color, CellDto, ColorDto, CursorShape, PaneView};
 use ratatui::layout::Position;
 
 use crate::{
     action_label, filtered_palette, fit_text as fit, help_lines, minimized_tray_rect, new_tab_rect,
-    palette_items, pane_button_strip, pane_buttons, scrollbar_geometry, tab_ranges, utc_clock, App,
-    ColdState, ContextState, HelpState, Overlay, PaletteState, PromptKind, PromptState,
-    SearchState, SessionsState,
+    palette_items, scrollbar_geometry, tab_ranges, utc_clock, App, ColdState, ContextState,
+    HelpState, Overlay, PaletteState, PromptKind, PromptState, SearchState, SessionsState,
 };
 
 impl App {
@@ -29,31 +26,25 @@ impl App {
             buffer.set_style(area, Style::default().bg(self.theme.bg).fg(self.theme.fg));
         }
 
-        let tabs_height = u16::from(area.height >= 1);
-        let status_height = u16::from(area.height >= 2);
+        // The tab strip is the only persistent chrome, and it appears only when
+        // the session actually has more than one tab. A normal grid is entirely
+        // terminal content.
+        let tabs_height = u16::from(self.tabs_visible());
         let tabs = Rect::new(area.x, area.y, area.width, tabs_height);
-        let status = Rect::new(
-            area.x,
-            area.bottom().saturating_sub(status_height),
-            area.width,
-            status_height,
-        );
         let main = Rect::new(
             area.x,
             area.y + tabs_height,
             area.width,
-            area.height
-                .saturating_sub(tabs_height)
-                .saturating_sub(status_height),
+            area.height.saturating_sub(tabs_height),
         );
 
-        self.render_tabs(frame, tabs);
+        if tabs_height > 0 {
+            self.render_tabs(frame, tabs);
+        }
         if self.frame.is_some() {
             self.render_panes(frame, main);
-        } else {
-            self.render_splash(frame, main);
         }
-        self.render_status(frame, status);
+        self.render_screen_overlays(frame, area);
 
         if self.overlay.is_some() {
             self.render_overlay(frame, area);
@@ -67,14 +58,6 @@ impl App {
         let buffer = frame.buffer_mut();
         buffer.set_style(area, Style::default().bg(self.theme.tab_bg));
         let Some(frame_data) = &self.frame else {
-            let text = format!(" {} ", self.info.session.name);
-            buffer.set_stringn(
-                area.x.saturating_add(1),
-                area.y,
-                text,
-                usize::from(area.width.saturating_sub(1)),
-                Style::default().fg(self.theme.muted).bg(self.theme.tab_bg),
-            );
             return;
         };
 
@@ -122,45 +105,17 @@ impl App {
         }
     }
 
-    fn render_splash(&self, frame: &mut Frame, area: Rect) {
-        if area.height == 0 {
-            return;
-        }
-        let lines = vec![
-            Line::from(Span::styled(
-                "FACT",
-                Style::default()
-                    .fg(self.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                format!("session {}", self.info.session.name),
-                Style::default().fg(self.theme.fg),
-            )),
-            Line::from(Span::styled(
-                "Connecting to the daemon event stream…",
-                Style::default().fg(self.theme.muted),
-            )),
-        ];
-        let paragraph = Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .style(Style::default().bg(self.theme.bg).fg(self.theme.fg));
-        frame.render_widget(paragraph, area);
-    }
-
     fn render_panes(&self, frame: &mut Frame, main: Rect) {
         let Some(frame_data) = &self.frame else {
             return;
         };
-        let zoomed = self.active_tab().is_some_and(|tab| tab.zoomed);
         for pane in &frame_data.panes {
-            self.render_pane(frame, main, pane, zoomed);
+            self.render_pane(frame, main, pane);
         }
         self.render_splits(frame, main, frame_data);
     }
 
-    fn render_pane(&self, frame: &mut Frame, main: Rect, pane: &PaneView, zoomed: bool) {
+    fn render_pane(&self, frame: &mut Frame, main: Rect, pane: &PaneView) {
         let slot = Rect::new(
             main.x.saturating_add(pane.slot.x),
             main.y.saturating_add(pane.slot.y),
@@ -172,107 +127,30 @@ impl App {
             return;
         }
 
-        let title_bg = if pane.focused {
-            self.theme.title_focus_bg
-        } else {
-            self.theme.title_bg
-        };
         let bell = self.bells.contains(&pane.id);
-        let title_fg = if bell {
-            self.theme.warning
-        } else if pane.focused {
-            self.theme.title_focus_fg
-        } else {
-            self.theme.title_fg
-        };
-        let title_style =
-            Style::default()
-                .bg(title_bg)
-                .fg(title_fg)
-                .add_modifier(if pane.focused {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                });
-
-        let buttons = pane_buttons(slot.width);
-        let buttons_x = buttons.first().map(|button| button.x).unwrap_or(slot.width);
-        {
-            let buffer = frame.buffer_mut();
-            let title_row = Rect::new(slot.x, slot.y, slot.width, 1);
-            buffer.set_style(title_row, Style::default().bg(title_bg).fg(title_fg));
-            let mut marker = if pane.focused { "▌" } else { " " }.to_string();
-            marker.push(' ');
-            let (next, _) = buffer.set_stringn(
-                slot.x,
-                slot.y,
-                marker,
-                2,
-                Style::default().bg(title_bg).fg(if bell {
-                    self.theme.warning
-                } else {
-                    self.theme.accent
-                }),
-            );
-            let title_width = buttons_x
-                .saturating_sub(next.saturating_sub(slot.x))
-                .saturating_sub(1);
-            let title = fit(&friendly_title(&pane.title), usize::from(title_width));
-            buffer.set_stringn(next, slot.y, title, usize::from(title_width), title_style);
-
-            if !buttons.is_empty() {
-                let strip = pane_button_strip(zoomed);
-                buffer.set_stringn(
-                    slot.x.saturating_add(buttons_x),
-                    slot.y,
-                    strip,
-                    usize::from(slot.width.saturating_sub(buttons_x)),
-                    Style::default().bg(title_bg).fg(if pane.focused {
-                        self.theme.title_fg
-                    } else {
-                        self.theme.muted
-                    }),
-                );
-            }
-        }
-
-        if slot.height < 2 {
-            return;
-        }
         let content = Rect::new(
             slot.x,
-            slot.y + 1,
+            slot.y,
             slot.width.saturating_sub(1).min(pane.content_cols),
-            slot.height.saturating_sub(1).min(pane.content_rows),
+            slot.height.min(pane.content_rows),
         )
         .intersection(main);
-        if content.width == 0 || content.height == 0 {
-            return;
-        }
-
         {
             let buffer = frame.buffer_mut();
             buffer.set_style(
-                content,
+                slot,
                 Style::default()
                     .bg(self.theme.terminal_bg)
                     .fg(self.theme.terminal_fg),
             );
-            for y in content.y..content.bottom() {
-                for x in content.x..content.right() {
+            for y in slot.y..slot.bottom() {
+                for x in slot.x..slot.right() {
                     buffer[(x, y)].set_symbol(" ");
                 }
             }
-            let scroll_column = Rect::new(
-                slot.x.saturating_add(slot.width).saturating_sub(1),
-                content.y,
-                1,
-                content.height,
-            );
-            buffer.set_style(scroll_column, Style::default().bg(self.theme.terminal_bg));
-            for y in scroll_column.y..scroll_column.bottom() {
-                buffer[(scroll_column.x, y)].set_symbol(" ");
-            }
+        }
+        if content.width == 0 || content.height == 0 {
+            return;
         }
 
         if let Some(buffer) = self.buffers.get(&pane.id) {
@@ -304,26 +182,20 @@ impl App {
                     buf[(sx, sy)].set_symbol(&symbol).set_style(style);
                 }
             }
-        } else {
-            let buffer = frame.buffer_mut();
-            let message = "waiting for terminal output…";
-            let x = content
-                .x
-                .saturating_add(content.width.saturating_sub(message.chars().count() as u16) / 2);
-            let y = content.y + content.height / 2;
-            buffer.set_stringn(
-                x,
-                y,
-                message,
-                usize::from(content.width),
-                Style::default()
-                    .fg(self.theme.muted)
-                    .bg(self.theme.terminal_bg),
-            );
         }
 
         self.render_cursor(frame, pane, content);
         self.render_scrollbar(frame, main, pane);
+        if bell && slot.width > 0 && slot.height > 0 {
+            let buffer = frame.buffer_mut();
+            buffer[(slot.x + slot.width - 1, slot.y)]
+                .set_symbol("•")
+                .set_style(
+                    Style::default()
+                        .bg(self.theme.terminal_bg)
+                        .fg(self.theme.warning),
+                );
+        }
 
         if !pane.alive {
             let code = pane
@@ -428,7 +300,7 @@ impl App {
                     .fg(if pane.focused {
                         self.theme.accent
                     } else {
-                        self.theme.muted
+                        self.theme.title_fg
                     }),
             );
         }
@@ -479,91 +351,64 @@ impl App {
         }
     }
 
-    fn render_status(&self, frame: &mut Frame, area: Rect) {
-        if area.height == 0 {
+    /// Transient feedback is drawn over the bottom row instead of reserving a
+    /// permanent status bar. Nothing is shown while the UI is simply idle.
+    fn render_screen_overlays(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 || area.width == 0 {
             return;
         }
-        let buffer = frame.buffer_mut();
-        buffer.set_style(
-            area,
-            Style::default()
-                .bg(self.theme.status_bg)
-                .fg(self.theme.status_fg),
-        );
-
-        let name = match &self.frame {
-            Some(frame_data) => frame_data.session.name.clone(),
-            None => self.info.session.name.clone(),
-        };
-        let name = format!(" {name} ");
-        let (mut x, _) = buffer.set_stringn(
-            area.x,
-            area.y,
-            &name,
-            usize::from(area.width),
-            Style::default()
-                .bg(self.theme.status_bg)
-                .fg(self.theme.fg)
-                .add_modifier(Modifier::BOLD),
-        );
-        if self.prefix_armed && x.saturating_add(8) <= area.right() {
-            let (next, _) = buffer.set_stringn(
-                x,
-                area.y,
-                " PREFIX ",
-                8,
-                Style::default()
-                    .bg(self.theme.warning)
-                    .fg(self.theme.bg)
-                    .add_modifier(Modifier::BOLD),
-            );
-            x = next;
-        }
-
+        let y = area.bottom().saturating_sub(1);
         let minimized = self
             .frame
             .as_ref()
             .map(|frame| frame.minimized.len())
             .unwrap_or(0);
         let mut right_edge = area.right();
-        if let Some(tray) = minimized_tray_rect(area.width, minimized) {
-            let tray_x = area.x.saturating_add(tray.x);
-            buffer.set_stringn(
-                tray_x,
-                area.y,
-                format!("▣ {minimized} "),
-                usize::from(tray.width),
-                Style::default()
-                    .bg(self.theme.title_bg)
-                    .fg(self.theme.warning)
-                    .add_modifier(Modifier::BOLD),
-            );
-            right_edge = tray_x;
-        }
+        {
+            let buffer = frame.buffer_mut();
+            if let Some(tray) = minimized_tray_rect(area.width, area.height, minimized) {
+                let tray_x = area.x.saturating_add(tray.x);
+                buffer.set_stringn(
+                    tray_x,
+                    y,
+                    format!("▾ {minimized} "),
+                    usize::from(tray.width),
+                    Style::default()
+                        .bg(self.theme.status_bg)
+                        .fg(self.theme.warning)
+                        .add_modifier(Modifier::BOLD),
+                );
+                right_edge = tray_x;
+            }
 
-        let (message, style) = if let Some((message, _)) = &self.status {
-            (
-                format!(" {message} "),
-                Style::default()
-                    .bg(self.theme.status_bg)
-                    .fg(self.theme.warning),
-            )
-        } else if self.frame.is_none() {
-            (
-                " connecting ".to_string(),
-                Style::default()
-                    .bg(self.theme.status_bg)
-                    .fg(self.theme.muted),
-            )
-        } else {
-            return;
-        };
-        let available = right_edge.saturating_sub(x);
-        let message = fit(&message, usize::from(available));
-        let width = (message.chars().count() as u16).min(available);
-        let message_x = right_edge.saturating_sub(width);
-        if width > 0 && message_x >= x {
-            buffer.set_stringn(message_x, area.y, message, usize::from(width), style);
+            if let Some((message, _)) = &self.status {
+                let available = right_edge.saturating_sub(area.x);
+                let message = fit(&format!(" {message} "), usize::from(available));
+                let width = (message.chars().count() as u16).min(available);
+                let message_x = right_edge.saturating_sub(width);
+                if width > 0 {
+                    buffer.set_stringn(
+                        message_x,
+                        y,
+                        message,
+                        usize::from(width),
+                        Style::default()
+                            .bg(self.theme.status_bg)
+                            .fg(self.theme.status_fg),
+                    );
+                }
+            }
+
+            if self.prefix_armed {
+                for dx in 0..2u16 {
+                    let x = area.x.saturating_add(dx);
+                    if x < right_edge {
+                        buffer[(x, y)]
+                            .set_symbol(" ")
+                            .set_style(Style::default().bg(self.theme.accent));
+                    }
+                }
+            }
         }
     }
 

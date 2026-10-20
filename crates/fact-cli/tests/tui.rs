@@ -17,8 +17,9 @@ use fact_term::{TerminalEventSink, TerminalModel};
 use serde_json::Value;
 
 const SESSION: &str = "ui-smoke";
-// Stable pane-header chrome: split V/H, minimize, maximize/restore, close.
-const PANE_CHROME: &str = "V H _ ^ X";
+// The raw ConPTY stream positions the cursor between "PS" and the space in the
+// PowerShell prompt, so wait for the stable prefix rather than "PS ".
+const SHELL_PROMPT: &str = "PS";
 
 fn screen_text(output: &[u8], cols: u16, rows: u16) -> String {
     let mut term = TerminalModel::new(cols, rows, 0, TerminalEventSink::new());
@@ -174,12 +175,7 @@ fn tui_cold_recovers_and_starts_new_shells() {
     let first = PtyProcess::spawn(options).expect("start the first FACT TUI in ConPTY");
     let mut output = Vec::new();
     assert!(
-        wait_for(&first, &mut output, COLD_SESSION, Duration::from_secs(30)),
-        "the first TUI did not start:\n{}",
-        tail(&output)
-    );
-    assert!(
-        wait_for(&first, &mut output, PANE_CHROME, Duration::from_secs(30)),
+        wait_for(&first, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
         "the first TUI did not render a live pane:\n{}",
         tail(&output)
     );
@@ -264,6 +260,100 @@ fn tui_cold_recovers_and_starts_new_shells() {
 }
 
 #[test]
+fn grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session() {
+    let home = TestHome::new("tui-grid-flag");
+
+    // Leave a one-pane session behind, and make it the most recently used one.
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--session".into(),
+        "saved-one".into(),
+        "--grid".into(),
+        "1".into(),
+    ];
+    let first = PtyProcess::spawn(options).expect("start the one-pane session");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(&first, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
+        "the one-pane session did not start:\n{}",
+        tail(&output)
+    );
+    first.write(b"\x02d").expect("detach the one-pane session");
+    let exit = first.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the one-pane TUI did not detach:\n{}",
+        tail(&output)
+    );
+
+    // `--grid 8` must create/attach `grid-8`, not attach to `saved-one` and
+    // silently ignore the requested grid.
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--grid".into(),
+        "8".into(),
+    ];
+    let grid_tui = PtyProcess::spawn(options).expect("start the grid session");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(
+            &grid_tui,
+            &mut output,
+            SHELL_PROMPT,
+            Duration::from_secs(30)
+        ),
+        "the grid session did not render a live pane:\n{}",
+        tail(&output)
+    );
+
+    let sessions = home.run(&["sessions", "--json"]);
+    assert!(
+        sessions.status.success(),
+        "fact sessions failed: {}",
+        String::from_utf8_lossy(&sessions.stderr)
+    );
+    let parsed: Value = serde_json::from_slice(&sessions.stdout).expect("sessions JSON");
+    let summaries = parsed.as_array().expect("sessions array");
+    let grid = summaries
+        .iter()
+        .find(|session| session.get("name").and_then(Value::as_str) == Some("grid-8"))
+        .expect("--grid 8 did not start the grid-8 session");
+    assert_eq!(
+        grid.get("pane_count").and_then(Value::as_u64),
+        Some(8),
+        "the grid session must have eight panes"
+    );
+    assert_eq!(
+        grid.get("tab_count").and_then(Value::as_u64),
+        Some(1),
+        "a fresh grid must have one tab"
+    );
+    let saved = summaries
+        .iter()
+        .find(|session| session.get("name").and_then(Value::as_str) == Some("saved-one"))
+        .expect("the saved one-pane session disappeared");
+    assert_eq!(
+        saved.get("pane_count").and_then(Value::as_u64),
+        Some(1),
+        "--grid 8 must not modify the saved session"
+    );
+
+    grid_tui.write(b"\x02d").expect("detach the grid TUI");
+    let exit = grid_tui.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the grid TUI did not detach:\n{}",
+        tail(&output)
+    );
+}
+
+#[test]
 fn tui_renders_accepts_input_and_detaches_cleanly() {
     let home = TestHome::new("tui");
     let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
@@ -279,25 +369,29 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
     let mut output = Vec::new();
 
     assert!(
-        wait_for(&process, &mut output, SESSION, Duration::from_secs(30)),
-        "the TUI did not start:\n{}",
-        tail(&output)
-    );
-    assert!(
-        wait_for(&process, &mut output, PANE_CHROME, Duration::from_secs(30)),
+        wait_for(&process, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
         "the TUI did not render a live pane:\n{}",
         tail(&output)
     );
     thread::sleep(Duration::from_millis(700));
     drain(&process, &mut output);
-    let screen = screen_text(&output, 120, 35);
+    let mut screen = screen_text(&output, 120, 35);
+    let grid_deadline = Instant::now() + Duration::from_secs(20);
+    while screen.matches("PS").count() < 8 && Instant::now() < grid_deadline {
+        thread::sleep(Duration::from_millis(100));
+        drain(&process, &mut output);
+        screen = screen_text(&output, 120, 35);
+    }
     assert!(
-        screen.contains(PANE_CHROME),
-        "pane header controls missing from screen:\n{screen}"
+        screen.matches("PS").count() >= 8,
+        "expected eight visible shells, got {}:\n{screen}",
+        screen.matches("PS").count()
     );
     for noisy in [
+        "V H _ ^ X",
         "pid ",
         "WindowsApps",
+        SESSION,
         " panes ",
         "focused mode",
         "fact-dark",

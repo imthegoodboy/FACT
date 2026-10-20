@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped when command/frame variants change in a way that a previous daemon
 /// cannot decode. Version 2 added the direct scroll-offset command.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
@@ -339,7 +339,7 @@ pub struct PaneView {
     pub pid: u32,
     pub alive: bool,
     pub exit_code: Option<i32>,
-    /// Slot including the one-line pane title bar.
+    /// Slot occupied by the pane. Terminal content starts at the slot origin.
     pub slot: RectDto,
     pub content_cols: u16,
     pub content_rows: u16,
@@ -588,7 +588,7 @@ pub fn sanitize_title(input: &str) -> String {
 }
 
 /// Turn the noisy title a shell publishes (often a full executable path) into a
-/// short label that is safe to show in a tab or pane header.
+/// short label that is safe to show on the tab strip.
 pub fn friendly_title(input: &str) -> String {
     // Strip the path before applying the 80-character display cap: Windows
     // shell titles routinely start with a long WindowsApps path ending in the

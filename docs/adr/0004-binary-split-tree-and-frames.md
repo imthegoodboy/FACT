@@ -17,8 +17,9 @@ could be client-side or server-side.
 
 Represent each tab as a binary split tree. Leaves are pane IDs; internal nodes
 carry an axis, a normalized ratio and children. Grids are built as balanced trees.
-Layout produces one-cell gutters and a one-line title row per pane. The daemon
-owns the tree; the client renders the resulting rectangles.
+Layout produces one-cell gutters and reserves the rightmost column of each pane
+for its scrollbar; there is no pane title row. The daemon owns the tree; the
+client renders the resulting rectangles.
 
 Frame delivery:
 

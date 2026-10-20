@@ -43,7 +43,7 @@ prefix = "ctrl+space"
 theme = "fact-dark"
 
 scrollback_lines = 8000
-min_pane_width = 24
+min_pane_width = 16
 min_pane_height = 5
 mouse = true
 confirm_close = true
@@ -65,7 +65,7 @@ default_profile = "auto"
 | `prefix` | `ctrl+space` | Chord that arms FACT commands. May not use the literal word `prefix`. |
 | `theme` | `fact-dark` | `fact-dark`, `fact-light`, `dracula`, `nord`, `gruvbox`. |
 | `scrollback_lines` | `8000` | 100-100000 retained lines per pane. |
-| `min_pane_width` | `24` | At least 12 columns per pane before focused-pane mode. |
+| `min_pane_width` | `16` | At least 12 columns per pane before focused-pane mode. The default fits a 4x2 grid in an 80-column window. |
 | `min_pane_height` | `5` | At least 3 rows per pane before focused-pane mode. |
 | `mouse` | `true` | Enable mouse capture, clicks and split dragging. |
 | `confirm_close` | `true` | Ask before closing a pane, tab or the UI with live shells. |
@@ -114,7 +114,7 @@ enabled = false
 | `args` | Exact argument list; no shell expansion is performed by FACT. |
 | `cwd` | Initial directory. Supports `~` and `%VARIABLE%`. Defaults to the user profile. |
 | `env` | Extra environment variables, merged over global `[env]`. |
-| `title` | Label shown in tab/pane chrome instead of the executable name. |
+| `title` | Label shown on the tab strip instead of the executable name. |
 | `enabled` | Defaults to `true`. Disabled profiles cannot be selected. |
 
 Profile names are 1-64 ASCII letters, digits, `-`, `_` or `.`. Select one with
@@ -200,11 +200,14 @@ Additional interaction that is not a configurable chord:
 - Drag a split gutter with the mouse to resize.
 - Drag in pane content to select text; `Shift`+drag selects even when the
   application has requested mouse reporting.
-- Click a tab to select it and click a pane title or pane body to focus it.
-- Pane header buttons: `V` splits right, `H` splits down, `_` minimizes, `^`
-  maximizes and `v` restores, and `X` closes. The `+` button adds a tab.
+- Click a pane body to focus it. A single-tab session has no tab strip; with two
+  or more tabs, click a tab to select it and click the trailing `+` to add one.
+- Right-click a pane for split, zoom, minimize, new tab, rename, search, restart,
+  close and copy actions.
 - Click or drag the scrollbar to move through scrollback. The mouse wheel is
   forwarded to the focused application when it requested mouse reporting.
+- When panes are minimized, a small `▾ N` tray appears at the bottom-right; the
+  same tray is clickable to restore them.
 - `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Insert` /
   `Shift+Insert` are accepted aliases outside the remappable action table.
 

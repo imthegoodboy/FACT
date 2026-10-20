@@ -13,7 +13,7 @@ Download the zip and `SHA256SUMS.txt` from the
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 # Pin a version:
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version v0.2.0
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version v0.2.1
 
 # Custom location, no PATH change:
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
@@ -35,10 +35,10 @@ Existing sessions remain in `%LOCALAPPDATA%\FACT`. A replaced daemon is cold
 recovered on the next launch; saved output is restored but old processes are
 gone by design.
 
-v0.2.0 uses wire protocol 2. The installer stops the previous daemon before
+v0.2.1 uses wire protocol 3. The installer stops the previous daemon before
 replacing the binary. If you replace `fact.exe` manually, run `fact shutdown`
-with the old binary first; a v0.2.0 client refuses to attach to a daemon speaking
-the older protocol.
+with the old binary first; a v0.2.1 client refuses to attach to a daemon speaking
+a different protocol.
 
 To install a local build:
 
@@ -53,7 +53,7 @@ Local builds do not have a release checksum. The script says so explicitly.
 ## Verify a download manually
 
 ```powershell
-Get-FileHash .\fact-v0.2.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash .\fact-v0.2.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -103,8 +103,8 @@ markers.
    ```powershell
    git switch main
    git pull --ff-only
-   git tag -a v0.2.0 -m "FACT v0.2.0"
-   git push origin v0.2.0
+   git tag -a v0.2.1 -m "FACT v0.2.1"
+   git push origin v0.2.1
    ```
 
 6. The `Release` workflow runs. Its `verify` job enforces:
@@ -123,9 +123,9 @@ markers.
 7. Verify the published assets from a clean directory:
 
    ```powershell
-   gh release view v0.2.0 --repo imthegoodboy/FACT
-   gh release download v0.2.0 --repo imthegoodboy/FACT
-   Get-FileHash .\fact-v0.2.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+   gh release view v0.2.1 --repo imthegoodboy/FACT
+   gh release download v0.2.1 --repo imthegoodboy/FACT
+   Get-FileHash .\fact-v0.2.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
    Get-Content .\SHA256SUMS.txt
    ```
 
@@ -152,7 +152,7 @@ release.
 ## Artifact contents
 
 ```text
-fact-v0.2.0-x86_64-pc-windows-msvc/
+fact-v0.2.1-x86_64-pc-windows-msvc/
   fact.exe
   README.md
   LICENSE
@@ -187,6 +187,6 @@ fact-v0.2.0-x86_64-pc-windows-msvc/
 
 ## Compatibility statement
 
-v0.2.0 targets Windows 11 x64. Windows 10 1809+ is intended to work but has not
+v0.2.1 targets Windows 11 x64. Windows 10 1809+ is intended to work but has not
 been verified; do not describe it as supported until a Windows 10 run passes the
 full suite. Windows on ARM and non-Windows platforms are not supported.

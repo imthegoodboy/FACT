@@ -32,14 +32,14 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, pane-header chrome, scrollbar rendering, clean header/status text, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards; a second test shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
+| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
 
 | Requirement | Test |
 | --- | --- |
-| `fact --grid 8` creates independent shells | `fact-daemon` integration test `grid_launches_independent_shells_and_streams_output` checks eight distinct PIDs and output routing. |
+| `fact --grid 8` creates independent shells | `fact-daemon` integration test `grid_launches_independent_shells_and_streams_output` checks eight distinct PIDs and output routing. `fact-cli` test `grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session` proves a prior saved/live session cannot swallow the grid request. |
 | Live detach/reattach preserves processes | `detach_and_reattach_keep_the_same_processes` checks the original pane ID, PID and alive state after reattach. |
 | Restart cold-recovers layout/output only | `cold_recovery_restores_output_with_new_shells` checks `cold_recovered`, new PIDs, restored scrollback output and absence of command replay. The TUI cold-recovery test repeats the restart through the real UI and verifies a new shell accepts input. |
 | Snapshot integrity | `fact-session` tests `rejects_checksum_mismatch` and `rejects_pane_layout_mismatch`; `fact-term` validates snapshot size/shape before replay. |
@@ -47,7 +47,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Non-owner access | Pipe and identity files use a protected current-user/SYSTEM DACL. Tests assert exactly those grants, peer-user comparison is in the accept path, and local-only pipe names are enforced. |
 | No network listeners | A source-level test scans every crate's `src` tree for TCP/UDP/HTTP listener and stream APIs. |
 | Import copies identity | `export_import_is_a_copy` and the daemon lifecycle test verify fresh session/pane IDs and reset process state. |
-| Clean, controllable UI | Client unit tests cover pane-button hit targets, tab/new-tab geometry, the minimized tray, scrollbar geometry and steady cursor styles. The real-ConPTY TUI test renders the screen and rejects shell paths, PIDs, pane counts, focused-mode labels and theme names in the chrome. |
+| Clean, controllable UI | Layout tests prove 8 panes retain full content height and fit 120x35, 100x30 and 80x24. Client unit tests cover tab/new-tab geometry, the bottom-right minimized tray, scrollbar geometry and steady cursor styles. The real-ConPTY TUI test renders the screen and rejects pane-header buttons, shell paths, PIDs, pane counts, focused-mode labels, session names and theme names. |
 | Windows CI on every PR | `.github/workflows/ci.yml` runs format, Clippy and the full suite on `windows-latest` for every pull request. |
 
 A true second-Windows-user connection test requires creating a local account or
@@ -61,14 +61,15 @@ These are intentionally not mock tests:
 - Daemon tests use the testkit harness to write an isolated config, start the
   daemon executable, connect over the real named pipe and run `powershell.exe` or
   the detected shell.
-- The TUI test allocates a 120x35 ConPTY, launches `fact --grid 8`, waits for pane
-  title output before typing (early input can race the first frame), opens the
-  palette, searches for an echoed marker, opens help, detaches with the configured
-  prefix and verifies through `fact sessions --json` that the session is still
-  live with eight panes. A second TUI test snapshots, stops the daemon, resumes
-  cold, dismisses the recovery modal and verifies a new shell PID. Set
-  `FACT_SMOKE_EXE` to run both tests against a downloaded release binary instead
-  of the test build. Restored visual content and no-command-replay behavior are
+- The TUI test allocates a 120x35 ConPTY, launches `fact --grid 8`, waits for a
+  real PowerShell prompt before typing (early input can race the first frame),
+  opens the palette, searches for an echoed marker, opens help, detaches with the
+  configured prefix and verifies through `fact sessions --json` that the session
+  is still live with eight panes. Another test first detaches a one-pane session,
+  then proves a bare `fact --grid 8` creates `grid-8` instead of attaching to it.
+  A third snapshots, stops the daemon, resumes cold, dismisses the recovery modal
+  and verifies a new shell PID. Set `FACT_SMOKE_EXE` to run the three tests
+  against a downloaded release binary instead of the test build. Restored visual content and no-command-replay behavior are
   asserted directly by the daemon cold-recovery test.
 - Tests wait for frames and output with deadlines rather than fixed sleeps where
   possible. Cold-recovery assertions search the terminal buffer for restored
@@ -102,7 +103,7 @@ artifact. A tag cannot bypass a failing test.
 - Development and manual verification: Windows 11.
 - CI: GitHub's current Windows Server runner, which is not the same as Windows
   11 or Windows 10.
-- Windows 10 1809+: intended, but not verified for v0.2.0. Do not claim support
+- Windows 10 1809+: intended, but not verified for v0.2.1. Do not claim support
   until a run on a physical or VM Windows 10 installation passes the suite.
 
 ## Manual smoke check
@@ -112,16 +113,20 @@ Before a release, on a clean Windows 11 account:
 ```powershell
 fact doctor
 fact --grid 8
+# confirm there is no title row, button strip or status bar around any pane
 # in each pane: hostname; $PID; echo $env:TERM_PROGRAM
-# click V and H in a pane header; confirm the new panes receive input
-# click + in the tab strip; confirm a new tab appears
-# minimize a pane, then click the tray in the status bar to restore it
-# maximize a pane and confirm ^ changes to v and stays visible
+# confirm eight panes are visible, not focused-pane mode
+# right-click a pane or press Ctrl+Space then | and - to split; confirm input
+# press Ctrl+Space C; confirm a one-line tab strip appears and + is clickable
+# minimize a pane, then click the bottom-right tray to restore it
+# maximize a pane with Ctrl+Space Z and restore it with Ctrl+Space Z
 # generate 200 lines, then click and drag the scrollbar; confirm output moves
 # select text, press Ctrl+C, focus another pane and press Ctrl+V
-# press Ctrl+Space and confirm the PREFIX badge appears only while armed
+# press Ctrl+Space and confirm the two-cell accent marker appears only while armed
 # detach with Ctrl+Space D
 fact sessions --json
+fact --grid 8
+# verify this reattaches grid-8, not whichever session was used most recently
 fact resume
 # verify pane PIDs are unchanged by printing $PID again
 

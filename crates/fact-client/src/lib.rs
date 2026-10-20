@@ -40,15 +40,12 @@ use theme::Theme;
 
 const FRAME_POLL: Duration = Duration::from_millis(30);
 const EVENT_POLL: Duration = Duration::from_millis(10);
-const STATUS_LIFETIME: Duration = Duration::from_secs(6);
+const STATUS_LIFETIME: Duration = Duration::from_secs(2);
 
 /// Width of the new-tab button in the tab strip.
 const NEW_TAB_WIDTH: u16 = 3;
 /// Cap a single tab so one long title cannot push every other tab off-screen.
 const TAB_MAX_WIDTH: u16 = 24;
-/// Five two-column pane-header buttons (`V H _ ^ X`).
-const PANE_BUTTON_WIDTH: u16 = 2;
-const PANE_BUTTONS_WIDTH: u16 = PANE_BUTTON_WIDTH * 5;
 
 pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("split_right", "Split right"),
@@ -332,62 +329,6 @@ struct DragSplit {
     last_sent: Instant,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaneChromeAction {
-    SplitRight,
-    SplitDown,
-    Minimize,
-    ToggleZoom,
-    Close,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PaneButton {
-    action: PaneChromeAction,
-    x: u16,
-}
-
-/// The header controls are right-aligned and share one render/hit-test layout.
-/// Each button owns two columns: the glyph and the blank separator after it.
-fn pane_buttons(width: u16) -> Vec<PaneButton> {
-    if width < PANE_BUTTONS_WIDTH + 2 {
-        return Vec::new();
-    }
-    let start = width - PANE_BUTTONS_WIDTH;
-    let buttons = [
-        PaneChromeAction::SplitRight,
-        PaneChromeAction::SplitDown,
-        PaneChromeAction::Minimize,
-        PaneChromeAction::ToggleZoom,
-        PaneChromeAction::Close,
-    ];
-    buttons
-        .into_iter()
-        .enumerate()
-        .map(|(index, action)| PaneButton {
-            action,
-            x: start + index as u16 * PANE_BUTTON_WIDTH,
-        })
-        .collect()
-}
-
-fn pane_button_strip(zoomed: bool) -> String {
-    format!("V H _ {} X ", if zoomed { 'v' } else { '^' })
-}
-
-fn pane_button_at(pane: &PaneView, column: u16, content_y: u16) -> Option<PaneChromeAction> {
-    if content_y != pane.slot.y || !pane.slot.contains(column, content_y) {
-        return None;
-    }
-    pane_buttons(pane.slot.width)
-        .into_iter()
-        .find(|button| {
-            let x = pane.slot.x.saturating_add(button.x);
-            column >= x && column < x.saturating_add(PANE_BUTTON_WIDTH)
-        })
-        .map(|button| button.action)
-}
-
 struct TabRange {
     id: u32,
     label: String,
@@ -466,15 +407,15 @@ fn new_tab_rect(width: u16) -> Option<RectDto> {
     })
 }
 
-fn minimized_tray_rect(width: u16, count: usize) -> Option<RectDto> {
-    if count == 0 || width < 8 {
+fn minimized_tray_rect(width: u16, height: u16, count: usize) -> Option<RectDto> {
+    if count == 0 || width < 8 || height == 0 {
         return None;
     }
-    let label = format!("▣ {count} ");
+    let label = format!("▾ {count} ");
     let tray_width = label.chars().count() as u16;
     Some(RectDto {
         x: width.saturating_sub(tray_width),
-        y: 0,
+        y: height.saturating_sub(1),
         width: tray_width,
         height: 1,
     })
@@ -491,7 +432,7 @@ struct ScrollbarGeometry {
 }
 
 fn scrollbar_geometry(pane: &PaneView) -> Option<ScrollbarGeometry> {
-    let height = pane.slot.height.saturating_sub(1).min(pane.content_rows);
+    let height = pane.slot.height.min(pane.content_rows);
     // Only show the bar once scrollback is meaningful. One or two prompt lines
     // would otherwise render a near-full-height thumb that reads as a border.
     let meaningful = (usize::from(pane.content_rows) / 2).max(1);
@@ -520,11 +461,11 @@ fn scrollbar_geometry(pane: &PaneView) -> Option<ScrollbarGeometry> {
                 .x
                 .saturating_add(pane.slot.width)
                 .saturating_sub(1),
-            y: pane.slot.y.saturating_add(1),
+            y: pane.slot.y,
             width: 1,
             height: track_height,
         },
-        thumb_y: pane.slot.y.saturating_add(1).saturating_add(thumb_top),
+        thumb_y: pane.slot.y.saturating_add(thumb_top),
         thumb_height,
         max_offset: pane.history_lines,
         scroll_offset: offset,
@@ -823,7 +764,6 @@ impl App {
             let previous = self.last_bells.insert(pane.id, pane.bell_seq).unwrap_or(0);
             if pane.bell_seq > previous && self.last_seq != 0 && !pane.focused {
                 self.bells.insert(pane.id);
-                self.set_status(format!("Bell in pane {}", pane.title));
             }
         }
 
@@ -852,6 +792,19 @@ impl App {
 
     fn active_tab_id(&self) -> Option<u32> {
         self.active_tab().map(|tab| tab.id)
+    }
+
+    /// A single-tab session is pure terminal content: no title bar, no status
+    /// bar, no tab strip. Only a real multi-tab session gets one chrome row.
+    fn tabs_visible(&self) -> bool {
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| frame.tabs.len() > 1)
+    }
+
+    fn content_row(&self, row: u16) -> Option<u16> {
+        let tabs_height = u16::from(self.tabs_visible());
+        (row >= tabs_height).then(|| row - tabs_height)
     }
 
     fn set_status(&mut self, message: impl Into<String>) {
@@ -1147,52 +1100,6 @@ impl App {
                 }
             }
             other => self.set_status(format!("Unknown action: {other}")),
-        }
-    }
-
-    fn do_pane_action(&mut self, pane: u64, action: PaneChromeAction) {
-        self.bells.clear();
-        match action {
-            PaneChromeAction::SplitRight => {
-                let _ = self.send(Command::SplitPane {
-                    pane,
-                    direction: SplitDirection::Right,
-                });
-            }
-            PaneChromeAction::SplitDown => {
-                let _ = self.send(Command::SplitPane {
-                    pane,
-                    direction: SplitDirection::Down,
-                });
-            }
-            PaneChromeAction::Minimize => {
-                if self.send(Command::MinimizePane { pane }).is_some() {
-                    let restore = self
-                        .keys
-                        .binding("restore")
-                        .map(|binding| binding.to_string())
-                        .unwrap_or_else(|| "prefix+Shift+M".into());
-                    self.set_status(format!(
-                        "Pane minimized. Click the tray or press {restore} to restore."
-                    ));
-                }
-            }
-            PaneChromeAction::ToggleZoom => {
-                if let Some(tab) = self.active_tab() {
-                    let _ = self.send(Command::ZoomPane {
-                        zoomed: !tab.zoomed,
-                    });
-                }
-            }
-            PaneChromeAction::Close => {
-                self.confirm_or_send(
-                    format!(
-                        "Close pane '{}'? Its process will be stopped.",
-                        self.pane_label(pane)
-                    ),
-                    Command::ClosePane { pane },
-                );
-            }
         }
     }
 
@@ -1556,8 +1463,8 @@ impl App {
         }
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
             if let Some(drag) = self.scroll_drag.take() {
-                if mouse.row > 0 && mouse.row + 1 < self.height {
-                    self.scroll_drag_to(&drag, mouse.row - 1);
+                if let Some(content_y) = self.content_row(mouse.row) {
+                    self.scroll_drag_to(&drag, content_y);
                 }
                 return;
             }
@@ -1565,7 +1472,7 @@ impl App {
                 return;
             }
         }
-        if mouse.row == 0 {
+        if self.tabs_visible() && mouse.row == 0 {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if new_tab_rect(self.width).is_some_and(|rect| rect.contains(mouse.column, 0)) {
                     let _ = self.send(Command::NewTab {
@@ -1580,45 +1487,23 @@ impl App {
             }
             return;
         }
-        if mouse.row + 1 >= self.height {
-            let count = self
-                .frame
-                .as_ref()
-                .map(|frame| frame.minimized.len())
-                .unwrap_or(0);
-            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                && minimized_tray_rect(self.width, count)
-                    .is_some_and(|rect| rect.contains(mouse.column, 0))
-            {
-                let _ = self.send(Command::RestorePanes);
-            }
+        let Some(content_y) = self.content_row(mouse.row) else {
+            return;
+        };
+        let count = self
+            .frame
+            .as_ref()
+            .map(|frame| frame.minimized.len())
+            .unwrap_or(0);
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && minimized_tray_rect(self.width, self.height, count)
+                .is_some_and(|rect| rect.contains(mouse.column, mouse.row))
+        {
+            let _ = self.send(Command::RestorePanes);
             return;
         }
-
-        let content_y = mouse.row - 1;
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some((pane, action)) = self.pane_header_at(mouse.column, content_y) {
-                    let _ = self.send(Command::FocusPane { pane });
-                    self.bells.remove(&pane);
-                    self.do_pane_action(pane, action);
-                    return;
-                }
-                if self
-                    .pane_slot_at(mouse.column, content_y)
-                    .is_some_and(|pane| {
-                        self.frame
-                            .as_ref()
-                            .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-                            .is_some_and(|view| view.slot.y == content_y)
-                    })
-                {
-                    if let Some(pane) = self.pane_slot_at(mouse.column, content_y) {
-                        let _ = self.send(Command::FocusPane { pane });
-                        self.bells.remove(&pane);
-                    }
-                    return;
-                }
                 if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
                     let _ = self.send(Command::FocusPane {
                         pane: geometry.pane,
@@ -1724,6 +1609,7 @@ impl App {
                             "split_down",
                             "zoom",
                             "minimize",
+                            "new_tab",
                             "rename_tab",
                             "search",
                             "restart_pane",
@@ -1847,13 +1733,6 @@ impl App {
         let _ = self.send(Command::Input { pane, data });
     }
 
-    fn pane_header_at(&self, column: u16, content_y: u16) -> Option<(u64, PaneChromeAction)> {
-        let frame = self.frame.as_ref()?;
-        frame.panes.iter().find_map(|pane| {
-            pane_button_at(pane, column, content_y).map(|action| (pane.id, action))
-        })
-    }
-
     fn scrollbar_at(&self, column: u16, content_y: u16) -> Option<ScrollbarGeometry> {
         let frame = self.frame.as_ref()?;
         frame.panes.iter().find_map(|pane| {
@@ -1875,7 +1754,7 @@ impl App {
         for pane in &frame.panes {
             if pane.slot.contains(column, content_y) {
                 let content_x = pane.slot.x;
-                let content_y0 = pane.slot.y + 1;
+                let content_y0 = pane.slot.y;
                 if column >= content_x
                     && content_y >= content_y0
                     && column < content_x + pane.content_cols
@@ -1912,7 +1791,7 @@ impl App {
             return None;
         }
         let origin_x = view.slot.x;
-        let origin_y = view.slot.y + 1;
+        let origin_y = view.slot.y;
         let x = column
             .clamp(origin_x, origin_x + view.content_cols - 1)
             .saturating_sub(origin_x);
@@ -2050,12 +1929,14 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
     lines.push(("Cycle theme".into(), "F2".into()));
     lines.push(("Resize split".into(), "drag the gutter".into()));
     lines.push((
-        "Pane buttons".into(),
-        "V split right · H split down · _ min · ^ max · X close".into(),
+        "New tab".into(),
+        "prefix+C, or click + when the tab strip is visible".into(),
     ));
-    lines.push(("New tab".into(), "click + in the tab bar".into()));
     lines.push(("Scrollback".into(), "mouse wheel or drag the bar".into()));
-    lines.push(("Bell".into(), "the pane title turns amber".into()));
+    lines.push((
+        "Bell".into(),
+        "an amber dot appears at the pane's top-right".into(),
+    ));
     lines.push((
         "Quick clipboard".into(),
         "Ctrl+C copy · Ctrl+V paste".into(),
@@ -2224,32 +2105,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_header_buttons_have_stable_hit_targets() {
-        let view = test_view(24);
-        assert_eq!(pane_buttons(24).len(), 5);
-        assert!(pane_buttons(11).is_empty());
-        assert_eq!(
-            pane_button_at(&view, 24, 2),
-            Some(PaneChromeAction::SplitRight)
-        );
-        assert_eq!(
-            pane_button_at(&view, 26, 2),
-            Some(PaneChromeAction::SplitDown)
-        );
-        assert_eq!(
-            pane_button_at(&view, 28, 2),
-            Some(PaneChromeAction::Minimize)
-        );
-        assert_eq!(
-            pane_button_at(&view, 30, 2),
-            Some(PaneChromeAction::ToggleZoom)
-        );
-        assert_eq!(pane_button_at(&view, 32, 2), Some(PaneChromeAction::Close));
-        assert_eq!(pane_button_at(&view, 24, 3), None);
-        assert_eq!(pane_button_at(&view, 34, 2), None);
-    }
-
-    #[test]
     fn tabs_and_new_tab_button_do_not_overlap() {
         let tabs = vec![
             TabView {
@@ -2301,12 +2156,14 @@ mod tests {
     }
 
     #[test]
-    fn minimized_tray_is_right_aligned() {
-        let tray = minimized_tray_rect(10, 2).unwrap();
+    fn minimized_tray_is_right_aligned_on_the_last_row() {
+        let tray = minimized_tray_rect(10, 4, 2).unwrap();
         assert_eq!(tray.x + tray.width, 10);
-        assert!(tray.contains(6, 0));
-        assert!(tray.contains(9, 0));
-        assert!(!tray.contains(5, 0));
+        assert_eq!(tray.y, 3);
+        assert!(tray.contains(6, 3));
+        assert!(tray.contains(9, 3));
+        assert!(!tray.contains(5, 3));
+        assert!(!tray.contains(9, 2));
     }
 
     #[test]
@@ -2320,7 +2177,7 @@ mod tests {
         view.slot.height = 11;
         let bottom = scrollbar_geometry(&view).unwrap();
         assert_eq!(bottom.track.x, 49);
-        assert_eq!(bottom.track.y, 3);
+        assert_eq!(bottom.track.y, 2);
         assert_eq!(bottom.track.height, 10);
         assert_eq!(bottom.max_offset, 100);
         assert_eq!(scrollbar_jump_offset(&bottom, bottom.track.y), 100);

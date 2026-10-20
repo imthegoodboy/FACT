@@ -20,7 +20,7 @@ config_version = 1
 prefix = "ctrl+space"
 theme = "fact-dark"
 scrollback_lines = 8000
-min_pane_width = 24
+min_pane_width = 16
 min_pane_height = 5
 mouse = true
 confirm_close = true
@@ -361,6 +361,11 @@ fn launch_resume(
             .ok()
             .map(|path| path.display().to_string())
     });
+    let session = if grid > 1 {
+        Some(select_grid_session(&mut client, session, grid)?)
+    } else {
+        session
+    };
     let info = attached(
         &mut client,
         Command::ResumeSession {
@@ -371,6 +376,65 @@ fn launch_resume(
         },
     )?;
     fact_client::run(client, info, config).context("terminal user interface stopped with an error")
+}
+
+/// `--grid N` means "show me an N-pane grid", not "attach to whatever session
+/// happens to be latest". Pick the canonical `grid-N` session when it still has
+/// that shape, otherwise allocate the next free suffix. An explicitly named
+/// session is never silently attached when its pane count does not match.
+fn select_grid_session(
+    client: &mut DaemonClient,
+    requested: Option<String>,
+    grid: u8,
+) -> Result<String> {
+    let sessions = match client.request(Command::ListSessions {
+        include_archived: true,
+    })? {
+        ResponsePayload::Sessions(sessions) => sessions,
+        other => bail!("unexpected daemon reply: {other:?}"),
+    };
+    if let Some(name) = requested {
+        if let Some(existing) = sessions
+            .iter()
+            .find(|session| session.name.eq_ignore_ascii_case(&name))
+        {
+            if grid_matches(existing, grid) {
+                return Ok(existing.name.clone());
+            }
+            bail!(
+                "session '{name}' already exists with {} panes in {} tab(s); \
+                 `--grid {grid}` creates a new grid. Omit `--session` to start \
+                 `grid-{grid}`, or choose a new session name.",
+                existing.pane_count,
+                existing.tab_count
+            );
+        }
+        return Ok(name);
+    }
+
+    let base = format!("grid-{grid}");
+    for suffix in 1u32.. {
+        let candidate = if suffix == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{suffix}")
+        };
+        match sessions
+            .iter()
+            .find(|session| session.name.eq_ignore_ascii_case(&candidate))
+        {
+            None => return Ok(candidate),
+            Some(existing) if grid_matches(existing, grid) => {
+                return Ok(existing.name.clone());
+            }
+            Some(_) => {}
+        }
+    }
+    unreachable!("the suffix loop always finds a free session name")
+}
+
+fn grid_matches(session: &SessionSummary, grid: u8) -> bool {
+    !session.archived && session.tab_count == 1 && session.pane_count == usize::from(grid)
 }
 
 fn launch_attach(paths: &Paths, name: &str) -> Result<()> {

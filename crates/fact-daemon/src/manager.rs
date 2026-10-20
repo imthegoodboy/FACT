@@ -68,6 +68,19 @@ struct LiveSession {
     last_active_ms: i64,
 }
 
+/// The tab strip is the only persistent chrome. It appears only when a session
+/// has more than one tab, so a single-tab grid uses the full terminal height.
+fn chrome_rows(layout: &SessionLayout) -> u16 {
+    u16::from(layout.tabs.len() > 1)
+}
+
+fn layout_rows(session: &LiveSession) -> u16 {
+    session
+        .viewport_rows
+        .saturating_sub(chrome_rows(&session.data.layout))
+        .max(1)
+}
+
 struct LivePane {
     pty: PtyProcess,
     term: TerminalModel,
@@ -655,7 +668,7 @@ impl SessionManager {
         let layout = SessionLayout::new(1, &ids);
         let options = LayoutOptions {
             cols: DEFAULT_VIEWPORT_COLS,
-            rows: DEFAULT_VIEWPORT_ROWS - 2,
+            rows: DEFAULT_VIEWPORT_ROWS,
             min_content_cols: self.config.min_pane_width,
             min_content_rows: self.config.min_pane_height,
         };
@@ -746,7 +759,9 @@ impl SessionManager {
 
         let options = LayoutOptions {
             cols: DEFAULT_VIEWPORT_COLS,
-            rows: DEFAULT_VIEWPORT_ROWS - 2,
+            rows: DEFAULT_VIEWPORT_ROWS
+                .saturating_sub(chrome_rows(&data.layout))
+                .max(1),
             min_content_cols: self.config.min_pane_width,
             min_content_rows: self.config.min_pane_height,
         };
@@ -1050,7 +1065,7 @@ impl SessionManager {
         };
         let options = LayoutOptions {
             cols: session.viewport_cols,
-            rows: session.viewport_rows.saturating_sub(2).max(1),
+            rows: layout_rows(session),
             min_content_cols: min_cols,
             min_content_rows: min_rows,
         };
@@ -1814,7 +1829,7 @@ impl SessionManager {
         let session = self.sessions.get_mut(&key)?;
         let layout = session.data.layout.layout(LayoutOptions {
             cols: session.viewport_cols,
-            rows: session.viewport_rows.saturating_sub(2).max(1),
+            rows: layout_rows(session),
             min_content_cols: min_cols,
             min_content_rows: min_rows,
         });
@@ -1945,7 +1960,7 @@ impl SessionManager {
             viewport: Viewport {
                 cols: session.viewport_cols,
                 rows: session.viewport_rows,
-                slot_rows: session.viewport_rows.saturating_sub(2).max(1),
+                slot_rows: layout_rows(session),
                 slot_cols: session.viewport_cols,
             },
             tiny_mode: layout.tiny_mode,
@@ -1963,7 +1978,7 @@ impl SessionManager {
     fn layout_options(&self, session: &LiveSession) -> LayoutOptions {
         LayoutOptions {
             cols: session.viewport_cols,
-            rows: session.viewport_rows.saturating_sub(2).max(1),
+            rows: layout_rows(session),
             min_content_cols: self.config.min_pane_width,
             min_content_rows: self.config.min_pane_height,
         }
