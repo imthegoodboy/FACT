@@ -23,7 +23,9 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
+    SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
     EqualSid, GetSecurityDescriptorLength, GetTokenInformation, SetFileSecurityW, TokenUser,
@@ -139,6 +141,68 @@ pub fn secure_file_acl(path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Read the DACL of an existing file or directory as SDDL, for diagnostics.
+pub fn file_dacl_sddl(path: &Path) -> io::Result<String> {
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let mut dacl = ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let mut text: *mut u16 = ptr::null_mut();
+    let mut text_len = 0u32;
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            &mut text_len,
+        )
+    };
+    if ok == 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            LocalFree(descriptor);
+        }
+        return Err(error);
+    }
+    let result = if text.is_null() || text_len == 0 {
+        String::new()
+    } else {
+        // The Win32 length includes the terminating null (and some Windows
+        // versions have been observed to report a second padding null).
+        let mut len = text_len as usize;
+        while len > 0 && unsafe { *text.add(len - 1) } == 0 {
+            len -= 1;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(text, len) };
+        String::from_utf16_lossy(slice)
+    };
+    unsafe {
+        LocalFree(text as *mut c_void);
+        LocalFree(descriptor);
+    }
+    Ok(result)
+}
+
+/// The current process user's SID as a string, for ACL diagnostics.
+pub fn current_user_sid_string() -> io::Result<String> {
+    current_user_sid()
 }
 
 /// Listening endpoint for a local named pipe.
@@ -498,6 +562,26 @@ mod tests {
         assert!(security.sddl().contains("S-1-"));
         assert!(security.sddl().starts_with("D:P"));
         assert!(!security.sddl().contains("WD)"));
+    }
+
+    #[test]
+    fn file_acl_diagnostics_report_the_current_user() {
+        let path = std::env::temp_dir().join(format!(
+            "fact-acl-{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"acl test").unwrap();
+        secure_file_acl(&path).unwrap();
+        let dacl = file_dacl_sddl(&path).unwrap();
+        let sid = current_user_sid_string().unwrap();
+        assert!(dacl.contains(&sid), "DACL {dacl} did not contain {sid}");
+        assert!(!dacl.ends_with('\0'));
+        assert!(!dacl.contains(";;;WD)"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
