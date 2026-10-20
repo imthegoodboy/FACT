@@ -144,7 +144,7 @@ impl Default for Config {
             prefix: "ctrl+space".to_string(),
             theme: "fact-dark".to_string(),
             scrollback_lines: 8000,
-            min_pane_width: 24,
+            min_pane_width: 16,
             min_pane_height: 5,
             mouse: true,
             confirm_close: true,
@@ -506,7 +506,7 @@ prefix = "ctrl+space"
 theme = "fact-dark"
 
 scrollback_lines = 8000
-min_pane_width = 24
+min_pane_width = 16
 min_pane_height = 5
 mouse = true
 confirm_close = true

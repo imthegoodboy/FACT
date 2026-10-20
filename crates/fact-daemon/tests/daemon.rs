@@ -13,7 +13,7 @@ use fact_protocol::{
     AttachInfo, ClientMessage, Command, ErrorCode, Frame, Hello, ResponsePayload, ServerMessage,
     SplitDirection,
 };
-use fact_runtime::{connect, DaemonClient, DaemonIdentity};
+use fact_runtime::{connect, DaemonClient, DaemonIdentity, RuntimeError};
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(20);
@@ -70,6 +70,21 @@ fn resume(client: &mut DaemonClient, name: &str, grid: u8) -> AttachInfo {
             cwd: None,
         })
         .expect("resume session")
+    {
+        ResponsePayload::Attached(info) => *info,
+        other => panic!("expected Attached response, got {other:?}"),
+    }
+}
+
+fn resume_existing(client: &mut DaemonClient, name: &str) -> AttachInfo {
+    match client
+        .request(Command::ResumeSession {
+            name: Some(name.to_string()),
+            grid: None,
+            profile: None,
+            cwd: None,
+        })
+        .expect("resume existing session")
     {
         ResponsePayload::Attached(info) => *info,
         other => panic!("expected Attached response, got {other:?}"),
@@ -276,6 +291,40 @@ fn grid_launches_independent_shells_and_streams_output() {
 }
 
 #[test]
+fn resume_rejects_a_grid_shape_that_changed_before_attach() {
+    let harness = harness();
+    let handle = start_daemon(&harness);
+    let (_identity, mut client) = wait_for_daemon(&harness);
+
+    let info = resume(&mut client, "one", 1);
+    assert_eq!(info.session.pane_count, 1);
+
+    let error = client
+        .request(Command::ResumeSession {
+            name: Some("one".to_string()),
+            grid: Some(8),
+            profile: None,
+            cwd: None,
+        })
+        .expect_err("a one-pane session must not satisfy --grid 8");
+    match error {
+        RuntimeError::Request(error) => {
+            assert_eq!(error.code, ErrorCode::Conflict);
+            assert!(
+                error.message.contains("1 pane(s)"),
+                "unexpected error: {}",
+                error.message
+            );
+        }
+        other => panic!("unexpected resume error: {other:?}"),
+    }
+
+    let info = attach(&mut client, "one");
+    assert_eq!(info.session.pane_count, 1);
+    shutdown(client, handle, &harness);
+}
+
+#[test]
 fn detach_and_reattach_keep_the_same_processes() {
     let harness = harness();
     let handle = start_daemon(&harness);
@@ -437,6 +486,10 @@ fn split_tabs_focus_and_search_drive_real_panes() {
         frame.panes.len() == 1 && frame.panes[0].cells.is_some()
     })
     .expect("initial frame");
+    assert_eq!(
+        first.viewport.slot_rows, 35,
+        "a one-tab session must use the full viewport height"
+    );
     let original_pane = first.panes[0].id;
     let original_tab = first.active_tab;
 
@@ -496,6 +549,10 @@ fn split_tabs_focus_and_search_drive_real_panes() {
         frame.tabs.len() == 2 && frame.session.pane_count == 3
     })
     .expect("new tab frame");
+    assert_eq!(
+        two_tabs.viewport.slot_rows, 34,
+        "the tab strip must reserve exactly one row"
+    );
     let new_tab = two_tabs.active_tab;
     let active_tab = two_tabs.active_tab;
 
@@ -725,7 +782,7 @@ fn session_lifecycle_rename_archive_export_import_and_delete() {
     };
     assert!(!unarchived.archived);
 
-    let recovered = resume(&mut client, "BETA", 1);
+    let recovered = resume_existing(&mut client, "BETA");
     assert!(recovered.cold_recovered);
     assert!(recovered
         .recovery_notes

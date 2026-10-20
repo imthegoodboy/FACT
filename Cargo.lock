@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "fact-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -602,7 +602,7 @@ dependencies = [
 
 [[package]]
 name = "fact-client"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "fact-config"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "tempfile",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "fact-daemon"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "fact-config",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "fact-ipc"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bincode",
  "fact-protocol",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "fact-layout"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "fact-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "fact-pty"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "fact-config",
  "thiserror 2.0.21",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "fact-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "fact-config",
  "fact-ipc",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "fact-session"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "fact-layout",
  "fact-protocol",
@@ -717,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "fact-term"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "alacritty_terminal",
  "fact-protocol",
@@ -728,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "fact-testkit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "fact-ipc",
  "fact-protocol",

@@ -7,7 +7,7 @@ running when the UI detaches or the terminal window closes.
 FACT is not a wrapper around Windows Terminal or tmux. It owns its ConPTY
 processes, terminal models, layout tree and session database.
 
-> **Status:** v0.2.0. Windows 11 is the primary, continuously tested target.
+> **Status:** v0.2.1. Windows 11 is the primary, continuously tested target.
 > Windows 10 1809+ is intended to work but is not yet verified; see
 > [Compatibility](#compatibility). Release artifacts are produced only from
 > version tags after every gate in this repository passes.
@@ -24,9 +24,11 @@ processes, terminal models, layout tree and session database.
   never replays commands.
 - **Tabs, splits and grids.** Binary split tree, focus, zoom, minimize, move and
   swap, plus focused-pane mode on tiny terminals.
-- **Minimal black TUI.** Clean pane headers, per-pane split/minimize/maximize/
-  close controls, a draggable scrollbar, stable cursor rendering, a new-tab
-  button, command palette, pane search, context menus, five themes and F1 help.
+- **Minimal black TUI.** Plain terminal panes with no title rows, buttons or
+  permanent status bar. A one-line tab strip appears only when a session has
+  more than one tab. Panes have a draggable scrollbar, a steady cursor,
+  keyboard/context-menu actions, command palette, pane search, five themes and
+  F1 help.
 - **Local-only security.** Authenticated named pipes with a current-user DACL.
   No TCP or UDP listener, no remote access and no privileged service.
 - **Scriptable CLI.** JSON output, offline session management and a `doctor`
@@ -73,12 +75,12 @@ cargo run --bin fact -- --grid 4
 
 ```powershell
 fact                       # create or resume the default session
-fact --session dev --grid 8
-fact resume --session dev  # warm reattach, or cold recovery after a restart
+fact --grid 8              # start or reattach the dedicated grid-8 session
+fact --session dev         # warm reattach, or cold recovery after a restart
 fact sessions              # saved, live and archived sessions
 fact attach dev            # attach the TUI to a running session
 fact detach                # detach every attached UI, keep shells running
-fact save --session dev    # persist layout and visual snapshots immediately
+fact save dev              # persist layout and visual snapshots immediately
 fact doctor                # config, database, ACL, shell and ConPTY checks
 ```
 
@@ -86,12 +88,19 @@ Inside the TUI the default prefix is `Ctrl+Space`. Press `F1` for the full,
 remappable keybinding list. `Ctrl+Space k` opens the command palette and
 `Ctrl+Space /` searches the focused pane's visible screen and scrollback.
 
-Each pane header has clickable `V` (split right), `H` (split down), `_`
-(minimize), `^`/`v` (maximize/restore) and `X` (close) controls. The `+` button
-in the tab strip opens a new tab. Mouse-wheel scrollback works in shells, and the
-scrollbar can be clicked or dragged. `Ctrl+C` copies a selection, `Ctrl+V`
-pastes, and `Ctrl+Shift+C` / `Ctrl+Shift+V` remain available alongside
-`Ctrl+Insert` / `Shift+Insert`.
+There are no per-pane buttons. Use `Ctrl+Space` then the action from F1 help, or
+right-click a pane for split, zoom, minimize, restart, close and copy. Mouse
+wheel scrollback works in shells, and the scrollbar can be clicked or dragged.
+`Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
+`Ctrl+Shift+V` remain available alongside `Ctrl+Insert` / `Shift+Insert`.
+
+`--grid N` is deterministic for every explicit value, including `--grid 1`: it
+starts or reattaches `grid-N` and never silently resumes an unrelated saved
+session. If `grid-N` exists with a different pane count, FACT uses the next free
+`grid-N-2` name. An explicit `--session NAME --grid N` is accepted when the
+session is new or already has that shape; otherwise FACT asks for a new name
+instead of ignoring the grid request. Running `fact` without `--grid` retains the
+normal resume-latest behavior.
 
 Session management works offline against SQLite when the daemon is not running:
 
@@ -112,14 +121,14 @@ the only operation that removes its saved output.
 
 | Command | Purpose |
 | --- | --- |
-| `fact [--session NAME] [--grid N] [--profile NAME] [--cwd DIR]` | Create, warm-resume or cold-recover a session and open the TUI. |
+| `fact [--session NAME] [--grid N] [--profile NAME] [--cwd DIR]` | Create, warm-resume or cold-recover a session and open the TUI. `--grid N` targets `grid-N`. |
 | `fact resume [same options]` | Explicit form of the default command. |
 | `fact attach NAME` | Attach to a session that is already live. |
 | `fact sessions [--all] [--json]` | List saved and live sessions; `--all` includes archived. |
 | `fact detach` | Increment the detach generation so attached UIs exit. |
 | `fact doctor [--json]` | Check data directory, config, shell, database, ACLs, logs and ConPTY. |
 | `fact rename OLD NEW` | Rename a live or saved session. |
-| `fact save [--session NAME]` | Persist a live session now. |
+| `fact save [NAME]` | Persist a live session now; defaults to the most recently used live session. |
 | `fact export [NAME] [--output PATH] [--stdout]` | Write versioned `fact-session` JSON. |
 | `fact import FILE [--name NAME] [--overwrite]` | Import as a new saved session (fresh identity and PIDs). |
 | `fact archive NAME` / `fact unarchive NAME` | Hide/restore a session; archive stops live shells. |
@@ -201,7 +210,7 @@ the scrollback.
   GitHub's current Windows Server image, which is not Windows 11 itself.
 - **Windows 10 1809+:** expected to work because FACT uses ConPTY and Win32 APIs
   available since 1809. It has not been verified on a physical Windows 10
-  machine, so v0.2.0 does not claim Windows 10 support.
+  machine, so v0.2.1 does not claim Windows 10 support.
 - **Windows on ARM:** not tested.
 - **Linux/macOS:** not supported. The IPC and ConPTY layers are Windows-only.
 

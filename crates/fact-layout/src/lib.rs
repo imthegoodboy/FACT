@@ -1,9 +1,10 @@
 //! Split-tree layout engine.
 //!
 //! A tab owns a binary tree of panes. Slots tile the content area with a
-//! one-cell gutter around every split. Each slot reserves one row for the pane
-//! title; the rest belongs to the terminal grid. Very small viewports switch to
-//! focused-pane mode instead of shrinking every pane below a readable size.
+//! one-cell gutter around every split. A slot's last column is reserved for its
+//! scrollbar; every other cell belongs to the terminal grid. Very small
+//! viewports switch to focused-pane mode instead of shrinking every pane below a
+//! readable size.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -91,10 +92,6 @@ impl Rect {
             width,
             height,
         }
-    }
-
-    pub fn content_height(self) -> u16 {
-        self.height.saturating_sub(1)
     }
 
     pub fn contains(self, x: u16, y: u16) -> bool {
@@ -608,14 +605,9 @@ impl SessionLayout {
                 .filter(|p| Some(*p) != focused)
                 .collect();
             let panes = if let Some(focus) = focused {
-                let content = if options.rows > 2 && options.cols > 1 {
+                let content = if options.cols > 1 {
                     // Keep the rightmost column free for the pane scrollbar.
-                    Rect::new(
-                        0,
-                        1,
-                        options.cols.saturating_sub(1).max(1),
-                        options.rows.saturating_sub(1),
-                    )
+                    Rect::new(0, 0, options.cols.saturating_sub(1).max(1), options.rows)
                 } else {
                     Rect::new(0, 0, options.cols, options.rows)
                 };
@@ -817,11 +809,11 @@ fn layout_node(
                 slot: rect,
                 content: Rect::new(
                     rect.x,
-                    rect.y.saturating_add(1),
+                    rect.y,
                     // The last column belongs to the scrollbar so terminal
                     // output is never painted underneath it.
                     rect.width.saturating_sub(1).max(1),
-                    rect.content_height(),
+                    rect.height,
                 ),
                 focused: false,
             });
@@ -1128,13 +1120,34 @@ mod tests {
     }
 
     #[test]
+    fn grid_eight_fits_a_standard_terminal_without_titles() {
+        let layout = SessionLayout::new(1, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        for (cols, rows) in [(120, 35), (100, 30), (80, 24)] {
+            let result = layout.layout(LayoutOptions {
+                cols,
+                rows,
+                min_content_cols: 16,
+                min_content_rows: 5,
+            });
+            assert_eq!(result.panes.len(), 8, "{cols}x{rows} must stay a grid");
+            assert!(!result.tiny_mode, "{cols}x{rows} must not collapse");
+            for slot in &result.panes {
+                assert_eq!(slot.content.height, slot.slot.height);
+                assert!(slot.content.width >= 16);
+            }
+        }
+    }
+
+    #[test]
     fn scrollbar_column_is_not_part_of_terminal_content() {
         let layout = SessionLayout::new(1, &[1]);
         let result = layout.layout(opts(80, 24));
         assert_eq!(result.panes.len(), 1);
         let slot = &result.panes[0];
         assert_eq!(slot.slot.width, 80);
+        assert_eq!(slot.slot.height, 24);
         assert_eq!(slot.content.width, 79);
+        assert_eq!(slot.content.height, 24);
         assert_eq!(slot.content.x + slot.content.width, 79);
         assert_eq!(slot.slot.x + slot.slot.width, 80);
     }

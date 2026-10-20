@@ -90,8 +90,10 @@ A session has:
 - optional cold-recovery timestamp and notes
 
 The binary tree stores normalized split ratios. Layout adds a one-cell gutter at
-each split and a one-line title row per pane. The daemon subtracts the tab bar
-and status bar from the client viewport before laying out panes. When slots fall
+each split and reserves the rightmost column of each pane for its scrollbar. A
+pane has no title row: terminal content uses the full slot height. The daemon
+subtracts one row from the client viewport only when the session has more than
+one tab; a single-tab session has no persistent chrome at all. When slots fall
 below `min_pane_width` or `min_pane_height`, the layout switches to focused-pane
 mode instead of rendering unusably small terminals. Minimized panes keep their
 processes and terminal state; zoom shows only the focused pane.
@@ -186,11 +188,14 @@ Ctrl+Shift+C/V and other direct bindings work without the prefix.
 
 Mouse events are routed by zone:
 
-- tabs select tabs
-- pane title rows focus panes
+- the one-line tab strip (only present with two or more tabs) selects tabs and
+  its trailing `+` opens a new tab
+- the minimized-pane tray (only present when panes are minimized) restores them
 - split gutters drag to resize ratios
 - pane content is forwarded as SGR mouse input when the application requested
   mouse reporting; otherwise it starts a text selection
+- right-click opens the pane context menu when the application has not requested
+  mouse reporting; otherwise it is forwarded as SGR mouse input
 - Shift+drag always selects text, even when the application owns the mouse
 
 Selections are extracted from the client's last pane buffers, skipping

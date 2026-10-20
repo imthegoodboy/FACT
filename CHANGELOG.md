@@ -3,6 +3,36 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.2.1] - 2026-10-20
+
+### Fixed
+
+- `fact --grid N` no longer attaches to whichever live or saved session was most
+  recent and silently ignores the requested grid. It now starts or reattaches a
+  dedicated `grid-N` session, allocates `grid-N-2`, `grid-N-3`, ... when that
+  name is taken by a different shape, and rejects an explicit `--session NAME
+  --grid N` mismatch with a clear error instead of modifying or attaching to it.
+- An eight-pane grid stays a grid in an 80x24 window. The default
+  `min_pane_width` is now 16, and pane title rows no longer consume terminal
+  height.
+
+### Changed
+
+- The TUI is chrome-free for a single-tab session: per-pane headers and their
+  `V H _ ^ X` buttons are gone, along with the permanent status bar and the
+  single-tab tab strip. Terminal content uses the full window height.
+- A one-line tab strip appears only when a session has two or more tabs. Status
+  messages are brief bottom-right overlays, the prefix is a two-cell accent
+  marker while armed, and a `▾ N` restore tray appears only when panes are
+  minimized.
+- Split, zoom, minimize, close, new tab and copy remain available through the
+  keyboard and the pane right-click menu. A bell is now a small amber dot at the
+  pane's top-right instead of status text.
+- Panes reserve their rightmost column for the scrollbar and use every remaining
+  row for terminal content.
+- The wire protocol is now version 3. The installer stops the previous daemon;
+  saved sessions cold-recover on the next launch.
+
 ## [0.2.0] - 2026-10-20
 
 ### Added
@@ -98,5 +128,6 @@ All notable changes to FACT are documented here. The format follows
 - Terminal snapshots are visual state, not process resurrection; unsaved work in
   a lost process cannot be recovered.
 
+[0.2.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.1
 [0.2.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.0
 [0.1.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.1.0
