@@ -589,9 +589,13 @@ dependencies = [
  "fact-config",
  "fact-daemon",
  "fact-ipc",
+ "fact-layout",
  "fact-protocol",
+ "fact-pty",
+ "fact-runtime",
  "fact-session",
  "predicates",
+ "serde",
  "serde_json",
 ]
 
@@ -606,6 +610,7 @@ dependencies = [
  "fact-ipc",
  "fact-layout",
  "fact-protocol",
+ "fact-runtime",
  "ratatui",
  "serde",
 ]

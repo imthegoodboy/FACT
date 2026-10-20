@@ -19,9 +19,13 @@ fact-config = { path = "../fact-config" }
 fact-daemon = { path = "../fact-daemon" }
 fact-ipc = { path = "../fact-ipc" }
 fact-protocol = { path = "../fact-protocol" }
+fact-pty = { path = "../fact-pty" }
+fact-runtime = { path = "../fact-runtime" }
 fact-session = { path = "../fact-session" }
+serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2"
+fact-layout = { path = "../fact-layout" }
 predicates = "3"
