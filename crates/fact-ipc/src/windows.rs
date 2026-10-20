@@ -14,7 +14,7 @@ use std::ffi::{c_void, OsStr};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::FromRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
 use std::ptr;
 
@@ -23,7 +23,9 @@ use windows_sys::Win32::Foundation::{
     INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW, SDDL_REVISION_1,
+    SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
     EqualSid, GetSecurityDescriptorLength, GetTokenInformation, SetFileSecurityW, TokenUser,
@@ -35,8 +37,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PeekNamedPipe,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+    PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -139,6 +142,68 @@ pub fn secure_file_acl(path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Read the DACL of an existing file or directory as SDDL, for diagnostics.
+pub fn file_dacl_sddl(path: &Path) -> io::Result<String> {
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+    let mut dacl = ptr::null_mut();
+    let status = unsafe {
+        GetNamedSecurityInfoW(
+            wide_path.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let mut text: *mut u16 = ptr::null_mut();
+    let mut text_len = 0u32;
+    let ok = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            &mut text_len,
+        )
+    };
+    if ok == 0 {
+        let error = io::Error::last_os_error();
+        unsafe {
+            LocalFree(descriptor);
+        }
+        return Err(error);
+    }
+    let result = if text.is_null() || text_len == 0 {
+        String::new()
+    } else {
+        // The Win32 length includes the terminating null (and some Windows
+        // versions have been observed to report a second padding null).
+        let mut len = text_len as usize;
+        while len > 0 && unsafe { *text.add(len - 1) } == 0 {
+            len -= 1;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(text, len) };
+        String::from_utf16_lossy(slice)
+    };
+    unsafe {
+        LocalFree(text as *mut c_void);
+        LocalFree(descriptor);
+    }
+    Ok(result)
+}
+
+/// The current process user's SID as a string, for ACL diagnostics.
+pub fn current_user_sid_string() -> io::Result<String> {
+    current_user_sid()
 }
 
 /// Listening endpoint for a local named pipe.
@@ -255,6 +320,26 @@ impl PipeConnection {
     /// PID of the server for a client-side connection.
     pub fn server_pid(&self) -> Option<u32> {
         self.server_pid
+    }
+
+    /// Bytes currently queued in the pipe, without blocking. Event readers use
+    /// this to remain cancellable while waiting for the next frame.
+    pub fn bytes_available(&self) -> io::Result<u32> {
+        let mut available = 0u32;
+        let ok = unsafe {
+            PeekNamedPipe(
+                self.file.as_raw_handle() as HANDLE,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                &mut available,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(available)
     }
 }
 
@@ -501,6 +586,40 @@ mod tests {
     }
 
     #[test]
+    fn file_acl_diagnostics_report_the_current_user() {
+        let path = std::env::temp_dir().join(format!(
+            "fact-acl-{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"acl test").unwrap();
+        secure_file_acl(&path).unwrap();
+        let dacl = file_dacl_sddl(&path).unwrap();
+        let sid = current_user_sid_string().unwrap();
+        // SDDL renders well-known account SIDs (such as the built-in
+        // Administrator used by CI runners) as aliases instead of raw SIDs.
+        let alias = ["SY", "LA", "BA", "DA", "EA", "SA"]
+            .iter()
+            .any(|alias| dacl.contains(&format!(";;;{alias})")));
+        assert!(
+            dacl.contains(&sid) || alias,
+            "DACL {dacl} did not grant the current user {sid}"
+        );
+        assert_eq!(
+            dacl.matches("(A;;").count(),
+            2,
+            "DACL should grant exactly the current user and SYSTEM: {dacl}"
+        );
+        assert!(dacl.contains(";;;SY)"), "DACL is missing SYSTEM: {dacl}");
+        assert!(!dacl.ends_with('\0'));
+        assert!(!dacl.contains(";;;WD)"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn pipe_round_trip_and_same_user_check() {
         let name = format!(
             r"\\.\pipe\fact-test-{}-{}",
@@ -522,6 +641,11 @@ mod tests {
             }
         });
         let mut server = listener.accept().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while server.bytes_available().unwrap() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(server.bytes_available().unwrap(), 4);
         let mut buffer = [0u8; 4];
         server.read_exact(&mut buffer).unwrap();
         assert_eq!(&buffer, b"ping");

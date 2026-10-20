@@ -1,3 +1,9 @@
 fn main() {
-    println!("FACT is under construction.");
+    match fact_cli::run() {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("fact: {error:#}");
+            std::process::exit(1);
+        }
+    }
 }

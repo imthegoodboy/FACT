@@ -83,7 +83,8 @@ pub fn recv_server<R: Read>(reader: &mut R) -> Result<ServerMessage, IpcError> {
 mod windows;
 #[cfg(windows)]
 pub use windows::{
-    client_connect, secure_file_acl, server_accept, PipeConnection, PipeListener, PipeSecurity,
+    client_connect, current_user_sid_string, file_dacl_sddl, secure_file_acl, server_accept,
+    PipeConnection, PipeListener, PipeSecurity,
 };
 
 #[cfg(test)]
