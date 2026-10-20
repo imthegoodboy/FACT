@@ -14,6 +14,7 @@ use fact_protocol::{
     SplitDirection,
 };
 use fact_runtime::{connect, DaemonClient, DaemonIdentity, RuntimeError};
+use fact_session::SessionStore;
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(20);
@@ -841,6 +842,45 @@ fn resuming_a_saved_session_respects_max_sessions() {
     }
 
     shutdown(client, handle, &harness);
+}
+
+#[test]
+fn missing_working_directory_is_preserved_for_the_next_restart() {
+    let harness = harness();
+    let handle = start_daemon(&harness);
+    let (_identity, mut client) = wait_for_daemon(&harness);
+    let missing = harness.paths.base.join("missing-working-directory");
+    assert!(!missing.exists());
+    let missing_text = missing.display().to_string();
+
+    match client
+        .request(Command::ResumeSession {
+            name: Some("missing-cwd".into()),
+            grid: Some(1),
+            profile: None,
+            cwd: Some(missing_text.clone()),
+        })
+        .expect("resume with a missing working directory")
+    {
+        ResponsePayload::Attached(_) => {}
+        other => panic!("expected Attached response, got {other:?}"),
+    }
+    assert!(matches!(
+        client
+            .request(Command::TerminateSession {
+                name: "missing-cwd".into(),
+            })
+            .expect("terminate missing-cwd"),
+        ResponsePayload::Ack
+    ));
+    shutdown(client, handle, &harness);
+
+    let store = SessionStore::open(&harness.paths.db_file).expect("open the session store");
+    let saved = store.load("missing-cwd").expect("load the saved session");
+    assert_eq!(
+        saved.panes.first().and_then(|pane| pane.cwd.as_deref()),
+        Some(missing_text.as_str())
+    );
 }
 
 #[test]

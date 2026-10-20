@@ -2013,7 +2013,10 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
         title_hint,
     } = spec;
     let resolved = config.resolve_profile(profile).map_err(map_config_error)?;
-    let mut workdir = cwd
+    // Keep the requested directory even when it is currently missing. The
+    // shell falls back for this launch, but the path survives so a later
+    // restart can use it once the directory is available again.
+    let requested_cwd = cwd
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| {
@@ -2021,13 +2024,11 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
                 ProtocolError::invalid(format!("working directory is invalid: {error}"))
             })
         })
-        .transpose()?;
-    if let Some(dir) = &workdir {
-        if !dir.is_dir() {
-            workdir = None;
-        }
-    }
-    let workdir = workdir
+        .transpose()?
+        .map(absolute_dir);
+    let workdir = requested_cwd
+        .clone()
+        .filter(|dir| dir.is_dir())
         .or_else(|| resolved.cwd.clone().filter(|dir| dir.is_dir()))
         .map(absolute_dir);
 
@@ -2071,7 +2072,9 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
         last_bell: 0,
         exit_code: None,
         profile: profile.map(str::to_string),
-        cwd: workdir.as_ref().map(|path| path.display().to_string()),
+        cwd: requested_cwd
+            .as_ref()
+            .map(|path| path.display().to_string()),
     })
 }
 
