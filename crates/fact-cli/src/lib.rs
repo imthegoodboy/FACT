@@ -29,8 +29,6 @@ mouse = true
 confirm_close = true
 copy_on_select = false
 persist_interval_secs = 10
-snapshot_interval_secs = 20
-snapshot_max_bytes = 262144
 max_sessions = 32
 max_frame_cells = 2000000
 daemon_log_level = "info"
@@ -134,7 +132,7 @@ enum Commands {
         /// New name.
         new_name: String,
     },
-    /// Persist a live session's layout and visual snapshots now.
+    /// Persist a live session's layout and pane metadata now.
     Save {
         /// Session to save; defaults to the most recently used live session.
         name: Option<String>,
@@ -179,7 +177,7 @@ enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Stop a live session's shells while keeping its saved output.
+    /// Stop a live session's shells while keeping its saved layout.
     Terminate {
         /// Session name.
         name: String,
@@ -190,7 +188,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Stop the per-user daemon (all live sessions are snapshotted first).
+    /// Stop the per-user daemon and its shells (FACT attempts to save layouts first).
     Shutdown,
     /// Inspect or create the configuration file.
     Config {
@@ -321,7 +319,7 @@ pub fn run() -> Result<i32> {
                 &mut client,
                 Command::TerminateSession { name: name.clone() },
             )?;
-            println!("Terminated live shells in '{name}'. The saved output is still resumable.");
+            println!("Terminated live shells in '{name}'. The saved layout is still resumable.");
             Ok(0)
         }
         Some(Commands::Stats { json }) => {
@@ -591,7 +589,7 @@ fn run_sessions(paths: &Paths, all: bool, json: bool) -> Result<()> {
     }
 
     println!(
-        "{:<24} {:<10} {:>5} {:>5}  {:<20} NOTE",
+        "{:<24} {:<10} {:>5} {:>5}  {:<20}",
         "NAME", "STATE", "PANES", "TABS", "UPDATED"
     );
     for session in sessions {
@@ -602,18 +600,13 @@ fn run_sessions(paths: &Paths, all: bool, json: bool) -> Result<()> {
         } else {
             "saved"
         };
-        let note = session
-            .cold_recovered_at_ms
-            .map(|_| "cold-recovered")
-            .unwrap_or("");
         println!(
-            "{:<24} {:<10} {:>5} {:>5}  {:<20} {}",
+            "{:<24} {:<10} {:>5} {:>5}  {:<20}",
             output::shorten(&session.name, 24),
             state,
             session.pane_count,
             session.tab_count,
             output::format_time(session.updated_at_ms),
-            note
         );
     }
     Ok(())

@@ -9,7 +9,7 @@ reachable service.
 ## Assets
 
 - control of live ConPTY processes, including keyboard input and process exit
-- terminal output and saved visual snapshots, which may contain secrets
+- terminal output and scrollback held in daemon memory, which may contain secrets
 - the session database, layout and export files
 - the daemon identity file and authentication token
 - configuration, including profile commands and environment values
@@ -90,30 +90,35 @@ unauthenticated connection.
 
 The data root is `%LOCALAPPDATA%\FACT` by default, which Windows already scopes to
 the user profile. FACT additionally protects the base and runtime directories
-with a DACL for the current user and SYSTEM. Snapshot, database and log files live
-under that root.
+with a DACL for the current user and SYSTEM. Database and log files live under
+that root.
 
 The daemon identity file is not encrypted; its protection is the file ACL. On a
 machine where another principal can take ownership or read raw disk content,
 BitLocker or other volume encryption is the appropriate control.
 
-## Snapshots, imports and execution
+## Saved layouts, imports and execution
 
-Cold recovery is data replay, not command replay:
+A daemon restart reopens the saved layout with new shells; it does not replay a
+screen or a command log:
 
-- snapshots are ANSI visual content, not shell history or an input log
-- a snapshot has a size limit, rejects NUL bytes, carries its dimensions and a
-  SHA-256 checksum
-- session load validates pane IDs, layout consistency, dimensions and checksums
-- invalid data fails closed; FACT does not fall back to unvalidated raw input
-- recovered output is written into a fresh terminal model with a fresh shell;
-  saved bytes are never submitted to the shell as commands
+- SQLite stores pane identity, profile, working directory and layout, not
+  terminal output or input history
+- a v0.2 database may still contain legacy snapshot columns; the v2 migration
+  clears the columns with SQLite secure deletion, vacuums the database and
+  truncates the WAL before the session is loaded, and the current code never
+  reads or replays them
+- session load validates pane IDs and layout consistency, and invalid data fails
+  closed rather than starting an inconsistent process tree
 - imports are parsed as versioned JSON, validated, and always receive a new
-  session ID, fresh pane identity and reset PIDs/exit codes
+  session ID and reset PIDs/exit codes; pane IDs are remapped when the saved
+  layout starts
+- restarting a layout starts the configured profile command in a fresh shell;
+  no saved bytes are submitted as commands
 
-Session exports contain terminal output and metadata. Treat them as sensitive
-files and review them before sharing. Importing a session does not execute saved
-content, but the new shells still inherit your profile command and environment.
+Session exports contain layout and metadata, not terminal output. Importing a
+session does not execute saved content, but the new shells still inherit your
+profile command and environment.
 
 ## Profiles and child processes
 
@@ -129,7 +134,7 @@ process semantics.
 
 ## Logging and error output
 
-FACT logs lifecycle, errors, PIDs, sizes and recovery decisions. It does not log
+FACT logs lifecycle, errors, PIDs, sizes and restart decisions. It does not log
 the authentication token or configured environment values. Terminal content is
 not copied into logs. Error messages can include file paths. The client does not
 print the daemon token.
@@ -143,9 +148,9 @@ print the daemon token.
 | Another process squats the pipe name before daemon start | `FILE_FLAG_FIRST_PIPE_INSTANCE` on the first instance. |
 | Client impersonation by a malicious server | Identification-only impersonation. |
 | Unauthenticated command injection over IPC | Random 256-bit token, constant-time comparison, one-time stream grants. |
-| Forged or corrupted recovery data | Snapshot checksum, dimensions, size/NUL checks and layout validation. |
+| Forged or corrupted layout data | Structured JSON validation, pane/layout consistency checks and transactional SQLite writes. |
 | Imported session overwrites an existing one | Import always creates a fresh identity; name collisions require explicit overwrite. |
-| Remote terminal escape tricks through snapshots | Snapshots are validated visual ANSI and replayed into an isolated terminal model, never executed as shell input. |
+| Legacy v0.2 snapshots exposing old screen content | The v2 migration clears the snapshot columns with SQLite secure deletion, vacuums the database and truncates the WAL before the session is loaded; they are never replayed. |
 | Credential leakage in logs | Token and environment values are not logged. |
 
 ## Out of scope and limitations
@@ -156,15 +161,16 @@ print the daemon token.
   bypass ACLs.
 - **No encryption at rest.** Use BitLocker or another volume encryption product
   for data-at-rest protection.
-- **No code signing yet.** v0.2.3 release artifacts are accompanied by SHA-256
+- **No code signing yet.** v0.3.0 release artifacts are accompanied by SHA-256
   checksums. Verify them before running. SmartScreen reputation may be absent.
 - **Terminal output can contain secrets.** Commands, environment dumps, tokens
-  printed to the terminal and prompts may be saved in snapshots. Clear sensitive
-  output or reduce `snapshot_max_bytes`/scrollback if needed. Snapshots capture
-  the visible screen, not unlimited history, but they are still sensitive.
+  printed to the terminal and prompts remain in daemon memory and scrollback, but
+  FACT no longer writes them to SQLite or exports. A v0.2 database backup may
+  still contain legacy snapshots until it is opened and migrated; migration
+  clears the live database and truncates its WAL.
 - **Child processes are not sandboxed.** Shells and programs run with your normal
   user rights.
-- **Windows 10 is not verified for v0.2.3.** See the compatibility section in the
+- **Windows 10 is not verified for v0.3.0.** See the compatibility section in the
   README.
 - **Named-pipe availability.** A denial-of-service by a same-user or administrator
   process is not preventable by FACT.
@@ -178,8 +184,8 @@ fact shutdown
 fact resume
 ```
 
-A graceful shutdown snapshots live sessions and removes the identity file only if
-it still contains the daemon's token. A new daemon writes a new token. On upgrade,
+A graceful shutdown attempts to save live layouts and removes the identity file
+only if it still contains the daemon's token. A new daemon writes a new token. On upgrade,
 an unusable identity is cleared only after probing that no process still accepts
 the recorded pipe; a live incompatible daemon is never overwritten and produces a
 stop-and-retry error. If you

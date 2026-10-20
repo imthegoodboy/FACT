@@ -51,7 +51,7 @@ pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("split_right", "Split right"),
     ("split_down", "Split down"),
     ("close_pane", "Close pane"),
-    ("close_tab", "Close tab"),
+    ("close_tab", "Close tab / grid"),
     ("restart_pane", "Restart pane"),
     ("zoom", "Toggle maximize / full grid"),
     ("maximize", "Maximize focused pane"),
@@ -70,6 +70,7 @@ pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("rename_tab", "Rename tab"),
     ("palette", "Command palette"),
     ("search", "Search pane"),
+    ("scroll_mode", "Browse scrollback"),
     ("sessions", "Switch session"),
     ("detach", "Detach and keep shells"),
     ("help", "Help"),
@@ -518,7 +519,6 @@ struct ScrollDrag {
 
 #[derive(Debug)]
 enum Overlay {
-    Cold(ColdState),
     Help(HelpState),
     Palette(PaletteState),
     Search(SearchState),
@@ -526,11 +526,6 @@ enum Overlay {
     Confirm(ConfirmState),
     Context(ContextState),
     Sessions(SessionsState),
-}
-
-#[derive(Debug)]
-struct ColdState {
-    notes: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -610,6 +605,7 @@ struct App {
     selection: Option<Selection>,
     drag_split: Option<DragSplit>,
     scroll_drag: Option<ScrollDrag>,
+    scroll_mode: Option<u64>,
     app_mouse_down: Option<(MouseButton, u64)>,
     status: Option<(String, Instant)>,
     exit_message: Option<String>,
@@ -627,7 +623,6 @@ impl App {
         height: u16,
     ) -> Self {
         let theme = Theme::by_name(&config.theme);
-        let overlay = cold_overlay(&info);
         Self {
             client,
             info,
@@ -643,11 +638,12 @@ impl App {
             bells: HashSet::new(),
             width,
             height,
-            overlay,
+            overlay: None,
             prefix_armed: false,
             selection: None,
             drag_split: None,
             scroll_drag: None,
+            scroll_mode: None,
             app_mouse_down: None,
             status: None,
             exit_message: None,
@@ -788,6 +784,72 @@ impl App {
         self.focused_pane().map(|pane| pane.id)
     }
 
+    fn enter_scroll_mode(&mut self) {
+        let Some(pane) = self.focused_pane() else {
+            self.set_status("No pane to scroll.");
+            return;
+        };
+        let pane_id = pane.id;
+        let history = pane.history_lines;
+        if history == 0 {
+            self.set_status("No scrollback above this pane yet.");
+            return;
+        }
+        self.selection = None;
+        self.scroll_mode = Some(pane_id);
+        self.set_status(format!(
+            "Scroll mode: {history} lines. Up/Down, PgUp/PgDn, Home/End, Esc exits."
+        ));
+    }
+
+    fn handle_scroll_key(&mut self, key: KeyEvent) {
+        let Some(pane_id) = self.scroll_mode else {
+            return;
+        };
+        let Some((history, rows)) = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.panes.iter().find(|pane| pane.id == pane_id))
+            .map(|pane| (pane.history_lines, pane.content_rows))
+        else {
+            self.scroll_mode = None;
+            self.set_status("The scrolled pane closed; scroll mode ended.");
+            return;
+        };
+        let page = i64::from(rows.max(1));
+        match key.code {
+            CKeyCode::Esc => {
+                self.scroll_mode = None;
+                self.set_status("Scroll mode closed.");
+            }
+            CKeyCode::Char('q') if key.modifiers == KeyModifiers::NONE => {
+                self.scroll_mode = None;
+                self.set_status("Scroll mode closed.");
+            }
+            CKeyCode::Up => self.scroll_relative(pane_id, 1),
+            CKeyCode::Down => self.scroll_relative(pane_id, -1),
+            CKeyCode::PageUp => self.scroll_relative(pane_id, page),
+            CKeyCode::PageDown => self.scroll_relative(pane_id, -page),
+            CKeyCode::Home | CKeyCode::Char('g') => {
+                self.scroll_to(pane_id, history, history);
+            }
+            CKeyCode::End | CKeyCode::Char('G') => {
+                self.scroll_to(pane_id, 0, history);
+            }
+            _ => self.set_status("Scroll mode: Up/Down, PgUp/PgDn, Home/End (g/G), Esc exits."),
+        }
+    }
+
+    fn scroll_relative(&mut self, pane: u64, delta: i64) {
+        let delta = delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let _ = self.send(Command::ScrollPane { pane, delta });
+    }
+
+    fn scroll_to(&mut self, pane: u64, offset: usize, history: usize) {
+        let _ = self.send(Command::SetScrollOffset { pane, offset });
+        self.set_status(format!("Scroll {offset}/{history} — Esc exits."));
+    }
+
     fn active_tab(&self) -> Option<&TabView> {
         self.frame.as_ref()?.tabs.iter().find(|tab| tab.active)
     }
@@ -840,6 +902,10 @@ impl App {
     fn handle_key(&mut self, key: KeyEvent) {
         if self.overlay.is_some() {
             self.handle_overlay_key(key);
+            return;
+        }
+        if self.scroll_mode.is_some() {
+            self.handle_scroll_key(key);
             return;
         }
         let Some(chord) = keymap::chord_for(key) else {
@@ -929,6 +995,10 @@ impl App {
     }
 
     fn paste_text(&mut self, text: String) {
+        if self.scroll_mode.is_some() {
+            self.set_status("Scroll mode: press Esc before pasting.");
+            return;
+        }
         if text.is_empty() {
             return;
         }
@@ -974,7 +1044,7 @@ impl App {
                 if let Some(tab) = self.active_tab() {
                     let tab_id = tab.id;
                     self.confirm_or_send(
-                        format!("Close tab '{}' and all of its panes?", tab.title),
+                        format!("Terminate grid '{}' and stop all of its panes?", tab.title),
                         Command::CloseTab { tab: tab_id },
                     );
                 }
@@ -1061,6 +1131,7 @@ impl App {
                     self.set_status("No pane to search.");
                 }
             }
+            "scroll_mode" => self.enter_scroll_mode(),
             "sessions" => self.open_sessions(),
             "help" => {
                 self.overlay = Some(Overlay::Help(HelpState::default()));
@@ -1166,9 +1237,6 @@ impl App {
             }
         };
         let display_name = info.session.name.clone();
-        let cold = info.cold_recovered.then(|| ColdState {
-            notes: info.recovery_notes.clone(),
-        });
         self.stop_events();
         self.events = spawn_reader(stream);
         self.info = info;
@@ -1181,8 +1249,9 @@ impl App {
         self.selection = None;
         self.drag_split = None;
         self.scroll_drag = None;
+        self.scroll_mode = None;
         self.app_mouse_down = None;
-        self.overlay = cold.map(Overlay::Cold);
+        self.overlay = None;
         self.set_status(format!("Attached to '{display_name}'."));
         self.resize_session();
     }
@@ -1220,15 +1289,6 @@ impl App {
             return;
         };
         match overlay {
-            Overlay::Cold(cold) => {
-                if matches!(key.code, CKeyCode::Enter | CKeyCode::Esc)
-                    || matches!(key.code, CKeyCode::Char(' '))
-                {
-                    self.set_status("Continuing in the recovered session.");
-                } else {
-                    self.overlay = Some(Overlay::Cold(cold));
-                }
-            }
             Overlay::Help(mut help) => {
                 let total = help_lines(&self.keys).len();
                 match key.code {
@@ -1632,6 +1692,7 @@ impl App {
                             "search",
                             "restart_pane",
                             "close_pane",
+                            "close_tab",
                             "copy",
                         ],
                     }));
@@ -1697,12 +1758,25 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
-                    let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                        3
+                let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                    3
+                } else {
+                    -3
+                };
+                if let Some(pane) = self.scroll_mode {
+                    let exists = self
+                        .frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.panes.iter().any(|view| view.id == pane));
+                    if exists {
+                        let _ = self.send(Command::ScrollPane { pane, delta });
                     } else {
-                        -3
-                    };
+                        self.scroll_mode = None;
+                        self.set_status("The scrolled pane closed; scroll mode ended.");
+                    }
+                    return;
+                }
+                if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
                     let _ = self.send(Command::ScrollPane {
                         pane: geometry.pane,
                         delta,
@@ -1712,11 +1786,12 @@ impl App {
                 let Some((pane, x, y)) = self.pane_at(mouse.column, content_y) else {
                     return;
                 };
-                let app_mouse = self
-                    .frame
-                    .as_ref()
-                    .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-                    .is_some_and(|view| view.modes & pane_modes::MOUSE_CLICK != 0);
+                let app_mouse = !mouse.modifiers.contains(KeyModifiers::SHIFT)
+                    && self
+                        .frame
+                        .as_ref()
+                        .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+                        .is_some_and(|view| view.modes & pane_modes::MOUSE_CLICK != 0);
                 if app_mouse {
                     let data = keymap::sgr_wheel(
                         matches!(mouse.kind, MouseEventKind::ScrollUp),
@@ -1726,11 +1801,6 @@ impl App {
                     );
                     let _ = self.send(Command::Input { pane, data });
                 } else {
-                    let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                        3
-                    } else {
-                        -3
-                    };
                     let _ = self.send(Command::ScrollPane { pane, delta });
                 }
             }
@@ -1894,22 +1964,6 @@ impl App {
     }
 }
 
-fn cold_overlay(info: &AttachInfo) -> Option<Overlay> {
-    if info.cold_recovered {
-        let mut notes = info.recovery_notes.clone();
-        if notes.is_empty() {
-            notes.push("The previous shell processes are gone; new shells were started.".into());
-        }
-        notes.push(
-            "Saved output was restored for context. Commands are never replayed automatically."
-                .into(),
-        );
-        Some(Overlay::Cold(ColdState { notes }))
-    } else {
-        None
-    }
-}
-
 fn palette_items(keys: &CompiledKeybinds) -> Vec<PaletteItem> {
     let mut items: Vec<PaletteItem> = ACTION_INFO
         .iter()
@@ -1939,9 +1993,9 @@ fn filtered_palette<'a>(items: &'a [PaletteItem], query: &str) -> Vec<&'a Palett
         .collect()
 }
 
-/// Direct M/N aliases for maximize/show-all. Ctrl+M is indistinguishable from
-/// Enter in terminal input, so Alt is the safe modifier for a direct chord; the
-/// remappable prefix+M/N bindings do the same thing.
+/// Direct grid aliases. Ctrl+M is indistinguishable from Enter in terminal
+/// input, so Alt is the safe modifier for a direct chord. `Alt+T` terminates the
+/// active grid; the remappable prefix bindings do the same things.
 fn direct_grid_action(key: KeyEvent) -> Option<&'static str> {
     if !key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
         return None;
@@ -1949,6 +2003,7 @@ fn direct_grid_action(key: KeyEvent) -> Option<&'static str> {
     match key.code {
         CKeyCode::Char('m' | 'M') => Some("maximize"),
         CKeyCode::Char('n' | 'N') => Some("show_all"),
+        CKeyCode::Char('t' | 'T') => Some("close_tab"),
         _ => None,
     }
 }
@@ -1964,7 +2019,13 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
         "New tab".into(),
         "prefix+C, or click + when the tab strip is visible".into(),
     ));
-    lines.push(("Scrollback".into(), "mouse wheel or drag the bar".into()));
+    lines.push((
+        "Scrollback".into(),
+        format!(
+            "wheel, Shift+wheel, or {} then arrows / PgUp / PgDn",
+            keys.describe("scroll_mode")
+        ),
+    ));
     lines.push((
         "Bell".into(),
         "an amber dot appears at the pane's top-right".into(),
@@ -1978,6 +2039,7 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
         "drag in a pane (Shift+drag if the app uses the mouse)".into(),
     ));
     lines.push(("Direct maximize / show all".into(), "Alt+M / Alt+N".into()));
+    lines.push(("Terminate active grid".into(), "Alt+T".into()));
     lines.push(("Prefix".into(), keys.prefix.to_string()));
     lines
 }
@@ -2087,11 +2149,17 @@ mod tests {
     }
 
     #[test]
-    fn alt_m_and_alt_n_are_direct_grid_actions() {
+    fn alt_grid_shortcuts_are_direct_actions() {
         let alt_m = KeyEvent::new(CKeyCode::Char('m'), KeyModifiers::ALT);
         let alt_n = KeyEvent::new(CKeyCode::Char('n'), KeyModifiers::ALT);
+        let alt_t = KeyEvent::new(CKeyCode::Char('t'), KeyModifiers::ALT);
         assert_eq!(direct_grid_action(alt_m), Some("maximize"));
         assert_eq!(direct_grid_action(alt_n), Some("show_all"));
+        assert_eq!(direct_grid_action(alt_t), Some("close_tab"));
+        assert_eq!(
+            direct_grid_action(KeyEvent::new(CKeyCode::Char('t'), KeyModifiers::NONE)),
+            None
+        );
         assert_eq!(
             direct_grid_action(KeyEvent::new(CKeyCode::Char('m'), KeyModifiers::NONE)),
             None
@@ -2151,7 +2219,6 @@ mod tests {
             scroll_offset: 0,
             history_lines: 0,
             bell_seq: 0,
-            cold_restored: false,
             focused: true,
         }
     }

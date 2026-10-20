@@ -319,6 +319,7 @@ pub const ACTIONS: &[&str] = &[
     "rename_tab",
     "palette",
     "search",
+    "scroll_mode",
     "sessions",
     "detach",
     "help",
@@ -353,6 +354,7 @@ pub fn default_keybinds() -> BTreeMap<String, String> {
         ("rename_tab", "prefix+shift+t"),
         ("palette", "prefix+k"),
         ("search", "prefix+/"),
+        ("scroll_mode", "prefix+["),
         ("sessions", "prefix+s"),
         ("detach", "prefix+d"),
         ("help", "f1"),
@@ -504,6 +506,10 @@ mod tests {
         assert_eq!(
             compiled.action_for(true, KeyChord::new(Modifiers::NONE, KeyCode::Char('|'))),
             Some("split_right")
+        );
+        assert_eq!(
+            compiled.action_for(true, KeyChord::new(Modifiers::NONE, KeyCode::Char('['))),
+            Some("scroll_mode")
         );
         assert_eq!(
             compiled.action_for(

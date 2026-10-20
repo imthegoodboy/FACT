@@ -7,7 +7,7 @@ running when the UI detaches or the terminal window closes.
 FACT is not a wrapper around Windows Terminal or tmux. It owns its ConPTY
 processes, terminal models, layout tree and session database.
 
-> **Status:** v0.2.3. Windows 11 is the primary, continuously tested target.
+> **Status:** v0.3.0. Windows 11 is the primary, continuously tested target.
 > Windows 10 1809+ is intended to work but is not yet verified; see
 > [Compatibility](#compatibility). Release artifacts are produced only from
 > version tags after every gate in this repository passes.
@@ -19,9 +19,9 @@ processes, terminal models, layout tree and session database.
   scrollback.
 - **Survives detach.** The UI can exit while the daemon keeps shells running.
   `fact resume` reattaches to the same processes.
-- **Survives a daemon restart.** Saved layout and visual output are restored
-  into new shells. FACT reports that the previous processes were lost, and it
-  never replays commands.
+- **Survives a daemon restart.** The saved layout reopens with a fresh shell in
+  every pane. Old screen output is discarded, never replayed, and there is no
+  recovery dialog.
 - **Tabs, splits and grids.** Binary split tree, focus, zoom, minimize, move and
   swap. Tiny terminals temporarily focus one pane, with `Alt+M`/`Alt+N` to
   maximize or restore the full grid at any size.
@@ -77,11 +77,11 @@ cargo run --bin fact -- --grid 4
 ```powershell
 fact                       # create or resume the default session
 fact --grid 8              # start or reattach the dedicated grid-8 session
-fact --session dev         # warm reattach, or cold recovery after a restart
+fact --session dev         # warm reattach, or reopen the saved layout after a restart
 fact sessions              # saved, live and archived sessions
 fact attach dev            # attach the TUI to a running session
 fact detach                # detach every attached UI, keep shells running
-fact save dev              # persist layout and visual snapshots immediately
+fact save dev              # persist the layout immediately
 fact doctor                # config, database, ACL, shell and ConPTY checks
 ```
 
@@ -91,9 +91,13 @@ remappable keybinding list. `Ctrl+Space k` opens the command palette and
 
 There are no per-pane buttons. Use `Ctrl+Space` then the action from F1 help, or
 right-click a pane for split, maximize/show-all, minimize, restart, close and
-copy. `Alt+M` maximizes the focused pane and `Alt+N` restores the full grid; use
-these when a narrow window would otherwise leave you in focused-pane mode.
-`Ctrl+M` is Enter in terminal input, so it is not available as a direct shortcut.
+copy. `Alt+M` maximizes the focused pane, `Alt+N` restores the full grid, and
+`Alt+T` terminates the active grid after confirmation. `Ctrl+Space` then `[`
+enters scroll mode for the focused pane; use arrows, PgUp/PgDn or Home/End and
+press Esc to return. Shift+wheel scrolls FACT's history even when an application
+captures the mouse. Use `Alt+N` when a narrow window would otherwise leave you in
+focused-pane mode. `Ctrl+M` is Enter in terminal input, so it is not available as
+a direct shortcut.
 Mouse wheel scrollback works in shells, and the scrollbar can be clicked or
 dragged. `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` remain available alongside `Ctrl+Insert` / `Shift+Insert`.
@@ -122,29 +126,29 @@ fact unarchive old-project
 fact delete old-project
 ```
 
-`fact terminate` stops live shells while keeping saved output. `fact shutdown`
-stops the daemon after snapshotting every live session. Deleting a session is
-the only operation that removes its saved output.
+`fact terminate` stops live shells while keeping the saved layout. `fact shutdown`
+stops the daemon after saving every live layout. Deleting a session removes its
+saved layout.
 
 ## Command reference
 
 | Command | Purpose |
 | --- | --- |
-| `fact [--session NAME] [--grid N] [--profile NAME] [--cwd DIR]` | Create, warm-resume or cold-recover a session and open the TUI. `--grid N` targets `grid-N`. |
+| `fact [--session NAME] [--grid N] [--profile NAME] [--cwd DIR]` | Create, warm-resume or reopen a saved layout and open the TUI. `--grid N` targets `grid-N`. |
 | `fact resume [same options]` | Explicit form of the default command. |
 | `fact attach NAME` | Attach to a session that is already live. |
 | `fact sessions [--all] [--json]` | List saved and live sessions; `--all` includes archived. |
 | `fact detach` | Increment the detach generation so attached UIs exit. |
 | `fact doctor [--json]` | Check data directory, config, shell, database, ACLs, logs and ConPTY. |
 | `fact rename OLD NEW` | Rename a live or saved session. |
-| `fact save [NAME]` | Persist a live session now; defaults to the most recently used live session. |
+| `fact save [NAME]` | Persist a live session's layout now; defaults to the most recently used live session. |
 | `fact export [NAME] [--output PATH] [--stdout]` | Write versioned `fact-session` JSON. |
 | `fact import FILE [--name NAME] [--overwrite]` | Import as a new saved session (fresh identity and PIDs). |
 | `fact archive NAME` / `fact unarchive NAME` | Hide/restore a session; archive stops live shells. |
 | `fact delete NAME [--force]` | Delete saved state; `--force` skips the live-shell confirmation. |
-| `fact terminate NAME` | Stop live shells, keep the saved snapshot. |
+| `fact terminate NAME` | Stop live shells, keep the saved layout. |
 | `fact stats [--json]` | Daemon uptime, panes and memory statistics. |
-| `fact shutdown` | Stop the daemon after snapshotting live sessions. |
+| `fact shutdown` | Stop the daemon after saving live layouts. |
 | `fact config validate [--json]` | Parse and validate the configuration. |
 | `fact config init [--force]` | Write a documented default `config.toml`. |
 | `fact config path` | Print the configuration path in use. |
@@ -194,24 +198,23 @@ This is a same-user boundary: any process already running as your Windows user
 can read your data and act as you. See [docs/security.md](docs/security.md) for
 the full threat model, protected assets and limitations.
 
-## Data and recovery
+## Data and saved layouts
 
 The default data root is `%LOCALAPPDATA%\FACT`:
 
 | Path | Contents |
 | --- | --- |
 | `config.toml` | Optional configuration. |
-| `sessions.db` | SQLite sessions, layouts and SHA-256-checked snapshots. |
+| `sessions.db` | SQLite sessions, pane identities and layouts. |
 | `runtime\daemon.json` | Daemon identity, PID, pipe name and token. |
 | `logs\daemon.log` | Append-only daemon log; `fact doctor` warns when it grows large. |
 | `exports\` | Default destination for `fact export`. |
 
-On a clean shutdown, live sessions are snapshotted. If the daemon is killed,
-the last periodic snapshot is used. Cold recovery validates the snapshot,
-replays its visual ANSI content into a new terminal model, starts a new shell,
-and shows a banner stating that the old process is gone and commands were not
-replayed. Output that scrolls above the restored screen remains searchable in
-the scrollback.
+A clean shutdown saves the session layout, not the screen. On the next launch,
+the saved tabs, splits and pane working directories reopen with a fresh shell in
+every pane. Old output is never restored, commands are never replayed, and no
+recovery modal appears. Live detach and reattach are different: they keep the
+original shell processes and their scrollback untouched.
 
 ## Compatibility
 
@@ -219,7 +222,7 @@ the scrollback.
   GitHub's current Windows Server image, which is not Windows 11 itself.
 - **Windows 10 1809+:** expected to work because FACT uses ConPTY and Win32 APIs
   available since 1809. It has not been verified on a physical Windows 10
-  machine, so v0.2.3 does not claim Windows 10 support.
+  machine, so v0.3.0 does not claim Windows 10 support.
 - **Windows on ARM:** not tested.
 - **Linux/macOS:** not supported. The IPC and ConPTY layers are Windows-only.
 
@@ -233,8 +236,9 @@ cargo test --workspace --no-fail-fast
 
 The suite includes unit tests for every crate plus real-ConPTY integration
 tests: eight independent shells, live detach/reattach with PID preservation,
-cold recovery across a daemon restart, session lifecycle, security rejection,
-split/tab/search flows, the CLI command surface and a driven TUI session. See
+fresh shells and discarded output across a daemon restart, session lifecycle,
+security rejection, split/tab/search flows, the CLI command surface and a
+driven TUI session. See
 [docs/testing.md](docs/testing.md).
 
 ## Documentation

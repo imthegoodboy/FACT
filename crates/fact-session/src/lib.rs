@@ -1,15 +1,13 @@
-//! SQLite-backed session metadata, validation, export and cold-recovery snapshots.
+//! SQLite-backed session metadata, validation, layout persistence and export.
 //!
-//! The daemon owns live processes. The database stores enough information to
-//! restore a *visual* layout after a reboot: pane identities, titles, profile and
-//! working directory, plus a bounded ANSI snapshot per pane. Commands are never
-//! persisted or replayed.
+//! The daemon owns live processes. The database stores pane identities, titles,
+//! profile and working directory so a saved layout can be reopened with fresh
+//! shells. Terminal output is never persisted or replayed.
 
 use fact_layout::{SessionLayout, TabLayout};
 use fact_protocol::{validate_session_name, SessionSummary};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,11 +15,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub const EXPORT_FORMAT: &str = "fact-session";
-pub const EXPORT_VERSION: u32 = 1;
+pub const EXPORT_VERSION: u32 = 2;
 pub const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
-pub const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CWD_CHARS: usize = 4096;
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -29,6 +26,8 @@ pub enum SessionError {
     Sql(#[from] rusqlite::Error),
     #[error("session I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("could not compact the session database: {0}")]
+    Compaction(String),
     #[error("session '{0}' was not found")]
     NotFound(String),
     #[error("session '{0}' already exists")]
@@ -43,68 +42,6 @@ pub enum SessionError {
     TooLarge { size: usize },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PaneSnapshot {
-    pub ansi: String,
-    pub cols: u16,
-    pub rows: u16,
-    pub sha256: String,
-    pub format_version: u32,
-    pub captured_at_ms: i64,
-    pub truncated: bool,
-}
-
-impl PaneSnapshot {
-    /// Validate size, hash and dimensions before this snapshot is replayed.
-    pub fn validate(&self) -> Result<(), SessionError> {
-        if self.format_version != 1 {
-            return Err(SessionError::Corrupt(format!(
-                "unsupported snapshot format version {}",
-                self.format_version
-            )));
-        }
-        if self.ansi.len() > MAX_SNAPSHOT_BYTES {
-            return Err(SessionError::Corrupt("snapshot is too large".into()));
-        }
-        if self.ansi.contains('\0') {
-            return Err(SessionError::Corrupt("snapshot contains NUL".into()));
-        }
-        if self.cols == 0 || self.rows == 0 || self.cols > 1000 || self.rows > 1000 {
-            return Err(SessionError::Corrupt(
-                "snapshot dimensions are out of range".into(),
-            ));
-        }
-        let expected = sha256_hex(self.ansi.as_bytes());
-        if !self.sha256.eq_ignore_ascii_case(&expected) {
-            return Err(SessionError::Corrupt(
-                "snapshot checksum does not match its contents".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Build and checksum a snapshot from a terminal serialization.
-    pub fn new(
-        ansi: String,
-        cols: u16,
-        rows: u16,
-        format_version: u32,
-        captured_at_ms: i64,
-        truncated: bool,
-    ) -> Self {
-        let sha256 = sha256_hex(ansi.as_bytes());
-        Self {
-            ansi,
-            cols,
-            rows,
-            sha256,
-            format_version,
-            captured_at_ms,
-            truncated,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaneRecord {
     pub id: u64,
@@ -114,7 +51,6 @@ pub struct PaneRecord {
     /// Profile used to spawn this pane. `None` means the session default.
     pub profile: Option<String>,
     pub cwd: Option<String>,
-    pub snapshot: Option<PaneSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,7 +60,6 @@ pub struct SessionData {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub archived: bool,
-    pub cold_recovered_at_ms: Option<i64>,
     pub layout: SessionLayout,
     pub panes: Vec<PaneRecord>,
 }
@@ -138,7 +73,6 @@ impl SessionData {
             created_at_ms: now,
             updated_at_ms: now,
             archived: false,
-            cold_recovered_at_ms: None,
             layout,
             panes,
         }
@@ -179,7 +113,6 @@ impl SessionData {
             ));
         }
 
-        let mut snapshot_bytes = 0usize;
         for pane in &mut self.panes {
             if pane.title.chars().count() > 128 {
                 return Err(SessionError::Invalid("pane title is too long".into()));
@@ -210,15 +143,6 @@ impl SessionData {
                     )));
                 }
             }
-            if let Some(snapshot) = &pane.snapshot {
-                snapshot.validate()?;
-                snapshot_bytes = snapshot_bytes.saturating_add(snapshot.ansi.len());
-            }
-        }
-        if snapshot_bytes > MAX_EXPORT_BYTES {
-            return Err(SessionError::Invalid(
-                "combined pane snapshots are too large".into(),
-            ));
         }
         for tab in &mut self.layout.tabs {
             tab.title = fact_protocol::sanitize_title(&tab.title);
@@ -236,7 +160,6 @@ impl SessionData {
             live,
             pane_count: self.panes.len(),
             tab_count: self.layout.tabs.len(),
-            cold_recovered_at_ms: self.cold_recovered_at_ms,
         }
     }
 
@@ -256,7 +179,6 @@ pub struct SessionMeta {
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     pub archived: bool,
-    pub cold_recovered_at_ms: Option<i64>,
     pub pane_count: usize,
     pub tab_count: usize,
 }
@@ -272,7 +194,6 @@ impl SessionMeta {
             live,
             pane_count: self.pane_count,
             tab_count: self.tab_count,
-            cold_recovered_at_ms: self.cold_recovered_at_ms,
         }
     }
 }
@@ -354,8 +275,7 @@ impl SessionStore {
                     created_at_ms INTEGER NOT NULL,
                     updated_at_ms INTEGER NOT NULL,
                     archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
-                    layout_json TEXT NOT NULL,
-                    cold_recovered_at_ms INTEGER
+                    layout_json TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS panes (
                     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -365,23 +285,63 @@ impl SessionStore {
                     exit_code INTEGER,
                     profile TEXT,
                     cwd TEXT,
-                    snapshot_ansi TEXT,
-                    snapshot_cols INTEGER,
-                    snapshot_rows INTEGER,
-                    snapshot_sha256 TEXT,
-                    snapshot_format INTEGER,
-                    snapshot_captured_at_ms INTEGER,
-                    snapshot_truncated INTEGER,
                     PRIMARY KEY (session_id, pane_id)
                 );
                 CREATE INDEX IF NOT EXISTS panes_session_idx ON panes(session_id);
                 CREATE INDEX IF NOT EXISTS sessions_updated_idx ON sessions(updated_at_ms DESC);
-                PRAGMA user_version = 1;
+                PRAGMA user_version = 2;
                 COMMIT;
                 "#,
             )?;
+        } else if version == 1 {
+            // v1 stored ANSI screen snapshots and a cold-recovery timestamp.
+            // Layout persistence no longer needs either. Nulling the columns is
+            // not enough on its own: old screen text can survive in free pages
+            // or the WAL. Overwrite freed content, rebuild the database and
+            // truncate the WAL before the store is exposed to callers.
+            self.conn.pragma_update(None, "secure_delete", true)?;
+            self.conn.execute_batch(
+                r#"
+                BEGIN IMMEDIATE;
+                UPDATE panes
+                   SET snapshot_ansi = NULL,
+                       snapshot_cols = NULL,
+                       snapshot_rows = NULL,
+                       snapshot_sha256 = NULL,
+                       snapshot_format = NULL,
+                       snapshot_captured_at_ms = NULL,
+                       snapshot_truncated = NULL;
+                UPDATE sessions SET cold_recovered_at_ms = NULL;
+                COMMIT;
+                "#,
+            )?;
+            self.conn.execute_batch("VACUUM;")?;
+            // Do not finalize the schema until the old WAL frames are gone. If
+            // compaction fails, the database stays at v1 and the next open
+            // retries the whole cleanup instead of skipping it forever.
+            self.checkpoint_truncate()?;
+            self.conn
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(())
+    }
+
+    fn checkpoint_truncate(&self) -> Result<(), SessionError> {
+        const ATTEMPTS: u32 = 10;
+        for attempt in 0..ATTEMPTS {
+            let busy: i64 = self
+                .conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+            if busy == 0 {
+                return Ok(());
+            }
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        Err(SessionError::Compaction(
+            "WAL checkpoint remained busy; retry the next time the store is opened".to_string(),
+        ))
     }
 
     pub fn save(&mut self, session: &SessionData) -> Result<(), SessionError> {
@@ -413,8 +373,7 @@ impl SessionStore {
         let row = self
             .conn
             .query_row(
-                "SELECT id, name, created_at_ms, updated_at_ms, archived,
-                        layout_json, cold_recovered_at_ms
+                "SELECT id, name, created_at_ms, updated_at_ms, archived, layout_json
                  FROM sessions WHERE name = ?1 COLLATE NOCASE",
                 params![name],
                 |row| {
@@ -425,7 +384,6 @@ impl SessionStore {
                         updated_at_ms: row.get(3)?,
                         archived: row.get::<_, i64>(4)? != 0,
                         layout_json: row.get(5)?,
-                        cold_recovered_at_ms: row.get(6)?,
                     })
                 },
             )
@@ -438,8 +396,7 @@ impl SessionStore {
         let row = self
             .conn
             .query_row(
-                "SELECT id, name, created_at_ms, updated_at_ms, archived,
-                        layout_json, cold_recovered_at_ms
+                "SELECT id, name, created_at_ms, updated_at_ms, archived, layout_json
                  FROM sessions WHERE id = ?1",
                 params![id],
                 |row| {
@@ -450,7 +407,6 @@ impl SessionStore {
                         updated_at_ms: row.get(3)?,
                         archived: row.get::<_, i64>(4)? != 0,
                         layout_json: row.get(5)?,
-                        cold_recovered_at_ms: row.get(6)?,
                     })
                 },
             )
@@ -464,35 +420,10 @@ impl SessionStore {
             .map_err(|error| SessionError::Corrupt(format!("layout JSON: {error}")))?;
         let mut panes = Vec::new();
         let mut statement = self.conn.prepare(
-            "SELECT pane_id, title, pid, exit_code, profile, cwd,
-                    snapshot_ansi, snapshot_cols, snapshot_rows, snapshot_sha256,
-                    snapshot_format, snapshot_captured_at_ms, snapshot_truncated
+            "SELECT pane_id, title, pid, exit_code, profile, cwd
              FROM panes WHERE session_id = ?1 ORDER BY pane_id",
         )?;
         let rows = statement.query_map(params![row.id], |record| {
-            let snapshot_ansi: Option<String> = record.get(6)?;
-            let snapshot = snapshot_ansi.map(|ansi| PaneSnapshot {
-                ansi,
-                cols: record.get::<_, Option<u16>>(7).unwrap_or(None).unwrap_or(0),
-                rows: record.get::<_, Option<u16>>(8).unwrap_or(None).unwrap_or(0),
-                sha256: record
-                    .get::<_, Option<String>>(9)
-                    .unwrap_or(None)
-                    .unwrap_or_default(),
-                format_version: record
-                    .get::<_, Option<u32>>(10)
-                    .unwrap_or(None)
-                    .unwrap_or(0),
-                captured_at_ms: record
-                    .get::<_, Option<i64>>(11)
-                    .unwrap_or(None)
-                    .unwrap_or(0),
-                truncated: record
-                    .get::<_, Option<i64>>(12)
-                    .unwrap_or(None)
-                    .unwrap_or(0)
-                    != 0,
-            });
             Ok(PaneRecord {
                 id: record.get::<_, i64>(0)? as u64,
                 title: record.get(1)?,
@@ -500,7 +431,6 @@ impl SessionStore {
                 exit_code: record.get(3)?,
                 profile: record.get(4)?,
                 cwd: record.get(5)?,
-                snapshot,
             })
         })?;
         for pane in rows {
@@ -513,7 +443,6 @@ impl SessionStore {
             created_at_ms: row.created_at_ms,
             updated_at_ms: row.updated_at_ms,
             archived: row.archived,
-            cold_recovered_at_ms: row.cold_recovered_at_ms,
             layout,
             panes,
         };
@@ -540,8 +469,7 @@ impl SessionStore {
 
     pub fn list(&self, include_archived: bool) -> Result<Vec<SessionMeta>, SessionError> {
         let mut statement = self.conn.prepare(
-            "SELECT id, name, created_at_ms, updated_at_ms, archived,
-                    layout_json, cold_recovered_at_ms
+            "SELECT id, name, created_at_ms, updated_at_ms, archived, layout_json
              FROM sessions
              WHERE (?1 = 1 OR archived = 0)
              ORDER BY archived ASC, updated_at_ms DESC, name ASC",
@@ -554,7 +482,6 @@ impl SessionStore {
                 updated_at_ms: row.get(3)?,
                 archived: row.get::<_, i64>(4)? != 0,
                 layout_json: row.get(5)?,
-                cold_recovered_at_ms: row.get(6)?,
             })
         })?;
         let mut sessions = Vec::new();
@@ -568,7 +495,6 @@ impl SessionStore {
                 created_at_ms: row.created_at_ms,
                 updated_at_ms: row.updated_at_ms,
                 archived: row.archived,
-                cold_recovered_at_ms: row.cold_recovered_at_ms,
                 pane_count: layout.all_panes_including_minimized().len(),
                 tab_count: layout.tabs.len(),
             });
@@ -696,7 +622,7 @@ impl SessionStore {
                 envelope.format
             )));
         }
-        if envelope.version != EXPORT_VERSION {
+        if envelope.version == 0 || envelope.version > EXPORT_VERSION {
             return Err(SessionError::Corrupt(format!(
                 "unsupported export version {}",
                 envelope.version
@@ -714,7 +640,6 @@ impl SessionStore {
         envelope.session.created_at_ms = now_ms();
         envelope.session.updated_at_ms = envelope.session.created_at_ms;
         envelope.session.archived = false;
-        envelope.session.cold_recovered_at_ms = None;
         for pane in &mut envelope.session.panes {
             pane.pid = 0;
             pane.exit_code = None;
@@ -736,7 +661,6 @@ struct StoredSessionRow {
     updated_at_ms: i64,
     archived: bool,
     layout_json: String,
-    cold_recovered_at_ms: Option<i64>,
 }
 
 fn insert_session(tx: &Transaction<'_>, session: &SessionData) -> Result<(), SessionError> {
@@ -744,8 +668,8 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionData) -> Result<(), Ses
         .map_err(|error| SessionError::Invalid(format!("layout serialization: {error}")))?;
     tx.execute(
         "INSERT INTO sessions
-         (id, name, created_at_ms, updated_at_ms, archived, layout_json, cold_recovered_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+         (id, name, created_at_ms, updated_at_ms, archived, layout_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             session.id,
             session.name,
@@ -753,17 +677,13 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionData) -> Result<(), Ses
             session.updated_at_ms,
             if session.archived { 1 } else { 0 },
             layout_json,
-            session.cold_recovered_at_ms
         ],
     )?;
     for pane in &session.panes {
-        let snapshot = pane.snapshot.as_ref();
         tx.execute(
             "INSERT INTO panes
-             (session_id, pane_id, title, pid, exit_code, profile, cwd,
-              snapshot_ansi, snapshot_cols, snapshot_rows, snapshot_sha256,
-              snapshot_format, snapshot_captured_at_ms, snapshot_truncated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             (session_id, pane_id, title, pid, exit_code, profile, cwd)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session.id,
                 pane.id as i64,
@@ -772,13 +692,6 @@ fn insert_session(tx: &Transaction<'_>, session: &SessionData) -> Result<(), Ses
                 pane.exit_code,
                 pane.profile,
                 pane.cwd,
-                snapshot.map(|s| s.ansi.as_str()),
-                snapshot.map(|s| s.cols),
-                snapshot.map(|s| s.rows),
-                snapshot.map(|s| s.sha256.as_str()),
-                snapshot.map(|s| s.format_version),
-                snapshot.map(|s| s.captured_at_ms),
-                snapshot.map(|s| if s.truncated { 1i64 } else { 0i64 }),
             ],
         )?;
     }
@@ -790,16 +703,6 @@ pub fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 /// Build a simple tab title from a pane title.
@@ -820,10 +723,6 @@ mod tests {
     use super::*;
     use fact_layout::{LayoutNode, TabLayout};
 
-    fn sample_snapshot() -> PaneSnapshot {
-        PaneSnapshot::new("hello\r\n".to_string(), 40, 10, 1, now_ms(), false)
-    }
-
     fn sample_session() -> SessionData {
         let layout = SessionLayout::new(1, &[10, 11]);
         SessionData::new(
@@ -837,7 +736,6 @@ mod tests {
                     exit_code: None,
                     profile: Some("auto".into()),
                     cwd: Some(r"C:\Users\test".into()),
-                    snapshot: Some(sample_snapshot()),
                 },
                 PaneRecord {
                     id: 11,
@@ -846,7 +744,6 @@ mod tests {
                     exit_code: Some(0),
                     profile: None,
                     cwd: None,
-                    snapshot: None,
                 },
             ],
         )
@@ -860,7 +757,7 @@ mod tests {
         let loaded = store.load("dev").unwrap();
         assert_eq!(loaded.name, "dev");
         assert_eq!(loaded.panes.len(), 2);
-        assert_eq!(loaded.panes[0].snapshot.as_ref().unwrap().ansi, "hello\r\n");
+        assert_eq!(loaded.panes[0].cwd.as_deref(), Some(r"C:\Users\test"));
         assert_eq!(store.list(false).unwrap().len(), 1);
         assert_eq!(store.list(false).unwrap()[0].pane_count, 2);
     }
@@ -878,18 +775,147 @@ mod tests {
     }
 
     #[test]
-    fn rejects_checksum_mismatch() {
-        let mut store = SessionStore::open_in_memory().unwrap();
+    fn v1_migration_clears_legacy_snapshots_and_keeps_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
         let session = sample_session();
-        store.save(&session).unwrap();
-        store
-            .conn
-            .execute(
-                "UPDATE panes SET snapshot_ansi = 'tampered' WHERE session_id = ?1 AND pane_id = 10",
-                params![session.id],
+        let layout_json = serde_json::to_string(&session.layout).unwrap();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0,1)),
+                    layout_json TEXT NOT NULL,
+                    cold_recovered_at_ms INTEGER
+                );
+                CREATE TABLE panes (
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    pane_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    pid INTEGER NOT NULL DEFAULT 0,
+                    exit_code INTEGER,
+                    profile TEXT,
+                    cwd TEXT,
+                    snapshot_ansi TEXT,
+                    snapshot_cols INTEGER,
+                    snapshot_rows INTEGER,
+                    snapshot_sha256 TEXT,
+                    snapshot_format INTEGER,
+                    snapshot_captured_at_ms INTEGER,
+                    snapshot_truncated INTEGER,
+                    PRIMARY KEY (session_id, pane_id)
+                );
+                PRAGMA user_version = 1;
+                "#,
             )
             .unwrap();
-        assert!(store.load("dev").is_err());
+            conn.execute(
+                "INSERT INTO sessions
+                 (id, name, created_at_ms, updated_at_ms, archived, layout_json, cold_recovered_at_ms)
+                 VALUES (?1, 'dev', 1, 1, 0, ?2, 99)",
+                params![session.id, layout_json],
+            )
+            .unwrap();
+            for pane in &session.panes {
+                conn.execute(
+                    "INSERT INTO panes
+                     (session_id, pane_id, title, pid, exit_code, profile, cwd,
+                      snapshot_ansi, snapshot_cols, snapshot_rows, snapshot_sha256,
+                      snapshot_format, snapshot_captured_at_ms, snapshot_truncated)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'legacy screen', 40, 10, 'abc', 1, 1, 0)",
+                    params![
+                        session.id,
+                        pane.id as i64,
+                        pane.title,
+                        pane.pid,
+                        pane.exit_code,
+                        pane.profile,
+                        pane.cwd,
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let store = SessionStore::open(&path).unwrap();
+        let loaded = store.load("dev").unwrap();
+        assert_eq!(loaded.panes.len(), 2);
+        let snapshot: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT snapshot_ansi FROM panes WHERE session_id = ?1 AND pane_id = 10",
+                params![loaded.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let recovered: Option<i64> = store
+            .conn
+            .query_row(
+                "SELECT cold_recovered_at_ms FROM sessions WHERE id = ?1",
+                params![loaded.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot, None);
+        assert_eq!(recovered, None);
+        let freelist: i64 = store
+            .conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(freelist, 0, "VACUUM left free pages behind");
+        drop(store);
+
+        let needle = b"legacy screen";
+        let database = std::fs::read(&path).unwrap();
+        assert!(
+            !database
+                .windows(needle.len())
+                .any(|window| window == needle),
+            "legacy snapshot text remained in the database"
+        );
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{suffix}", path.to_string_lossy()));
+            if let Ok(bytes) = std::fs::read(sidecar) {
+                assert!(
+                    !bytes.windows(needle.len()).any(|window| window == needle),
+                    "legacy snapshot text remained in a SQLite sidecar"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v1_export_snapshot_fields_are_ignored_on_import() {
+        let mut store = SessionStore::open_in_memory().unwrap();
+        let session = sample_session();
+        let mut value = serde_json::to_value(ExportEnvelope {
+            format: EXPORT_FORMAT.to_string(),
+            version: 1,
+            exported_at_ms: 1,
+            session: session.clone(),
+        })
+        .unwrap();
+        value["session"]["cold_recovered_at_ms"] = serde_json::json!(99);
+        value["session"]["panes"][0]["snapshot"] = serde_json::json!({
+            "ansi": "legacy screen",
+            "cols": 40,
+            "rows": 10,
+            "sha256": "abc",
+            "format_version": 1,
+            "captured_at_ms": 1,
+            "truncated": false
+        });
+        let imported = store
+            .import_json(&value.to_string(), Some("legacy-import"), false)
+            .unwrap();
+        assert_eq!(imported.name, "legacy-import");
+        assert_eq!(imported.panes.len(), 2);
+        assert_eq!(store.list(false).unwrap().len(), 1);
     }
 
     #[test]
@@ -960,7 +986,6 @@ mod tests {
                     exit_code: None,
                     profile: None,
                     cwd: None,
-                    snapshot: None,
                 },
                 PaneRecord {
                     id: 2,
@@ -969,7 +994,6 @@ mod tests {
                     exit_code: None,
                     profile: None,
                     cwd: None,
-                    snapshot: None,
                 },
             ],
         );

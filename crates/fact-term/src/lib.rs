@@ -1,8 +1,8 @@
 //! Terminal emulation wrapper.
 //!
 //! Alacritty's mature VT parser/model handles ANSI, alternate screen, wide
-//! characters and scrollback. This crate adds the bounded IPC snapshot format,
-//! safe event handling and cold-recovery serialization used by FACT.
+//! characters and scrollback. This crate adds the bounded frame snapshots and
+//! safe event handling used by FACT.
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -16,12 +16,8 @@ use alacritty_terminal::vte::ansi::{
 use fact_protocol::{
     cell_flags, pane_modes, semantic_color, CellDto, ColorDto, CursorDto, CursorShape,
 };
-use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
-pub const MAX_RESTORE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Shared state filled by parser callbacks and consumed by the daemon.
 #[derive(Default)]
@@ -161,7 +157,6 @@ pub struct TerminalModel {
     sink: TerminalEventSink,
     cols: u16,
     rows: u16,
-    cold_restored: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -173,17 +168,6 @@ pub struct TerminalSnapshot {
     pub history_lines: usize,
     pub title: String,
     pub bell_seq: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct RecoverySnapshot {
-    pub ansi: String,
-    pub cols: u16,
-    pub rows: u16,
-    pub captured_at_ms: i64,
-    pub sha256: String,
-    pub format_version: u32,
-    pub truncated: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +202,6 @@ impl TerminalModel {
             sink,
             cols,
             rows,
-            cold_restored: false,
         }
     }
 
@@ -236,14 +219,6 @@ impl TerminalModel {
 
     pub fn scroll_offset(&self) -> usize {
         self.term.grid().display_offset()
-    }
-
-    pub fn cold_restored(&self) -> bool {
-        self.cold_restored
-    }
-
-    pub fn mark_cold_restored(&mut self) {
-        self.cold_restored = true;
     }
 
     /// Feed bytes from the ConPTY. Parser panics are contained so a malformed
@@ -446,108 +421,6 @@ impl TerminalModel {
         out
     }
 
-    /// Serialize the visual buffer to ANSI SGR text for cold recovery. Bounded
-    /// by both line count and byte size so a terminal full of output cannot
-    /// create a huge or slow-to-restore snapshot.
-    pub fn recovery_snapshot(&self, max_bytes: usize, captured_at_ms: i64) -> RecoverySnapshot {
-        let max_bytes = max_bytes.clamp(4096, MAX_RESTORE_BYTES);
-        let history = self.term.grid().history_size() as i32;
-        let bottom = self.rows as i32;
-        let top = -(history);
-        let mut lines: Vec<String> = Vec::new();
-        let mut bytes = 0usize;
-        let mut truncated = false;
-        let mut line = bottom - 1;
-        // Walk backwards from the visible bottom so truncation keeps the newest
-        // output, then reverse for chronological replay.
-        while line >= top {
-            let mut row = String::new();
-            let mut active = StyleState::default();
-            let mut last_non_space = 0usize;
-            let mut columns_seen = 0usize;
-            for col in 0..self.cols as usize {
-                let cell = &self.term.grid()[Line(line)][Column(col)];
-                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-                columns_seen = col + 1;
-                let style = StyleState::from_cell(cell);
-                if style != active {
-                    row.push_str(&style.sgr_from(&active));
-                    active = style;
-                }
-                let ch = if cell.c == '\0' { ' ' } else { cell.c };
-                row.push(ch);
-                if let Some(zero) = cell.zerowidth() {
-                    for c in zero.iter().take(8) {
-                        row.push(*c);
-                    }
-                }
-                if ch != ' ' || cell.zerowidth().is_some_and(|zero| !zero.is_empty()) {
-                    last_non_space = row.len();
-                }
-                if row.len() >= max_bytes / 8 {
-                    truncated = true;
-                    break;
-                }
-            }
-            let _ = columns_seen;
-            row.truncate(last_non_space);
-            if !active.is_default() {
-                row.push_str("\x1b[0m");
-            }
-            bytes += row.len() + 2;
-            if bytes > max_bytes.saturating_sub(2048) {
-                truncated = true;
-                break;
-            }
-            lines.push(row);
-            line -= 1;
-        }
-        lines.reverse();
-        // Blank rows below the last visible content must not be replayed: each
-        // one would scroll the real content off the top of the restored screen.
-        while lines.last().is_some_and(|line| line.trim().is_empty()) {
-            lines.pop();
-        }
-        let mut ansi = lines.join("\r\n");
-        if truncated {
-            ansi.insert_str(
-                0,
-                "\x1b[2m[FACT: older output omitted from recovery snapshot]\x1b[0m\r\n",
-            );
-        }
-        let mut hasher = Sha256::new();
-        hasher.update(ansi.as_bytes());
-        let sha256 = hex_encode(&hasher.finalize());
-        RecoverySnapshot {
-            ansi,
-            cols: self.cols,
-            rows: self.rows,
-            captured_at_ms,
-            sha256,
-            format_version: SNAPSHOT_FORMAT_VERSION,
-            truncated,
-        }
-    }
-
-    /// Replay a validated cold-recovery snapshot. The caller displays a banner
-    /// making it explicit that the original processes are gone.
-    pub fn restore_snapshot(&mut self, ansi: &str) -> Result<(), RestoreError> {
-        if ansi.len() > MAX_RESTORE_BYTES {
-            return Err(RestoreError::TooLarge);
-        }
-        if ansi.chars().any(|c| c == '\0') {
-            return Err(RestoreError::Invalid("snapshot contains NUL".into()));
-        }
-        self.feed(ansi.as_bytes());
-        // Reset styling without moving the cursor: an extra newline on the
-        // last screen row would scroll restored content off the top.
-        self.feed(b"\x1b[0m");
-        self.mark_cold_restored();
-        Ok(())
-    }
-
     pub fn search(
         &self,
         query: &str,
@@ -614,14 +487,6 @@ impl TerminalModel {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum RestoreError {
-    #[error("recovery snapshot is too large")]
-    TooLarge,
-    #[error("recovery snapshot is invalid: {0}")]
-    Invalid(String),
-}
-
 struct TermSize {
     cols: usize,
     lines: usize,
@@ -638,101 +503,6 @@ impl Dimensions for TermSize {
 
     fn columns(&self) -> usize {
         self.cols
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct StyleState {
-    fg: Option<u32>,
-    bg: Option<u32>,
-    bold: bool,
-    dim: bool,
-    italic: bool,
-    underline: bool,
-    inverse: bool,
-    strike: bool,
-}
-
-impl StyleState {
-    fn is_default(&self) -> bool {
-        *self == Self::default()
-    }
-
-    fn from_cell(cell: &alacritty_terminal::term::cell::Cell) -> Self {
-        let fg = color_key(cell.fg);
-        let bg = color_key(cell.bg);
-        Self {
-            fg,
-            bg,
-            bold: cell.flags.contains(Flags::BOLD),
-            dim: cell.flags.contains(Flags::DIM),
-            italic: cell.flags.contains(Flags::ITALIC),
-            underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-            inverse: cell.flags.contains(Flags::INVERSE),
-            strike: cell.flags.contains(Flags::STRIKEOUT),
-        }
-    }
-
-    fn sgr_from(&self, _previous: &Self) -> String {
-        let mut out = String::from("\x1b[0");
-        if self.bold {
-            out.push_str(";1");
-        }
-        if self.dim {
-            out.push_str(";2");
-        }
-        if self.italic {
-            out.push_str(";3");
-        }
-        if self.underline {
-            out.push_str(";4");
-        }
-        if self.inverse {
-            out.push_str(";7");
-        }
-        if self.strike {
-            out.push_str(";9");
-        }
-        if let Some(fg) = self.fg {
-            if fg & 0xFF00_0000 != 0 {
-                let idx = fg & 0xFF;
-                out.push_str(&format!(";38;5;{idx}"));
-            } else {
-                let r = (fg >> 16) & 0xFF;
-                let g = (fg >> 8) & 0xFF;
-                let b = fg & 0xFF;
-                out.push_str(&format!(";38;2;{r};{g};{b}"));
-            }
-        }
-        if let Some(bg) = self.bg {
-            if bg & 0xFF00_0000 != 0 {
-                let idx = bg & 0xFF;
-                out.push_str(&format!(";48;5;{idx}"));
-            } else {
-                let r = (bg >> 16) & 0xFF;
-                let g = (bg >> 8) & 0xFF;
-                let b = bg & 0xFF;
-                out.push_str(&format!(";48;2;{r};{g};{b}"));
-            }
-        }
-        out.push('m');
-        out
-    }
-}
-
-fn color_key(color: AColor) -> Option<u32> {
-    match color {
-        AColor::Named(NamedColor::Foreground)
-        | AColor::Named(NamedColor::Background)
-        | AColor::Named(NamedColor::Cursor) => None,
-        AColor::Named(named) => {
-            let index = named_index(named);
-            Some(0x0100_0000 | u32::from(index))
-        }
-        AColor::Indexed(index) => Some(0x0100_0000 | u32::from(index)),
-        AColor::Spec(Rgb { r, g, b }) => {
-            Some((u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b))
-        }
     }
 }
 
@@ -841,15 +611,6 @@ fn palette_rgb(index: usize) -> Rgb {
     Rgb { r, g, b }
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,43 +692,6 @@ mod tests {
         assert_eq!(case_hits.len(), 1);
         let (none, _) = t.search("LINE-042", true, 10);
         assert!(none.is_empty());
-    }
-
-    #[test]
-    fn snapshot_restore_preserves_text_and_marks_cold() {
-        let mut source = term(30, 4);
-        source.feed(b"alpha\r\nbeta\r\n\x1b[31mred\x1b[0m\r\n");
-        let snap = source.recovery_snapshot(64 * 1024, 1234);
-        assert!(!snap.ansi.is_empty());
-        assert_eq!(snap.sha256.len(), 64);
-        let mut target = term(30, 4);
-        target.restore_snapshot(&snap.ansi).unwrap();
-        assert!(target.cold_restored());
-        let text = target.plain_text();
-        assert!(text.contains("alpha"));
-        assert!(text.contains("beta"));
-    }
-
-    #[test]
-    fn snapshot_does_not_replay_blank_bottom_rows() {
-        let mut source = term(40, 20);
-        source.feed(b"top-marker\r\nsecond-line\r\n");
-        let snap = source.recovery_snapshot(64 * 1024, 1234);
-        assert!(!snap.ansi.ends_with("\r\n"));
-        assert!(snap.ansi.lines().count() <= 2);
-        let mut target = term(40, 20);
-        target.restore_snapshot(&snap.ansi).unwrap();
-        target.feed(b"\r\n[FACT] recovered\r\n");
-        let text = target.plain_text();
-        assert!(text.contains("top-marker"), "restored text: {text}");
-    }
-
-    #[test]
-    fn restore_rejects_oversize_and_nul() {
-        let mut t = term(10, 2);
-        assert!(t.restore_snapshot("has\0nul").is_err());
-        let huge = "x".repeat(MAX_RESTORE_BYTES + 1);
-        assert!(t.restore_snapshot(&huge).is_err());
     }
 
     #[test]

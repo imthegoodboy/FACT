@@ -348,7 +348,7 @@ try {
     }
     Write-Host "  Next: fact doctor; fact --grid 4"
     if ($replacingExisting) {
-        Write-Host "  Replaced an existing install; its daemon was asked to stop and saved sessions cold-recover on next launch."
+        Write-Host "  Replaced an existing install; its daemon was asked to stop and saved layouts reopen with fresh shells on next launch."
     }
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

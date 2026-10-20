@@ -501,8 +501,8 @@ impl SessionLayout {
         panes
     }
 
-    /// Rewrite every pane identity, e.g. when a saved session is cold-restored
-    /// into a daemon that already owns other panes with the same old IDs.
+    /// Rewrite every pane identity, e.g. when a saved layout is reopened in a
+    /// daemon that already owns other panes with the same old IDs.
     pub fn remap_panes(&mut self, map: &BTreeMap<u64, u64>) -> Result<(), LayoutError> {
         for tab in &mut self.tabs {
             if let Some(root) = &mut tab.root {

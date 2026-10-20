@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use fact_layout::SessionLayout;
-use fact_session::{now_ms, PaneRecord, PaneSnapshot, SessionData, SessionStore};
+use fact_session::{PaneRecord, SessionData, SessionStore};
 use serde_json::Value;
 
 fn fact_exe() -> PathBuf {
@@ -87,14 +87,6 @@ impl TestHome {
                     exit_code: None,
                     profile: Some("auto".into()),
                     cwd: Some(r"C:\Users\test".into()),
-                    snapshot: Some(PaneSnapshot::new(
-                        "PS> hello\r\n".to_string(),
-                        40,
-                        10,
-                        1,
-                        now_ms(),
-                        false,
-                    )),
                 },
                 PaneRecord {
                     id: 11,
@@ -103,7 +95,6 @@ impl TestHome {
                     exit_code: Some(0),
                     profile: None,
                     cwd: None,
-                    snapshot: None,
                 },
             ],
         );

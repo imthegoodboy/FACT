@@ -13,7 +13,7 @@ Download the zip and `SHA256SUMS.txt` from the
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 # Pin a version:
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version v0.2.3
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version v0.3.0
 
 # Custom location, no PATH change:
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
@@ -31,13 +31,13 @@ The script:
 6. copies to `%LOCALAPPDATA%\Programs\FACT`,
 7. adds that directory to the **user** PATH unless `-NoPath` is given.
 
-Existing sessions remain in `%LOCALAPPDATA%\FACT`. A replaced daemon is cold
-recovered on the next launch; saved output is restored but old processes are
-gone by design.
+Existing sessions remain in `%LOCALAPPDATA%\FACT`. A replaced daemon reopens the
+saved layout with fresh shells on the next launch. Previous processes and old
+screen output are gone by design; no recovery modal is shown.
 
-v0.2.3 uses wire protocol 4. The installer stops the previous daemon before
+v0.3.0 uses wire protocol 5. The installer stops the previous daemon before
 replacing the binary and removes a dead daemon identity left by a crash or an
-older version. A v0.2.3 client never attaches to a daemon speaking a different
+older version. A v0.3.0 client never attaches to a daemon speaking a different
 protocol: if no process owns the old pipe it clears the stale identity and starts
 the current daemon, and if the old daemon is still alive it reports a clear
 stop-and-retry error. If you replace `fact.exe` manually, run `fact shutdown`
@@ -56,7 +56,7 @@ Local builds do not have a release checksum. The script says so explicitly.
 ## Verify a download manually
 
 ```powershell
-Get-FileHash .\fact-v0.2.3-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash .\fact-v0.3.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -98,7 +98,7 @@ markers.
 
 3. Complete the manual smoke checklist in
    [testing.md](testing.md#manual-smoke-check), including a real detach/reattach
-   PID check and a cold recovery.
+   PID check and a saved-layout restart with fresh shell PIDs.
 4. Ensure `Cargo.toml`'s workspace version matches the intended tag
    (`X.Y.Z` -> `vX.Y.Z`). Update `CHANGELOG.md`.
 5. Create the annotated tag on the verified `main` commit and push it:
@@ -106,8 +106,8 @@ markers.
    ```powershell
    git switch main
    git pull --ff-only
-   git tag -a v0.2.3 -m "FACT v0.2.3"
-   git push origin v0.2.3
+   git tag -a v0.3.0 -m "FACT v0.3.0"
+   git push origin v0.3.0
    ```
 
 6. The `Release` workflow runs. Its `verify` job enforces:
@@ -126,9 +126,9 @@ markers.
 7. Verify the published assets from a clean directory:
 
    ```powershell
-   gh release view v0.2.3 --repo imthegoodboy/FACT
-   gh release download v0.2.3 --repo imthegoodboy/FACT
-   Get-FileHash .\fact-v0.2.3-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+   gh release view v0.3.0 --repo imthegoodboy/FACT
+   gh release download v0.3.0 --repo imthegoodboy/FACT
+   Get-FileHash .\fact-v0.3.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
    Get-Content .\SHA256SUMS.txt
    ```
 
@@ -143,11 +143,13 @@ markers.
    Remove-Item Env:\FACT_SMOKE_EXE
    ```
 
-   The tests launch eight shells, type into a pane, detach, verify that all eight
-   panes remain live, then stop the daemon and cold-resume to check the recovery
-   modal and a new shell PID. Also perform the manual checks in
-   [testing.md](testing.md#manual-smoke-check) for restored output and the final
-   release sign-off.
+   The main smoke test launches eight shells, types into a pane and detaches,
+   verifying that all eight panes remain live. The
+   `tui_saved_layout_starts_fresh_shell_without_recovery_screen` test then stops
+   the daemon and resumes to check for a fresh shell PID, no old output and no
+   recovery modal; `scroll_mode_reads_history_without_sending_keys_to_the_shell`
+   covers keyboard scrolling. Also perform the manual checks in
+   [testing.md](testing.md#manual-smoke-check) for the final release sign-off.
 
 Do not create a release manually. A release without the gate run is not a FACT
 release.
@@ -155,7 +157,7 @@ release.
 ## Artifact contents
 
 ```text
-fact-v0.2.3-x86_64-pc-windows-msvc/
+fact-v0.3.0-x86_64-pc-windows-msvc/
   fact.exe
   README.md
   LICENSE
@@ -190,6 +192,6 @@ fact-v0.2.3-x86_64-pc-windows-msvc/
 
 ## Compatibility statement
 
-v0.2.3 targets Windows 11 x64. Windows 10 1809+ is intended to work but has not
+v0.3.0 targets Windows 11 x64. Windows 10 1809+ is intended to work but has not
 been verified; do not describe it as supported until a Windows 10 run passes the
 full suite. Windows on ARM and non-Windows platforms are not supported.

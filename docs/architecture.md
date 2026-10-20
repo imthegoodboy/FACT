@@ -40,12 +40,12 @@ write event frames to their pipe connection.
 | `fact-protocol` | Wire structs, commands, frames, validation, session names, cell flags. |
 | `fact-config` | TOML config, profiles, chord parsing/compilation, paths and shell detection. |
 | `fact-layout` | Serializable binary split tree, grids, focus, zoom, minimize, move/swap. |
-| `fact-term` | Alacritty-backed terminal model, bounded scrollback, search, ANSI snapshots. |
+| `fact-term` | Alacritty-backed terminal model, bounded scrollback, search and frame snapshots. |
 | `fact-pty` | ConPTY creation, process/job-object ownership, input, resize and exit codes. |
 | `fact-ipc` | Local named-pipe transport, SDDL/DACL creation, frame framing, peer checks. |
 | `fact-runtime` | Identity files, daemon discovery, authenticated client and event streams. |
-| `fact-session` | SQLite schema/migrations, snapshot checksums, export/import and lifecycle. |
-| `fact-daemon` | Session manager, frame generation, persistence loop, cold recovery. |
+| `fact-session` | SQLite schema/migrations, layout validation, export/import and lifecycle. |
+| `fact-daemon` | Session manager, frame generation, persistence loop, saved-layout restart. |
 | `fact-client` | Ratatui renderer, keymap, themes, selection, mouse handling and overlays. |
 | `fact-cli` | Command surface, autostart, doctor, output formatting and mode dispatch. |
 | `fact-testkit` | Shared helpers for tests that need real Windows resources. |
@@ -87,7 +87,6 @@ A session has:
 - one terminal model per pane, including bounded scrollback and modes
 - a viewport size (columns and rows)
 - layout and metadata epochs plus detach generation
-- optional cold-recovery timestamp and notes
 
 The binary tree stores normalized split ratios. Layout adds a one-cell gutter at
 each split and reserves the rightmost column of each pane for its scrollbar. A
@@ -120,56 +119,52 @@ blocking PTY processing. A pane version increments only when its terminal cells
 change, so idle panes cost a small header per frame. The client keeps the last
 cell buffer per pane and keeps rendering when `cells` is absent.
 
-## Terminal and snapshots
+## Terminal model and frames
 
 `fact-term` wraps `alacritty_terminal` and owns the grid, scrollback, modes,
-cursor, title callbacks and bell state. Snapshots:
-
-- are ANSI text rendered from the visible screen plus relevant style state
-- omit trailing blank screen rows so restored output stays visible
-- have a maximum size and reject NUL or malformed content
-- are stored with a SHA-256 checksum and the source dimensions
-- are validated for pane IDs, layout consistency and size on load
+cursor, title callbacks and bell state. Frame snapshots are bounded `CellDto`
+grids with cursor and mode metadata; they exist only in memory and are replaced
+on every changed frame. Terminal output is never written to SQLite.
 
 `fact-term` also implements capped case-sensitive/insensitive search across
 history and visible rows. The TUI sends the query to the daemon, so searching
 does not require transferring the whole scrollback to the client.
 
-## Persistence and recovery
+## Persistence and restart
 
 `fact-session` uses bundled SQLite with schema migrations. Saves are
 transactional. Session data records the schema/export version, timestamps,
-layout, panes and validated snapshots.
+layout and pane records (profile, working directory and last known PID).
 
 Persistence cadence:
 
 - layout and metadata are saved on mutations and periodically
-- terminal snapshots are captured on a separate interval
-- `fact save` forces an immediate snapshot
-- normal daemon shutdown snapshots every live session before exiting
+- `fact save` forces an immediate layout save
+- normal daemon shutdown saves every live session before exiting
 
 Warm resume:
 
 1. The CLI authenticates and sends `ResumeSession`.
-2. The daemon finds a live session and returns `Attached` with
-   `cold_recovered = false`.
+2. The daemon finds a live session and returns `Attached`.
 3. The client subscribes to the event stream and receives current pane state.
-4. The original PID is preserved.
+4. The original PID, terminal state and scrollback are preserved.
 
-Cold recovery:
+Saved-layout restart:
 
 1. The session exists in SQLite but no live session exists in this daemon.
-2. The store validates identity, layout and every snapshot checksum.
-3. The daemon remaps pane IDs, creates fresh terminal models at saved
-   dimensions, replays validated ANSI snapshots and adds an explicit cold banner.
-4. New shells are spawned. PIDs and exit codes in the new pane records are reset.
-5. `Attached` reports `cold_recovered = true` and recovery notes. The TUI shows a
-   modal; the CLI-created session is marked with a recovery timestamp.
-6. Commands are never read from saved output and never replayed.
+2. The store validates identity, layout and pane records. v1 databases have
+   their legacy snapshot columns cleared with SQLite secure deletion, the
+   database vacuumed and the WAL truncated during migration.
+3. The daemon remaps pane IDs and spawns a fresh shell in every saved pane,
+   using the saved profile and working directory.
+4. PIDs and exit codes in the new pane records are reset.
+5. `Attached` returns the normal session summary. The TUI opens directly on the
+   fresh shells; there is no recovery modal.
+6. Terminal output is never read from the database and commands are never
+   replayed.
 
-If snapshot replay fails, the pane still starts, the error is added to recovery
-notes, and the session remains usable. If the layout or checksum is corrupt, the
-session load fails rather than silently executing unvalidated data.
+If the layout is corrupt, the saved session fails to load instead of starting an
+inconsistent process tree.
 
 ## Detach and reattach
 
@@ -180,8 +175,8 @@ stream to the same live session. Shells, PIDs, terminal scrollback and layout ar
 unchanged.
 
 Closing the TUI without detaching also leaves the daemon running. Quitting the
-daemon (`fact shutdown`) snapshots sessions and stops the shells; the next
-resume is cold.
+daemon (`fact shutdown`) saves layouts and stops the shells; the next resume
+starts fresh shells in those layouts.
 
 ## Input and mouse routing
 
@@ -210,7 +205,7 @@ double-width spacer cells and masking hidden cells.
 
 The daemon enforces limits from configuration and protocol constants: maximum
 sessions, panes per tab/session, layout depth, split ratio range, scrollback,
-snapshot bytes, frame cells, paste bytes, search query length and IPC frame size.
+frame cells, paste bytes, search query length and IPC frame size.
 Protocol versions are negotiated exactly. Invalid names, tokens, cursors,
 dimensions and malformed frames are rejected.
 
