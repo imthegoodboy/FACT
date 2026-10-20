@@ -203,7 +203,8 @@ Additional interaction that is not a configurable chord:
 - Click a pane body to focus it. A single-tab session has no tab strip; with two
   or more tabs, click a tab to select it and click the trailing `+` to add one.
 - Right-click a pane for split, zoom, minimize, new tab, rename, search, restart,
-  close and copy actions.
+  close and copy actions. Applications that request mouse reporting receive the
+  click instead; use the keyboard actions in that case.
 - Click or drag the scrollbar to move through scrollback. The mouse wheel is
   forwarded to the focused application when it requested mouse reporting.
 - When panes are minimized, a small `▾ N` tray appears at the bottom-right; the

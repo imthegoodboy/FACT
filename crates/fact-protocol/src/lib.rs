@@ -6,8 +6,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped when command/frame variants change in a way that a previous daemon
-/// cannot decode. Version 2 added the direct scroll-offset command.
+/// Bumped when command/frame semantics change in a way a previous peer cannot
+/// interpret safely, even if bincode can still decode the message shape.
+/// Version 2 added the direct scroll-offset command. Version 3 removed the pane
+/// title row from slot geometry and made chrome rows conditional; an older
+/// client would render every pane one row too low.
 pub const PROTOCOL_VERSION: u16 = 3;
 pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;

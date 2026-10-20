@@ -194,7 +194,8 @@ Mouse events are routed by zone:
 - split gutters drag to resize ratios
 - pane content is forwarded as SGR mouse input when the application requested
   mouse reporting; otherwise it starts a text selection
-- right-click opens the pane context menu
+- right-click opens the pane context menu when the application has not requested
+  mouse reporting; otherwise it is forwarded as SGR mouse input
 - Shift+drag always selects text, even when the application owns the mouse
 
 Selections are extracted from the client's last pane buffers, skipping

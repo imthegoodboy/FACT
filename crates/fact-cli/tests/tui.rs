@@ -351,6 +351,43 @@ fn grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session() {
         "the grid TUI did not detach:\n{}",
         tail(&output)
     );
+
+    // An explicit `--grid 1` is also a shape request. It must not attach to the
+    // still-live eight-pane grid just because that is the most recent session.
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--grid".into(),
+        "1".into(),
+    ];
+    let one_tui = PtyProcess::spawn(options).expect("start the one-pane grid");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(&one_tui, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
+        "the one-pane grid did not render a live pane:\n{}",
+        tail(&output)
+    );
+    let sessions = home.run(&["sessions", "--json"]);
+    let parsed: Value = serde_json::from_slice(&sessions.stdout).expect("sessions JSON");
+    let summaries = parsed.as_array().expect("sessions array");
+    let one = summaries
+        .iter()
+        .find(|session| session.get("name").and_then(Value::as_str) == Some("grid-1"))
+        .expect("--grid 1 did not start the grid-1 session");
+    assert_eq!(
+        one.get("pane_count").and_then(Value::as_u64),
+        Some(1),
+        "the one-pane grid must have one pane"
+    );
+    one_tui.write(b"\x02d").expect("detach the one-pane grid");
+    let exit = one_tui.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the one-pane grid TUI did not detach:\n{}",
+        tail(&output)
+    );
 }
 
 #[test]

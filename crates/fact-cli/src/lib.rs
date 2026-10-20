@@ -71,9 +71,9 @@ struct LaunchArgs {
     /// Session to create, resume or attach to.
     #[arg(long, value_name = "NAME")]
     session: Option<String>,
-    /// Start a grid with this many independent shells (1-32).
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=32))]
-    grid: u8,
+    /// Start or reattach a grid with this many independent shells (1-32).
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=32))]
+    grid: Option<u8>,
     /// Shell profile from the configuration.
     #[arg(long, value_name = "NAME")]
     profile: Option<String>,
@@ -86,8 +86,8 @@ struct LaunchArgs {
 struct ResumeArgs {
     #[arg(long, value_name = "NAME")]
     session: Option<String>,
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=32))]
-    grid: u8,
+    #[arg(long, value_parser = clap::value_parser!(u8).range(1..=32))]
+    grid: Option<u8>,
     #[arg(long, value_name = "NAME")]
     profile: Option<String>,
     #[arg(long, value_name = "DIR")]
@@ -349,7 +349,7 @@ fn launch_resume(
     paths: &Paths,
     config_override: Option<&Path>,
     session: Option<String>,
-    grid: u8,
+    grid: Option<u8>,
     profile: Option<String>,
     cwd: Option<String>,
 ) -> Result<()> {
@@ -361,7 +361,7 @@ fn launch_resume(
             .ok()
             .map(|path| path.display().to_string())
     });
-    let session = if grid > 1 {
+    let session = if let Some(grid) = grid {
         Some(select_grid_session(&mut client, session, grid)?)
     } else {
         session
@@ -370,7 +370,7 @@ fn launch_resume(
         &mut client,
         Command::ResumeSession {
             name: session,
-            grid: Some(grid),
+            grid,
             profile,
             cwd,
         },
@@ -398,13 +398,20 @@ fn select_grid_session(
             .iter()
             .find(|session| session.name.eq_ignore_ascii_case(&name))
         {
+            if existing.archived {
+                bail!(
+                    "session '{name}' is archived; run `fact unarchive {name}` \
+                     before resuming it."
+                );
+            }
             if grid_matches(existing, grid) {
                 return Ok(existing.name.clone());
             }
             bail!(
                 "session '{name}' already exists with {} panes in {} tab(s); \
-                 `--grid {grid}` creates a new grid. Omit `--session` to start \
-                 `grid-{grid}`, or choose a new session name.",
+                 `--grid {grid}` needs a session with that shape. Choose a new \
+                 session name, or omit `--session` to use the matching \
+                 `grid-{grid}` session or the next free grid name.",
                 existing.pane_count,
                 existing.tab_count
             );

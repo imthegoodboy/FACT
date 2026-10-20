@@ -186,7 +186,9 @@ impl App {
 
         self.render_cursor(frame, pane, content);
         self.render_scrollbar(frame, main, pane);
-        if bell && slot.width > 0 && slot.height > 0 {
+        // A pane with scrollback signals a bell through an amber scrollbar
+        // thumb. Only panes without a track use the reserved top-right cell.
+        if bell && scrollbar_geometry(pane).is_none() && slot.width > 0 && slot.height > 0 {
             let buffer = frame.buffer_mut();
             buffer[(slot.x + slot.width - 1, slot.y)]
                 .set_symbol("•")
@@ -293,15 +295,16 @@ impl App {
             .min(geometry.track.y.saturating_add(geometry.track.height));
         let start = main.y.saturating_add(thumb_top).max(track.y);
         let end = main.y.saturating_add(thumb_bottom).min(track.bottom());
+        let bell = self.bells.contains(&pane.id);
         for y in start..end {
             buffer[(track.x, y)].set_symbol("▐").set_style(
-                Style::default()
-                    .bg(self.theme.terminal_bg)
-                    .fg(if pane.focused {
-                        self.theme.accent
-                    } else {
-                        self.theme.title_fg
-                    }),
+                Style::default().bg(self.theme.terminal_bg).fg(if bell {
+                    self.theme.warning
+                } else if pane.focused {
+                    self.theme.accent
+                } else {
+                    self.theme.title_fg
+                }),
             );
         }
     }

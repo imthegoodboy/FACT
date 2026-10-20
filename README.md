@@ -94,11 +94,13 @@ wheel scrollback works in shells, and the scrollbar can be clicked or dragged.
 `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` remain available alongside `Ctrl+Insert` / `Shift+Insert`.
 
-`--grid N` is deterministic: it starts or reattaches `grid-N` and never silently
-resumes an unrelated saved session. If `grid-N` exists with a different pane
-count, FACT uses the next free `grid-N-2` name. An explicit `--session NAME
---grid N` is only accepted when that session already matches; otherwise FACT
-asks for a new name instead of ignoring the grid request.
+`--grid N` is deterministic for every explicit value, including `--grid 1`: it
+starts or reattaches `grid-N` and never silently resumes an unrelated saved
+session. If `grid-N` exists with a different pane count, FACT uses the next free
+`grid-N-2` name. An explicit `--session NAME --grid N` is only accepted when
+that session already matches; otherwise FACT asks for a new name instead of
+ignoring the grid request. Running `fact` without `--grid` retains the normal
+resume-latest behavior.
 
 Session management works offline against SQLite when the daemon is not running:
 
@@ -126,7 +128,7 @@ the only operation that removes its saved output.
 | `fact detach` | Increment the detach generation so attached UIs exit. |
 | `fact doctor [--json]` | Check data directory, config, shell, database, ACLs, logs and ConPTY. |
 | `fact rename OLD NEW` | Rename a live or saved session. |
-| `fact save [--session NAME]` | Persist a live session now. |
+| `fact save [NAME]` | Persist a live session now; defaults to the most recently used live session. |
 | `fact export [NAME] [--output PATH] [--stdout]` | Write versioned `fact-session` JSON. |
 | `fact import FILE [--name NAME] [--overwrite]` | Import as a new saved session (fresh identity and PIDs). |
 | `fact archive NAME` / `fact unarchive NAME` | Hide/restore a session; archive stops live shells. |
