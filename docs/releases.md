@@ -72,8 +72,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1 `
 The uninstaller stops the daemon, removes only `fact.exe` from the install
 directory, removes the exact user PATH entry and keeps unrelated files. With
 `-PurgeData`, it removes `FACT_HOME` if set, otherwise `%LOCALAPPDATA%\FACT`, or
-the explicit `-DataDir`. It refuses to purge a drive root or the user profile
-root.
+the explicit `-DataDir`. It refuses to purge a drive root, the user profile
+root, an ancestor of the profile, or a non-empty directory without FACT data
+markers.
 
 ## Release process
 
