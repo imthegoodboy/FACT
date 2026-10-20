@@ -2062,6 +2062,9 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
     let pty = PtyProcess::spawn(options)
         .map_err(|error| ProtocolError::internal(format!("could not start pane: {error}")))?;
 
+    // Persist the explicitly requested directory even if it is missing, but
+    // fall back to the effective profile directory when the request omitted one.
+    let record_cwd = requested_cwd.or_else(|| workdir.clone());
     Ok(LivePane {
         pty,
         term,
@@ -2072,9 +2075,7 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
         last_bell: 0,
         exit_code: None,
         profile: profile.map(str::to_string),
-        cwd: requested_cwd
-            .as_ref()
-            .map(|path| path.display().to_string()),
+        cwd: record_cwd.as_ref().map(|path| path.display().to_string()),
     })
 }
 

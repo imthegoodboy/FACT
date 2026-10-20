@@ -875,6 +875,22 @@ fn missing_working_directory_is_preserved_for_the_next_restart() {
     ));
     shutdown(client, handle, &harness);
 
+    // Restart the daemon and reopen the saved layout. The unavailable path
+    // must survive the fresh-shell restore instead of being replaced by the
+    // fallback directory used for this launch.
+    let handle = start_daemon(&harness);
+    let (_identity, mut client) = wait_for_daemon(&harness);
+    resume_existing(&mut client, "missing-cwd");
+    assert!(matches!(
+        client
+            .request(Command::TerminateSession {
+                name: "missing-cwd".into(),
+            })
+            .expect("terminate restarted missing-cwd"),
+        ResponsePayload::Ack
+    ));
+    shutdown(client, handle, &harness);
+
     let store = SessionStore::open(&harness.paths.db_file).expect("open the session store");
     let saved = store.load("missing-cwd").expect("load the saved session");
     assert_eq!(
