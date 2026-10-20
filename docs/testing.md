@@ -31,6 +31,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Sessions | Schema migration, save/load, case-insensitive names, checksum and layout corruption rejection, export/import copy semantics, archive/delete. |
 | Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
+| Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. |
 | TUI | A driven real-ConPTY `--grid 8` session covering pane output, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards; a second test shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
@@ -90,6 +91,7 @@ cargo test -p fact-cli --test tui -- --nocapture
 4. `cargo fmt --all -- --check`
 5. `cargo clippy --workspace --all-targets -- -D warnings`
 6. `cargo test --workspace --no-fail-fast`
+7. `scripts/test-install.ps1` against the test binary, with mocked downloads
 
 The release workflow repeats the same gates before it can build and publish an
 artifact. A tag cannot bypass a failing test.
