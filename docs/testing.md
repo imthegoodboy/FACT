@@ -32,7 +32,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Daemon | Grid of eight independent shells, live detach/reattach PID preservation, saved-layout restart with fresh shells and discarded output, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. A replacement install also proves a dead daemon identity is cleared. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes the saved layout, proves the old marker and recovery screen are absent, and verifies a new shell PID accepts input. A seventh writes a stale protocol-3 identity and proves startup clears it and renders a live pane. An eighth generates 120 lines, enters scroll mode with the configured prefix and `[`, verifies the offset moves on PageUp and that Esc returns to the shell. |
+| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes the saved layout, proves the old marker and recovery screen are absent, and verifies a new shell PID accepts input. A seventh writes a stale protocol-3 identity and proves startup clears it and renders a live pane. An eighth generates 120 lines, enters scroll mode with the configured prefix and `[`, verifies the offset moves on PageUp and that Esc returns to the shell. A ninth starts a fake alternate-screen app, proves the app-scroll rail is visible, enters app scroll mode, verifies PageUp is forwarded to the app and that Esc leaves the mode. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
@@ -73,9 +73,11 @@ These are intentionally not mock tests:
   A third saves the layout, stops the daemon, resumes it, proves the old output
   and recovery screen are absent and verifies a new shell PID. Further tests
   cover a second live client, a 60x18 grid with prefix+M/N, nested-launch
-  refusal, a stale protocol-3 identity that must not block startup, and scroll
-  mode reading real history. Set `FACT_SMOKE_EXE` to run all eight tests against
-  a downloaded release binary instead of the test build. Fresh PIDs and discarded old output are asserted
+  refusal, a stale protocol-3 identity that must not block startup, scroll
+  mode reading real history, and a fake alternate-screen app whose rail stays
+  visible and receives forwarded PageUp. Set `FACT_SMOKE_EXE` to run all nine
+  tests against a downloaded release binary instead of the test build. Fresh
+  PIDs and discarded old output are asserted
   directly by the daemon saved-layout test.
 - Tests wait for frames and output with deadlines rather than fixed sleeps where
   possible. Restart assertions search the whole pane buffer, not only the visible
@@ -109,7 +111,7 @@ artifact. A tag cannot bypass a failing test.
 - Development and manual verification: Windows 11.
 - CI: GitHub's current Windows Server runner, which is not the same as Windows
   11 or Windows 10.
-- Windows 10 1809+: intended, but not verified for v0.3.0. Do not claim support
+- Windows 10 1809+: intended, but not verified for v0.3.1. Do not claim support
   until a run on a physical or VM Windows 10 installation passes the suite.
 
 ## Manual smoke check
@@ -134,6 +136,8 @@ fact --grid 8
 # generate 200 lines, then click and drag the scrollbar; confirm output moves
 # press Ctrl+Space then [, scroll with Up/Down and PgUp/PgDn, and press Esc
 # hold Shift and use the wheel over a pane; confirm it scrolls FACT, not the app
+# start Codex, Claude Code or OpenCode; confirm the rail stays visible, wheel and
+#   Shift+wheel page the app, and Ctrl+Space then [ reports APP SCROLL
 # select text, press Ctrl+C, focus another pane and press Ctrl+V
 # press Ctrl+Space and confirm the two-cell accent marker appears only while armed
 # detach with Ctrl+Space D

@@ -13,7 +13,7 @@ Download the zip and `SHA256SUMS.txt` from the
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 # Pin a version:
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version v0.3.0
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version v0.3.1
 
 # Custom location, no PATH change:
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
@@ -35,9 +35,9 @@ Existing sessions remain in `%LOCALAPPDATA%\FACT`. A replaced daemon reopens the
 saved layout with fresh shells on the next launch. Previous processes and old
 screen output are gone by design; no recovery modal is shown.
 
-v0.3.0 uses wire protocol 5. The installer stops the previous daemon before
+v0.3.1 uses wire protocol 5. The installer stops the previous daemon before
 replacing the binary and removes a dead daemon identity left by a crash or an
-older version. A v0.3.0 client never attaches to a daemon speaking a different
+older version. A v0.3.1 client never attaches to a daemon speaking a different
 protocol: if no process owns the old pipe it clears the stale identity and starts
 the current daemon, and if the old daemon is still alive it reports a clear
 stop-and-retry error. If you replace `fact.exe` manually, run `fact shutdown`
@@ -56,7 +56,7 @@ Local builds do not have a release checksum. The script says so explicitly.
 ## Verify a download manually
 
 ```powershell
-Get-FileHash .\fact-v0.3.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash .\fact-v0.3.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -106,8 +106,8 @@ markers.
    ```powershell
    git switch main
    git pull --ff-only
-   git tag -a v0.3.0 -m "FACT v0.3.0"
-   git push origin v0.3.0
+   git tag -a v0.3.1 -m "FACT v0.3.1"
+   git push origin v0.3.1
    ```
 
 6. The `Release` workflow runs. Its `verify` job enforces:
@@ -126,9 +126,9 @@ markers.
 7. Verify the published assets from a clean directory:
 
    ```powershell
-   gh release view v0.3.0 --repo imthegoodboy/FACT
-   gh release download v0.3.0 --repo imthegoodboy/FACT
-   Get-FileHash .\fact-v0.3.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+   gh release view v0.3.1 --repo imthegoodboy/FACT
+   gh release download v0.3.1 --repo imthegoodboy/FACT
+   Get-FileHash .\fact-v0.3.1-x86_64-pc-windows-msvc.zip -Algorithm SHA256
    Get-Content .\SHA256SUMS.txt
    ```
 
@@ -148,7 +148,9 @@ markers.
    `tui_saved_layout_starts_fresh_shell_without_recovery_screen` test then stops
    the daemon and resumes to check for a fresh shell PID, no old output and no
    recovery modal; `scroll_mode_reads_history_without_sending_keys_to_the_shell`
-   covers keyboard scrolling. Also perform the manual checks in
+   covers keyboard scrolling, and
+   `full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys` covers
+   the alternate-screen rail and app paging. Also perform the manual checks in
    [testing.md](testing.md#manual-smoke-check) for the final release sign-off.
 
 Do not create a release manually. A release without the gate run is not a FACT
@@ -157,7 +159,7 @@ release.
 ## Artifact contents
 
 ```text
-fact-v0.3.0-x86_64-pc-windows-msvc/
+fact-v0.3.1-x86_64-pc-windows-msvc/
   fact.exe
   README.md
   LICENSE
@@ -192,6 +194,6 @@ fact-v0.3.0-x86_64-pc-windows-msvc/
 
 ## Compatibility statement
 
-v0.3.0 targets Windows 11 x64. Windows 10 1809+ is intended to work but has not
+v0.3.1 targets Windows 11 x64. Windows 10 1809+ is intended to work but has not
 been verified; do not describe it as supported until a Windows 10 run passes the
 full suite. Windows on ARM and non-Windows platforms are not supported.

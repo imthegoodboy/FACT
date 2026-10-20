@@ -3,6 +3,27 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.3.1] - 2026-10-21
+
+### Fixed
+
+- The pane scrollbar no longer disappears when a full-screen application enters
+  the alternate screen. The rail is always visible: idle panes show a one-cell
+  thumb at the bottom, full-screen panes show a centred grip with paging caps.
+- Full-screen panes now have a usable app-scroll rail. Clicking or dragging the
+  rail, using the wheel, or using Shift+wheel pages the application's own
+  transcript. Apps that request mouse reporting receive synthetic wheel events;
+  keyboard-only apps receive alternate-scroll arrow or page keys.
+- Prefix then `[` now enters app scroll for a full-screen pane instead of
+  reporting that there is no scrollback. PgUp/PgDn, Up/Down and Home/End are
+  forwarded to the application, and Esc returns to normal input.
+- Corrected the v0.3.0 claim that Shift+wheel could browse an alternate-screen
+  app's history. Terminal scrollback still works for shells and main-screen
+  apps; full-screen apps now page their own viewport.
+- Added inline-mode guidance for agent CLIs that need true FACT history:
+  `codex --no-alt-screen`, `/tui default` in Claude Code, and
+  `OTUI_USE_ALTERNATE_SCREEN=false` for OpenCode.
+
 ## [0.3.0] - 2026-10-21
 
 ### Changed
@@ -211,9 +232,11 @@ All notable changes to FACT are documented here. The format follows
 - Release artifacts are checksummed but not code-signed.
 - The same-user IPC boundary does not protect against malware running as the
   same Windows user.
-- Terminal snapshots are visual state, not process resurrection; unsaved work in
-  a lost process cannot be recovered.
+- Live detach and reattach keep the original processes and scrollback. A daemon
+  restart reopens the saved layout with fresh shells and no replay of old output.
+  Unsaved work in a lost process cannot be recovered.
 
+[0.3.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.1
 [0.3.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.0
 [0.2.3]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.3
 [0.2.2]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.2

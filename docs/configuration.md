@@ -204,10 +204,19 @@ Additional interaction that is not a configurable chord:
   using the prefix. `Alt+T` terminates the active grid and all of its panes after
   confirmation. `Ctrl+M` is Enter in terminal input, so it cannot be used as a
   direct shortcut.
-- Prefix then `[` enters scroll mode without sending keys to the application.
-  Up/Down scroll one line, PgUp/PgDn scroll one page, Home/End jump to the top or
-  bottom, and Esc or `q` exits. Shift+wheel always scrolls FACT's history instead
-  of forwarding the wheel to an application that captures the mouse.
+- Prefix then `[` enters scroll mode without sending normal keys to the
+  application. Up/Down scroll one line, PgUp/PgDn scroll one page, Home/End jump
+  to the top or bottom, and Esc or `q` exits. In a shell this browses FACT's
+  scrollback. In an alternate-screen app it becomes app scroll: PgUp/PgDn,
+  Up/Down and Home/End are forwarded to the app so its own transcript moves.
+- Full-screen applications (Claude Code, Codex and OpenCode by default) own the
+  alternate screen, which has no terminal scrollback. FACT keeps the rail
+  visible with a centred grip and paging caps. Clicking or dragging the rail,
+  wheeling over it, or using Shift+wheel pages the app; if the app requested
+  mouse reporting, FACT synthesizes wheel events at the centre of its viewport.
+- For true terminal history and a position thumb, launch an agent in inline
+  mode: `codex --no-alt-screen`, `/tui default` in Claude Code, or
+  `OTUI_USE_ALTERNATE_SCREEN=false` for OpenCode.
 - In a window too small for the configured `min_pane_width`/`min_pane_height`,
   FACT normally shows only the focused pane. `Alt+N` or the `show_all` action
   keeps the whole grid visible even below those limits; `Alt+M` maximizes again.
@@ -219,8 +228,9 @@ Additional interaction that is not a configurable chord:
 - Right-click a pane for split, zoom, minimize, new tab, rename, search, restart,
   close and copy actions. Applications that request mouse reporting receive the
   click instead; use the keyboard actions in that case.
-- Click or drag the scrollbar to move through scrollback. The mouse wheel is
-  forwarded to the focused application when it requested mouse reporting.
+- Click or drag the scrollbar to move through scrollback. In a full-screen pane
+  the same rail pages the application instead. The mouse wheel is forwarded to
+  the focused application when it requested mouse reporting.
 - When panes are minimized, a small `▾ N` tray appears at the bottom-right; the
   same tray is clickable to restore them.
 - `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Insert` /

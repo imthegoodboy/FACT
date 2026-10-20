@@ -161,7 +161,7 @@ print the daemon token.
   bypass ACLs.
 - **No encryption at rest.** Use BitLocker or another volume encryption product
   for data-at-rest protection.
-- **No code signing yet.** v0.3.0 release artifacts are accompanied by SHA-256
+- **No code signing yet.** v0.3.1 release artifacts are accompanied by SHA-256
   checksums. Verify them before running. SmartScreen reputation may be absent.
 - **Terminal output can contain secrets.** Commands, environment dumps, tokens
   printed to the terminal and prompts remain in daemon memory and scrollback, but
@@ -170,7 +170,7 @@ print the daemon token.
   clears the live database and truncates its WAL.
 - **Child processes are not sandboxed.** Shells and programs run with your normal
   user rights.
-- **Windows 10 is not verified for v0.3.0.** See the compatibility section in the
+- **Windows 10 is not verified for v0.3.1.** See the compatibility section in the
   README.
 - **Named-pipe availability.** A denial-of-service by a same-user or administrator
   process is not preventable by FACT.

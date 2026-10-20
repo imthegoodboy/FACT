@@ -130,6 +130,13 @@ on every changed frame. Terminal output is never written to SQLite.
 history and visible rows. The TUI sends the query to the daemon, so searching
 does not require transferring the whole scrollback to the client.
 
+When a pane is in the alternate screen with no terminal history, the client
+keeps its rail visible but routes wheel and rail gestures to the application.
+Scroll mode becomes app scroll: paging and arrow keys are encoded and sent as
+input instead of moving a FACT offset. This preserves the terminal convention
+that a full-screen application owns its viewport, while keeping the rail
+discoverable and usable.
+
 ## Persistence and restart
 
 `fact-session` uses bundled SQLite with schema migrations. Saves are
