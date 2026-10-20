@@ -630,10 +630,12 @@ dependencies = [
  "fact-layout",
  "fact-protocol",
  "fact-pty",
+ "fact-runtime",
  "fact-session",
  "fact-term",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "uuid",
  "windows-sys 0.61.2",
@@ -676,6 +678,20 @@ dependencies = [
  "fact-config",
  "thiserror 2.0.21",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "fact-runtime"
+version = "0.1.0"
+dependencies = [
+ "fact-config",
+ "fact-ipc",
+ "fact-protocol",
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

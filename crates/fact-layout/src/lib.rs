@@ -6,7 +6,7 @@
 //! focused-pane mode instead of shrinking every pane below a readable size.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 pub const MAX_TREE_DEPTH: usize = 64;
 pub const MAX_PANES: usize = 256;
@@ -306,6 +306,97 @@ impl SessionLayout {
     }
 
     /// Remove a pane from a tab's tiling and return the next focus candidate.
+    /// Move a pane (visible or minimized) to another tab, splitting that tab's
+    /// focused pane on the right. Empty source tabs are removed.
+    pub fn move_pane_to_tab(&mut self, pane: u64, target_tab: u32) -> Result<(), LayoutError> {
+        if self.tab(target_tab).is_none() {
+            return Err(LayoutError::MissingTab(target_tab));
+        }
+        let source_tab = self
+            .tab_for_pane(pane)
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .find(|tab| tab.minimized.contains(&pane))
+                    .map(|tab| tab.id)
+            })
+            .ok_or(LayoutError::MissingPane(pane))?;
+        if source_tab == target_tab {
+            return Ok(());
+        }
+
+        {
+            let source = self
+                .tab_mut(source_tab)
+                .ok_or(LayoutError::MissingTab(source_tab))?;
+            if source.minimized.contains(&pane) {
+                source.minimized.retain(|p| *p != pane);
+            } else {
+                let root = source.root.take().ok_or(LayoutError::InvalidTree)?;
+                match remove_leaf(root, pane)? {
+                    RemoveResult::Replaced(node, next) => {
+                        source.root = Some(node);
+                        if source.focus == Some(pane) {
+                            source.focus =
+                                next.or_else(|| source.root.as_ref().and_then(first_leaf));
+                        }
+                    }
+                    RemoveResult::Empty(next) => {
+                        source.root = None;
+                        source.focus = next;
+                    }
+                }
+            }
+            if source.root.is_none() {
+                source.zoomed = false;
+            }
+        }
+        let source_empty = self
+            .tab(source_tab)
+            .is_some_and(|tab| tab.root.is_none() && tab.minimized.is_empty());
+        if source_empty {
+            self.remove_tab(source_tab)?;
+        }
+
+        let target = self
+            .tab_mut(target_tab)
+            .ok_or(LayoutError::MissingTab(target_tab))?;
+        match target.root.take() {
+            Some(root) => {
+                let focus = target.focus.or_else(|| first_leaf(&root)).unwrap_or(pane);
+                target.root = Some(split_leaf(root, focus, pane, SplitDirection::Right)?);
+            }
+            None => target.root = Some(LayoutNode::Leaf { pane }),
+        }
+        target.focus = Some(pane);
+        target.zoomed = false;
+        self.active_tab = target_tab;
+        Ok(())
+    }
+
+    /// Swap the positions of two visible panes in the same tab.
+    pub fn swap_panes(&mut self, a: u64, b: u64) -> Result<(), LayoutError> {
+        if a == b {
+            return Ok(());
+        }
+        let tab_a = self.tab_for_pane(a).ok_or(LayoutError::MissingPane(a))?;
+        let tab_b = self.tab_for_pane(b).ok_or(LayoutError::MissingPane(b))?;
+        if tab_a != tab_b {
+            return Err(LayoutError::Invalid(
+                "panes may only be swapped inside one tab".into(),
+            ));
+        }
+        let tab = self.tab_mut(tab_a).ok_or(LayoutError::MissingTab(tab_a))?;
+        let root = tab.root.as_mut().ok_or(LayoutError::InvalidTree)?;
+        swap_leaf_ids(root, a, b);
+        if tab.focus == Some(a) {
+            tab.focus = Some(b);
+        } else if tab.focus == Some(b) {
+            tab.focus = Some(a);
+        }
+        Ok(())
+    }
+
     pub fn remove_pane(&mut self, pane: u64) -> Result<Option<u64>, LayoutError> {
         let tab_id = self
             .tab_for_pane(pane)
@@ -405,6 +496,30 @@ impl SessionLayout {
             let _ = self.restore_pane(*pane);
         }
         panes
+    }
+
+    /// Rewrite every pane identity, e.g. when a saved session is cold-restored
+    /// into a daemon that already owns other panes with the same old IDs.
+    pub fn remap_panes(&mut self, map: &BTreeMap<u64, u64>) -> Result<(), LayoutError> {
+        for tab in &mut self.tabs {
+            if let Some(root) = &mut tab.root {
+                remap_node(root, map)?;
+            }
+            if let Some(focus) = tab.focus {
+                tab.focus = Some(
+                    *map.get(&focus)
+                        .ok_or(LayoutError::Invalid("focus pane is not remapped".into()))?,
+                );
+            }
+            let mut minimized = Vec::with_capacity(tab.minimized.len());
+            for pane in &tab.minimized {
+                minimized.push(*map.get(pane).ok_or(LayoutError::Invalid(
+                    "minimized pane is not remapped".into(),
+                ))?);
+            }
+            tab.minimized = minimized;
+        }
+        Ok(())
     }
 
     pub fn zoom(&mut self, zoomed: bool) -> Result<(), LayoutError> {
@@ -905,6 +1020,37 @@ fn remove_leaf(node: LayoutNode, target: u64) -> Result<RemoveResult, LayoutErro
     }
 }
 
+fn remap_node(node: &mut LayoutNode, map: &BTreeMap<u64, u64>) -> Result<(), LayoutError> {
+    match node {
+        LayoutNode::Leaf { pane } => {
+            *pane = *map
+                .get(pane)
+                .ok_or(LayoutError::Invalid("pane is not remapped".into()))?;
+        }
+        LayoutNode::Split { first, second, .. } => {
+            remap_node(first, map)?;
+            remap_node(second, map)?;
+        }
+    }
+    Ok(())
+}
+
+fn swap_leaf_ids(node: &mut LayoutNode, a: u64, b: u64) {
+    match node {
+        LayoutNode::Leaf { pane } => {
+            if *pane == a {
+                *pane = b;
+            } else if *pane == b {
+                *pane = a;
+            }
+        }
+        LayoutNode::Split { first, second, .. } => {
+            swap_leaf_ids(first, a, b);
+            swap_leaf_ids(second, a, b);
+        }
+    }
+}
+
 fn leaves(node: &LayoutNode) -> Leaves<'_> {
     Leaves { stack: vec![node] }
 }
@@ -1047,6 +1193,20 @@ mod tests {
         }
         assert!(layout.validate().is_err());
         layout.sanitize();
+        layout.validate().unwrap();
+    }
+
+    #[test]
+    fn move_and_swap_panes() {
+        let mut layout = SessionLayout::new(1, &[1, 2]);
+        layout.add_tab(2, &[3], "second");
+        layout.move_pane_to_tab(1, 2).unwrap();
+        assert_eq!(layout.tab_for_pane(1), Some(2));
+        assert_eq!(layout.all_visible_panes(), vec![2, 3, 1]);
+        layout.swap_panes(3, 1).unwrap();
+        let visible = layout.all_visible_panes();
+        assert_eq!(visible.len(), 3);
+        assert!(visible.contains(&1) && visible.contains(&2) && visible.contains(&3));
         layout.validate().unwrap();
     }
 

@@ -602,6 +602,18 @@ impl SessionStore {
             )
         })?;
         if old.eq_ignore_ascii_case(new) {
+            // SQLite's NOCASE collation considers these equal, so an UPDATE is
+            // still needed to persist a pure case change.
+            if old != new {
+                let changed = self.conn.execute(
+                    "UPDATE sessions SET name = ?1, updated_at_ms = ?2
+                     WHERE name = ?3 COLLATE NOCASE",
+                    params![new, now_ms(), old],
+                )?;
+                if changed == 0 {
+                    return Err(SessionError::NotFound(old.to_string()));
+                }
+            }
             return Ok(());
         }
         if self.exists(new)? {

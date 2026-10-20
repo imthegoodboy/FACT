@@ -4,7 +4,8 @@ use fact_protocol::{ClientMessage, ServerMessage, MAX_WIRE_FRAME};
 use std::io::{Read, Write};
 use thiserror::Error;
 
-pub const MAX_CONTROL_FRAME: usize = 8 * 1024 * 1024;
+/// Control requests can carry session imports, so they share the wire limit.
+pub const MAX_CONTROL_FRAME: usize = MAX_WIRE_FRAME;
 
 #[derive(Debug, Error)]
 pub enum IpcError {
