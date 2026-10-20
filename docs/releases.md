@@ -13,7 +13,7 @@ Download the zip and `SHA256SUMS.txt` from the
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
 # Pin a version:
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version v0.1.0
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version v0.2.0
 
 # Custom location, no PATH change:
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
@@ -48,7 +48,7 @@ Local builds do not have a release checksum. The script says so explicitly.
 ## Verify a download manually
 
 ```powershell
-Get-FileHash .\fact-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+Get-FileHash .\fact-v0.2.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -92,14 +92,14 @@ markers.
    [testing.md](testing.md#manual-smoke-check), including a real detach/reattach
    PID check and a cold recovery.
 4. Ensure `Cargo.toml`'s workspace version matches the intended tag
-   (`0.1.0` -> `v0.1.0`). Update `CHANGELOG.md`.
+   (`X.Y.Z` -> `vX.Y.Z`). Update `CHANGELOG.md`.
 5. Create the annotated tag on the verified `main` commit and push it:
 
    ```powershell
    git switch main
    git pull --ff-only
-   git tag -a v0.1.0 -m "FACT v0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.2.0 -m "FACT v0.2.0"
+   git push origin v0.2.0
    ```
 
 6. The `Release` workflow runs. Its `verify` job enforces:
@@ -118,9 +118,9 @@ markers.
 7. Verify the published assets from a clean directory:
 
    ```powershell
-   gh release view v0.1.0 --repo imthegoodboy/FACT
-   gh release download v0.1.0 --repo imthegoodboy/FACT
-   Get-FileHash .\fact-v0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
+   gh release view v0.2.0 --repo imthegoodboy/FACT
+   gh release download v0.2.0 --repo imthegoodboy/FACT
+   Get-FileHash .\fact-v0.2.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256
    Get-Content .\SHA256SUMS.txt
    ```
 
@@ -147,7 +147,7 @@ release.
 ## Artifact contents
 
 ```text
-fact-v0.1.0-x86_64-pc-windows-msvc/
+fact-v0.2.0-x86_64-pc-windows-msvc/
   fact.exe
   README.md
   LICENSE
@@ -182,6 +182,6 @@ fact-v0.1.0-x86_64-pc-windows-msvc/
 
 ## Compatibility statement
 
-v0.1.0 targets Windows 11 x64. Windows 10 1809+ is intended to work but has not
+v0.2.0 targets Windows 11 x64. Windows 10 1809+ is intended to work but has not
 been verified; do not describe it as supported until a Windows 10 run passes the
 full suite. Windows on ARM and non-Windows platforms are not supported.

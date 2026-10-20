@@ -321,6 +321,11 @@ impl SessionManager {
                 self.scroll_to_line(&key, pane, line)?;
                 Ok(ResponsePayload::Ack)
             }
+            Command::SetScrollOffset { pane, offset } => {
+                let key = self.pane_owner(pane, bound_session)?;
+                self.set_scroll_offset(&key, pane, offset)?;
+                Ok(ResponsePayload::Ack)
+            }
             Command::SearchPane {
                 pane,
                 query,
@@ -392,7 +397,7 @@ impl SessionManager {
                     let title = if pane.term.title().trim().is_empty() {
                         pane.default_title.clone()
                     } else {
-                        sanitize_title(&pane.term.title())
+                        fact_protocol::friendly_title(&pane.term.title())
                     };
                     if title != pane.display_title {
                         pane.display_title = title;
@@ -1605,6 +1610,25 @@ impl SessionManager {
         Ok(())
     }
 
+    fn set_scroll_offset(
+        &mut self,
+        key: &str,
+        pane: u64,
+        offset: usize,
+    ) -> Result<(), ProtocolError> {
+        let session = self
+            .sessions
+            .get_mut(key)
+            .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
+        let live = session
+            .panes
+            .get_mut(&pane)
+            .ok_or_else(|| ProtocolError::not_found(format!("pane {pane}")))?;
+        live.term.set_scroll_offset(offset);
+        live.version = live.version.wrapping_add(1);
+        Ok(())
+    }
+
     fn search(
         &self,
         key: &str,
@@ -2046,9 +2070,9 @@ fn spawn_pane(
     });
 
     let title = if title_hint.trim().is_empty() {
-        resolved.label()
+        fact_protocol::friendly_title(&resolved.label())
     } else {
-        sanitize_title(title_hint)
+        fact_protocol::friendly_title(title_hint)
     };
     let sink = TerminalEventSink::new();
     let (response_tx, response_rx) = std::sync::mpsc::sync_channel(16);

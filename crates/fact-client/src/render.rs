@@ -6,11 +6,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use fact_protocol::{cell_flags, semantic_color, CellDto, ColorDto, PaneView};
+use fact_protocol::{
+    cell_flags, friendly_title, semantic_color, CellDto, ColorDto, CursorShape, PaneView,
+};
 use ratatui::layout::Position;
 
 use crate::{
-    action_label, filtered_palette, fit_text as fit, help_lines, palette_items, utc_clock, App,
+    action_label, filtered_palette, fit_text as fit, help_lines, minimized_tray_rect, new_tab_rect,
+    palette_items, pane_button_strip, pane_buttons, scrollbar_geometry, tab_ranges, utc_clock, App,
     ColdState, ContextState, HelpState, Overlay, PaletteState, PromptKind, PromptState,
     SearchState, SessionsState,
 };
@@ -63,82 +66,58 @@ impl App {
         }
         let buffer = frame.buffer_mut();
         buffer.set_style(area, Style::default().bg(self.theme.tab_bg));
-        let mut x = area.x;
-        let brand = " FACT ";
-        let (next, _) = buffer.set_stringn(
-            x,
-            area.y,
-            brand,
-            usize::from(area.width),
-            Style::default()
-                .bg(self.theme.accent)
-                .fg(self.theme.on_accent)
-                .add_modifier(Modifier::BOLD),
-        );
-        x = next;
-
         let Some(frame_data) = &self.frame else {
             let text = format!(" {} ", self.info.session.name);
             buffer.set_stringn(
-                x.saturating_add(1),
+                area.x.saturating_add(1),
                 area.y,
                 text,
-                usize::from(area.right().saturating_sub(x + 1)),
+                usize::from(area.width.saturating_sub(1)),
                 Style::default().fg(self.theme.muted).bg(self.theme.tab_bg),
             );
             return;
         };
 
-        for (index, tab) in frame_data.tabs.iter().enumerate() {
-            if x >= area.right() {
-                break;
-            }
-            let remaining = area.right().saturating_sub(x);
-            if remaining < 6 {
-                break;
-            }
-            let zoom = if tab.zoomed { " [z]" } else { "" };
-            let raw = format!(" {} {}{} ", index + 1, tab.title, zoom);
-            let available = usize::from(remaining.saturating_sub(1));
-            let label = fit(&raw, available);
+        for range in tab_ranges(&frame_data.tabs, area.width) {
+            let Some(tab) = frame_data.tabs.iter().find(|tab| tab.id == range.id) else {
+                continue;
+            };
+            let bell = frame_data
+                .panes
+                .iter()
+                .any(|pane| pane.tab == tab.id && self.bells.contains(&pane.id));
             let style = if tab.active {
                 Style::default()
-                    .bg(self.theme.accent)
-                    .fg(self.theme.on_accent)
+                    .bg(self.theme.title_focus_bg)
+                    .fg(self.theme.title_focus_fg)
+                    .add_modifier(Modifier::BOLD)
+            } else if bell {
+                Style::default()
+                    .bg(self.theme.tab_bg)
+                    .fg(self.theme.warning)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default()
-                    .bg(self.theme.title_bg)
-                    .fg(self.theme.tab_fg)
-            };
-            let (after, _) = buffer.set_stringn(x, area.y, label, available, style);
-            x = after;
-            if x < area.right() {
-                buffer.set_stringn(
-                    x,
-                    area.y,
-                    "│",
-                    1,
-                    Style::default().fg(self.theme.gutter).bg(self.theme.tab_bg),
-                );
-                x = x.saturating_add(1);
-            }
-        }
-
-        if x < area.right() {
-            let marker = if self.bells.is_empty() {
-                ""
-            } else {
-                " • bell"
+                Style::default().bg(self.theme.tab_bg).fg(self.theme.tab_fg)
             };
             buffer.set_stringn(
-                x,
+                area.x.saturating_add(range.rect.x),
                 area.y,
-                marker,
-                usize::from(area.right().saturating_sub(x)),
+                range.label,
+                usize::from(range.rect.width),
+                style,
+            );
+        }
+
+        if let Some(rect) = new_tab_rect(area.width) {
+            buffer.set_stringn(
+                area.x.saturating_add(rect.x),
+                area.y,
+                " + ",
+                usize::from(rect.width),
                 Style::default()
-                    .fg(self.theme.warning)
-                    .bg(self.theme.tab_bg),
+                    .bg(self.theme.tab_bg)
+                    .fg(self.theme.muted)
+                    .add_modifier(Modifier::BOLD),
             );
         }
     }
@@ -174,14 +153,14 @@ impl App {
         let Some(frame_data) = &self.frame else {
             return;
         };
+        let zoomed = self.active_tab().is_some_and(|tab| tab.zoomed);
         for pane in &frame_data.panes {
-            self.render_pane(frame, main, pane);
+            self.render_pane(frame, main, pane, zoomed);
         }
         self.render_splits(frame, main, frame_data);
-        self.place_cursor(frame, main, frame_data);
     }
 
-    fn render_pane(&self, frame: &mut Frame, main: Rect, pane: &PaneView) {
+    fn render_pane(&self, frame: &mut Frame, main: Rect, pane: &PaneView, zoomed: bool) {
         let slot = Rect::new(
             main.x.saturating_add(pane.slot.x),
             main.y.saturating_add(pane.slot.y),
@@ -198,7 +177,10 @@ impl App {
         } else {
             self.theme.title_bg
         };
-        let title_fg = if pane.focused {
+        let bell = self.bells.contains(&pane.id);
+        let title_fg = if bell {
+            self.theme.warning
+        } else if pane.focused {
             self.theme.title_focus_fg
         } else {
             self.theme.title_fg
@@ -213,6 +195,8 @@ impl App {
                     Modifier::empty()
                 });
 
+        let buttons = pane_buttons(slot.width);
+        let buttons_x = buttons.first().map(|button| button.x).unwrap_or(slot.width);
         {
             let buffer = frame.buffer_mut();
             let title_row = Rect::new(slot.x, slot.y, slot.width, 1);
@@ -224,33 +208,30 @@ impl App {
                 slot.y,
                 marker,
                 2,
-                Style::default().bg(title_bg).fg(self.theme.accent),
+                Style::default().bg(title_bg).fg(if bell {
+                    self.theme.warning
+                } else {
+                    self.theme.accent
+                }),
             );
-            let markers = self.pane_markers(pane);
-            let right = if markers.is_empty() {
-                String::new()
-            } else {
-                format!("{} ", markers.join(" · "))
-            };
-            let right_width = right.chars().count() as u16;
-            let title_width = slot
-                .width
+            let title_width = buttons_x
                 .saturating_sub(next.saturating_sub(slot.x))
-                .saturating_sub(right_width)
                 .saturating_sub(1);
-            let title = fit(&pane.title, usize::from(title_width));
-            let (after, _) =
-                buffer.set_stringn(next, slot.y, title, usize::from(title_width), title_style);
-            if !right.is_empty() && after < slot.right() {
-                let right = fit(&right, usize::from(slot.right().saturating_sub(after)));
-                let right_width = right.chars().count() as u16;
-                let x = slot.right().saturating_sub(right_width.saturating_add(1));
+            let title = fit(&friendly_title(&pane.title), usize::from(title_width));
+            buffer.set_stringn(next, slot.y, title, usize::from(title_width), title_style);
+
+            if !buttons.is_empty() {
+                let strip = pane_button_strip(zoomed);
                 buffer.set_stringn(
-                    x,
+                    slot.x.saturating_add(buttons_x),
                     slot.y,
-                    right,
-                    usize::from(slot.right().saturating_sub(x)),
-                    Style::default().bg(title_bg).fg(self.theme.muted),
+                    strip,
+                    usize::from(slot.width.saturating_sub(buttons_x)),
+                    Style::default().bg(title_bg).fg(if pane.focused {
+                        self.theme.title_fg
+                    } else {
+                        self.theme.muted
+                    }),
                 );
             }
         }
@@ -261,7 +242,7 @@ impl App {
         let content = Rect::new(
             slot.x,
             slot.y + 1,
-            slot.width.min(pane.content_cols),
+            slot.width.saturating_sub(1).min(pane.content_cols),
             slot.height.saturating_sub(1).min(pane.content_rows),
         )
         .intersection(main);
@@ -281,6 +262,16 @@ impl App {
                 for x in content.x..content.right() {
                     buffer[(x, y)].set_symbol(" ");
                 }
+            }
+            let scroll_column = Rect::new(
+                slot.x.saturating_add(slot.width).saturating_sub(1),
+                content.y,
+                1,
+                content.height,
+            );
+            buffer.set_style(scroll_column, Style::default().bg(self.theme.terminal_bg));
+            for y in scroll_column.y..scroll_column.bottom() {
+                buffer[(scroll_column.x, y)].set_symbol(" ");
             }
         }
 
@@ -331,6 +322,9 @@ impl App {
             );
         }
 
+        self.render_cursor(frame, pane, content);
+        self.render_scrollbar(frame, main, pane);
+
         if !pane.alive {
             let code = pane
                 .exit_code
@@ -360,27 +354,78 @@ impl App {
         }
     }
 
-    fn pane_markers(&self, pane: &PaneView) -> Vec<String> {
-        let mut markers = Vec::new();
-        if !pane.alive {
-            markers.push(match pane.exit_code {
-                Some(code) => format!("exit {code}"),
-                None => "exited".into(),
-            });
+    /// Draw the cursor into the cell grid instead of leaving it to the host
+    /// terminal. A hardware cursor is repositioned every frame and can blink or
+    /// flicker while a fast TUI (an AI agent, for example) repaints. An explicit,
+    /// steady cursor follows the daemon snapshot exactly and is visually stable.
+    fn render_cursor(&self, frame: &mut Frame, pane: &PaneView, content: Rect) {
+        if !pane.focused || self.overlay.is_some() || pane.scroll_offset > 0 {
+            return;
         }
-        if self.bells.contains(&pane.id) {
-            markers.push("bell".into());
+        if !pane.cursor.visible {
+            return;
         }
-        if pane.cold_restored {
-            markers.push("recovered".into());
+        let Some(modifier) = cursor_modifier(pane.cursor.shape) else {
+            return;
+        };
+        if pane.cursor.x >= content.width || pane.cursor.y >= content.height {
+            return;
         }
-        if pane.scroll_offset > 0 {
-            markers.push(format!("↑{}", pane.scroll_offset));
+        let x = content.x.saturating_add(pane.cursor.x);
+        let y = content.y.saturating_add(pane.cursor.y);
+        let buffer = frame.buffer_mut();
+        let style = buffer[(x, y)].style().add_modifier(modifier);
+        buffer[(x, y)].set_style(style);
+    }
+
+    fn render_scrollbar(&self, frame: &mut Frame, main: Rect, pane: &PaneView) {
+        let Some(geometry) = scrollbar_geometry(pane) else {
+            return;
+        };
+        let track = Rect::new(
+            main.x.saturating_add(geometry.track.x),
+            main.y.saturating_add(geometry.track.y),
+            geometry.track.width,
+            geometry.track.height,
+        )
+        .intersection(main);
+        if track.width == 0 || track.height == 0 {
+            return;
         }
-        if pane.alive {
-            markers.push(format!("pid {}", pane.pid));
+        let buffer = frame.buffer_mut();
+        buffer.set_style(
+            track,
+            Style::default()
+                .bg(self.theme.title_bg)
+                .fg(self.theme.gutter),
+        );
+        for y in track.y..track.bottom() {
+            buffer[(track.x, y)].set_symbol(" ");
         }
-        markers
+        let thumb_top = geometry.thumb_y.max(geometry.track.y).min(
+            geometry
+                .track
+                .y
+                .saturating_add(geometry.track.height)
+                .saturating_sub(1),
+        );
+        let thumb_bottom = geometry
+            .thumb_y
+            .saturating_add(geometry.thumb_height)
+            .min(geometry.track.y.saturating_add(geometry.track.height));
+        let start = main.y.saturating_add(thumb_top).max(track.y);
+        let end = main.y.saturating_add(thumb_bottom).min(track.bottom());
+        for y in start..end {
+            buffer[(track.x, y)].set_symbol("▐").set_style(
+                Style::default()
+                    .bg(self.theme.terminal_bg)
+                    .fg(if pane.focused {
+                        self.theme.accent
+                    } else {
+                        self.theme.muted
+                    }),
+            );
+        }
     }
 
     fn render_splits(&self, frame: &mut Frame, main: Rect, frame_data: &fact_protocol::Frame) {
@@ -428,38 +473,6 @@ impl App {
         }
     }
 
-    fn place_cursor(&self, frame: &mut Frame, main: Rect, frame_data: &fact_protocol::Frame) {
-        if self.overlay.is_some() {
-            return;
-        }
-        let Some(pane) = frame_data
-            .panes
-            .iter()
-            .find(|pane| pane.focused)
-            .or_else(|| frame_data.panes.first())
-        else {
-            return;
-        };
-        if !pane.cursor.visible || pane.cursor.shape == fact_protocol::CursorShape::Hidden {
-            return;
-        }
-        if pane.cursor.x >= pane.content_cols || pane.cursor.y >= pane.content_rows {
-            return;
-        }
-        let x = main
-            .x
-            .saturating_add(pane.slot.x)
-            .saturating_add(pane.cursor.x);
-        let y = main
-            .y
-            .saturating_add(pane.slot.y)
-            .saturating_add(1)
-            .saturating_add(pane.cursor.y);
-        if x < main.right() && y < main.bottom() {
-            frame.set_cursor_position(Position::new(x, y));
-        }
-    }
-
     fn render_status(&self, frame: &mut Frame, area: Rect) {
         if area.height == 0 {
             return;
@@ -471,107 +484,80 @@ impl App {
                 .bg(self.theme.status_bg)
                 .fg(self.theme.status_fg),
         );
-        let mut x = area.x;
-        let prefix = if self.prefix_armed {
-            " PREFIX ".to_string()
-        } else {
-            format!(" {} ", self.keys.prefix)
-        };
-        let prefix_style = if self.prefix_armed {
-            Style::default()
-                .bg(self.theme.warning)
-                .fg(self.theme.bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .bg(self.theme.title_bg)
-                .fg(self.theme.status_fg)
-        };
-        let (next, _) =
-            buffer.set_stringn(x, area.y, &prefix, usize::from(area.width), prefix_style);
-        x = next;
 
-        let (name, panes, tabs, extra) = match &self.frame {
-            Some(frame_data) => (
-                frame_data.session.name.clone(),
-                frame_data.panes.len(),
-                frame_data.tabs.len(),
-                {
-                    let mut parts = Vec::new();
-                    if frame_data.tiny_mode {
-                        parts.push("focused mode".to_string());
-                    }
-                    if !frame_data.minimized.is_empty() {
-                        parts.push(format!("{} minimized", frame_data.minimized.len()));
-                    }
-                    if !self.bells.is_empty() {
-                        parts.push("bell".to_string());
-                    }
-                    parts.join(" · ")
-                },
-            ),
-            None => (self.info.session.name.clone(), 0, 0, "connecting".into()),
+        let name = match &self.frame {
+            Some(frame_data) => frame_data.session.name.clone(),
+            None => self.info.session.name.clone(),
         };
-
-        let left = format!("  {name}  {panes} panes  {tabs} tabs");
-        let max_left = area.right().saturating_sub(x).saturating_sub(22);
-        let (next, _) = buffer.set_stringn(
-            x,
+        let name = format!(" {name} ");
+        let (mut x, _) = buffer.set_stringn(
+            area.x,
             area.y,
-            fit(&left, usize::from(max_left)),
-            usize::from(max_left),
+            &name,
+            usize::from(area.width),
             Style::default()
                 .bg(self.theme.status_bg)
-                .fg(self.theme.status_fg),
+                .fg(self.theme.fg)
+                .add_modifier(Modifier::BOLD),
         );
-        x = next;
-        if !extra.is_empty() && x + 2 < area.right() {
+        if self.prefix_armed && x.saturating_add(8) <= area.right() {
             let (next, _) = buffer.set_stringn(
                 x,
                 area.y,
-                format!("  {extra}"),
-                usize::from(area.right().saturating_sub(x).saturating_sub(20)),
+                " PREFIX ",
+                8,
                 Style::default()
-                    .bg(self.theme.status_bg)
-                    .fg(self.theme.warning),
+                    .bg(self.theme.warning)
+                    .fg(self.theme.bg)
+                    .add_modifier(Modifier::BOLD),
             );
-            let _ = next;
+            x = next;
         }
 
-        let (right, right_style) = if let Some((message, _)) = &self.status {
+        let minimized = self
+            .frame
+            .as_ref()
+            .map(|frame| frame.minimized.len())
+            .unwrap_or(0);
+        let mut right_edge = area.right();
+        if let Some(tray) = minimized_tray_rect(area.width, minimized) {
+            let tray_x = area.x.saturating_add(tray.x);
+            buffer.set_stringn(
+                tray_x,
+                area.y,
+                format!("▣ {minimized} "),
+                usize::from(tray.width),
+                Style::default()
+                    .bg(self.theme.title_bg)
+                    .fg(self.theme.warning)
+                    .add_modifier(Modifier::BOLD),
+            );
+            right_edge = tray_x;
+        }
+
+        let (message, style) = if let Some((message, _)) = &self.status {
             (
                 format!(" {message} "),
                 Style::default()
                     .bg(self.theme.status_bg)
                     .fg(self.theme.warning),
             )
-        } else {
-            let clock = self
-                .frame
-                .as_ref()
-                .map(|frame| utc_clock(frame.server_time_ms))
-                .unwrap_or_else(|| "—".into());
+        } else if self.frame.is_none() {
             (
-                format!(" {}  {clock} ", self.theme.name),
+                " connecting ".to_string(),
                 Style::default()
                     .bg(self.theme.status_bg)
                     .fg(self.theme.muted),
             )
-        };
-        let right_width = if self.status.is_some() {
-            (right.chars().count() as u16).min(area.right().saturating_sub(x))
         } else {
-            (right.chars().count() as u16).min(area.width)
+            return;
         };
-        let right_x = area.right().saturating_sub(right_width);
-        if right_width > 0 && right_x >= area.x && right_x >= x.saturating_sub(1) {
-            buffer.set_stringn(
-                right_x,
-                area.y,
-                fit(&right, usize::from(right_width)),
-                usize::from(right_width),
-                right_style,
-            );
+        let available = right_edge.saturating_sub(x);
+        let message = fit(&message, usize::from(available));
+        let width = (message.chars().count() as u16).min(available);
+        let message_x = right_edge.saturating_sub(width);
+        if width > 0 && message_x >= x {
+            buffer.set_stringn(message_x, area.y, message, usize::from(width), style);
         }
     }
 
@@ -1129,6 +1115,14 @@ impl App {
     }
 }
 
+fn cursor_modifier(shape: CursorShape) -> Option<Modifier> {
+    match shape {
+        CursorShape::Block => Some(Modifier::REVERSED),
+        CursorShape::Underline | CursorShape::Beam => Some(Modifier::UNDERLINED),
+        CursorShape::Hidden => None,
+    }
+}
+
 fn cell_style(cell: &CellDto, theme: &crate::theme::Theme) -> Style {
     let mut fg = color(cell.fg, theme);
     let mut bg = color(cell.bg, theme);
@@ -1216,6 +1210,23 @@ mod tests {
         assert_eq!(fit("abcdef", 4), "abc…");
         assert_eq!(fit("abc", 4), "abc");
         assert_eq!(fit("abc", 0), "");
+    }
+
+    #[test]
+    fn cursor_shapes_map_to_steady_cell_modifiers() {
+        assert_eq!(
+            cursor_modifier(CursorShape::Block),
+            Some(Modifier::REVERSED)
+        );
+        assert_eq!(
+            cursor_modifier(CursorShape::Underline),
+            Some(Modifier::UNDERLINED)
+        );
+        assert_eq!(
+            cursor_modifier(CursorShape::Beam),
+            Some(Modifier::UNDERLINED)
+        );
+        assert_eq!(cursor_modifier(CursorShape::Hidden), None);
     }
 
     #[test]

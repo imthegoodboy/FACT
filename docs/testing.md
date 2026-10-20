@@ -29,10 +29,10 @@ directory, use a real shell and terminate the daemon during cleanup.
 | ConPTY | Independent processes, input/output, resize, exit status, environment block and argument quoting. |
 | IPC | Pipe round-trip, peer PID/current-user check, protected DACL, local name validation, identity file ACL, DACL diagnostics. |
 | Sessions | Schema migration, save/load, case-insensitive names, checksum and layout corruption rejection, export/import copy semantics, archive/delete. |
-| Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, lifecycle, bad-token rejection. |
+| Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards; a second test shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
+| TUI | A driven real-ConPTY `--grid 8` session covering pane output, pane-header chrome, scrollbar rendering, clean header/status text, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards; a second test shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
@@ -47,6 +47,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Non-owner access | Pipe and identity files use a protected current-user/SYSTEM DACL. Tests assert exactly those grants, peer-user comparison is in the accept path, and local-only pipe names are enforced. |
 | No network listeners | A source-level test scans every crate's `src` tree for TCP/UDP/HTTP listener and stream APIs. |
 | Import copies identity | `export_import_is_a_copy` and the daemon lifecycle test verify fresh session/pane IDs and reset process state. |
+| Clean, controllable UI | Client unit tests cover pane-button hit targets, tab/new-tab geometry, the minimized tray, scrollbar geometry and steady cursor styles. The real-ConPTY TUI test renders the screen and rejects shell paths, PIDs, pane counts, focused-mode labels and theme names in the chrome. |
 | Windows CI on every PR | `.github/workflows/ci.yml` runs format, Clippy and the full suite on `windows-latest` for every pull request. |
 
 A true second-Windows-user connection test requires creating a local account or
@@ -101,7 +102,7 @@ artifact. A tag cannot bypass a failing test.
 - Development and manual verification: Windows 11.
 - CI: GitHub's current Windows Server runner, which is not the same as Windows
   11 or Windows 10.
-- Windows 10 1809+: intended, but not verified for v0.1.0. Do not claim support
+- Windows 10 1809+: intended, but not verified for v0.2.0. Do not claim support
   until a run on a physical or VM Windows 10 installation passes the suite.
 
 ## Manual smoke check
@@ -112,6 +113,13 @@ Before a release, on a clean Windows 11 account:
 fact doctor
 fact --grid 8
 # in each pane: hostname; $PID; echo $env:TERM_PROGRAM
+# click V and H in a pane header; confirm the new panes receive input
+# click + in the tab strip; confirm a new tab appears
+# minimize a pane, then click the tray in the status bar to restore it
+# maximize a pane and confirm ^ changes to v and stays visible
+# generate 200 lines, then click and drag the scrollbar; confirm output moves
+# select text, press Ctrl+C, focus another pane and press Ctrl+V
+# press Ctrl+Space and confirm the PREFIX badge appears only while armed
 # detach with Ctrl+Space D
 fact sessions --json
 fact resume
