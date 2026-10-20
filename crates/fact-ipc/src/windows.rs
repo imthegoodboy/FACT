@@ -599,7 +599,21 @@ mod tests {
         secure_file_acl(&path).unwrap();
         let dacl = file_dacl_sddl(&path).unwrap();
         let sid = current_user_sid_string().unwrap();
-        assert!(dacl.contains(&sid), "DACL {dacl} did not contain {sid}");
+        // SDDL renders well-known account SIDs (such as the built-in
+        // Administrator used by CI runners) as aliases instead of raw SIDs.
+        let alias = ["SY", "LA", "BA", "DA", "EA", "SA"]
+            .iter()
+            .any(|alias| dacl.contains(&format!(";;;{alias})")));
+        assert!(
+            dacl.contains(&sid) || alias,
+            "DACL {dacl} did not grant the current user {sid}"
+        );
+        assert_eq!(
+            dacl.matches("(A;;").count(),
+            2,
+            "DACL should grant exactly the current user and SYSTEM: {dacl}"
+        );
+        assert!(dacl.contains(";;;SY)"), "DACL is missing SYSTEM: {dacl}");
         assert!(!dacl.ends_with('\0'));
         assert!(!dacl.contains(";;;WD)"));
         let _ = std::fs::remove_file(path);
