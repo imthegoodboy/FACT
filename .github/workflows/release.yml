@@ -1,0 +1,167 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify gates for release
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag is a versioned commit on main
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $line = Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"$' |
+            Select-Object -First 1
+          if (-not $line) { throw "Could not read the workspace version from Cargo.toml" }
+          $version = $line.Matches[0].Groups[1].Value
+          if ("v$version" -ne $tag) {
+            throw "Tag $tag does not match workspace version v$version"
+          }
+          git fetch origin main
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch origin/main" }
+          git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tags must point to a commit on origin/main"
+          }
+          Write-Host "Releasing $tag from $env:GITHUB_SHA"
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --no-fail-fast
+
+  package:
+    name: Build, package and publish
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin fact
+
+      - name: Smoke-test release binary
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "target\release\fact.exe"
+          if (-not (Test-Path $exe)) { throw "Release binary missing" }
+          $reported = (& $exe --version).Trim()
+          if (-not $reported.StartsWith("fact ")) { throw "Unexpected version: $reported" }
+          $temp = Join-Path $env:RUNNER_TEMP ("fact-release-" + [Guid]::NewGuid().ToString("N"))
+          try {
+            $config = & $exe --data-dir $temp config validate --json | ConvertFrom-Json
+            if (-not $config.valid) { throw "Release config validation failed" }
+            $report = & $exe --data-dir $temp doctor --json | ConvertFrom-Json
+            if (-not $report.healthy) { throw "Release doctor reported an unhealthy install" }
+            Write-Host "Release binary smoke test passed ($reported)"
+          } finally {
+            Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Smoke-test the release TUI against a real ConPTY
+        shell: pwsh
+        run: |
+          $env:FACT_SMOKE_EXE = Join-Path $PWD "target\release\fact.exe"
+          cargo test -p fact-cli --test tui -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Release TUI smoke test failed" }
+
+      - name: Package artifact and checksums
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $name = "fact-$tag-x86_64-pc-windows-msvc"
+          $stage = Join-Path $PWD "dist\$name"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item "target\release\fact.exe" $stage
+          Copy-Item "README.md" $stage
+          Copy-Item "LICENSE" $stage
+          if (Test-Path "SECURITY.md") { Copy-Item "SECURITY.md" $stage }
+          if (Test-Path "CHANGELOG.md") { Copy-Item "CHANGELOG.md" $stage }
+          Copy-Item "scripts" (Join-Path $stage "scripts") -Recurse
+          if (Test-Path "docs") { Copy-Item "docs" (Join-Path $stage "docs") -Recurse }
+          $zip = Join-Path $PWD "dist\$name.zip"
+          Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content -LiteralPath (Join-Path $PWD "dist\SHA256SUMS.txt") -Encoding ascii
+          Write-Host "Created $zip"
+          Write-Host "SHA256 $hash"
+          Get-Content (Join-Path $PWD "dist\SHA256SUMS.txt")
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fact-release
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $assets = @(Get-ChildItem -LiteralPath "dist" -File | ForEach-Object { $_.FullName })
+          if ($assets.Count -lt 2) { throw "Expected a zip and SHA256SUMS.txt" }
+          $expected = @($assets | ForEach-Object { Split-Path $_ -Leaf })
+
+          # Create a draft first. A public release must never exist with a
+          # partial or unverified asset set.
+          gh release create $tag @assets `
+            --repo $env:GITHUB_REPOSITORY `
+            --title "FACT $tag" `
+            --generate-notes `
+            --verify-tag `
+            --draft
+          if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+
+          $release = gh release view $tag --repo $env:GITHUB_REPOSITORY --json isDraft,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect the draft release" }
+          if (-not $release.isDraft) { throw "Release $tag is public before asset verification" }
+          $uploaded = @($release.assets | ForEach-Object { $_.name })
+          foreach ($name in $expected) {
+            if ($uploaded -notcontains $name) { throw "Draft release is missing $name" }
+          }
+          Write-Host "Draft assets verified: $($uploaded -join ', ')"
+
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw "gh release edit failed; the draft was not published" }
+          Write-Host "Published $tag with $($uploaded.Count) assets"
