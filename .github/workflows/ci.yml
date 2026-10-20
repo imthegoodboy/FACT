@@ -35,3 +35,7 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace --no-fail-fast
+
+      - name: Installer offline test
+        shell: pwsh
+        run: ./scripts/test-install.ps1 -FactExe target\debug\fact.exe

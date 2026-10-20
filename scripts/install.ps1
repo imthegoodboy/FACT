@@ -202,7 +202,7 @@ $installedExe = Join-Path $InstallDir "fact.exe"
 $tempRoot = Join-Path $env:TEMP ("fact-install-" + [Guid]::NewGuid().ToString("N"))
 $tag = $null
 $candidate = $null
-$version = $null
+$resolvedVersion = $null
 $downloadedAsset = $null
 
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
@@ -216,13 +216,13 @@ try {
             throw "BinaryPath must point to fact.exe."
         }
         Write-Step "Using local binary $candidate"
-        $versionOutput = (& $candidate --version).Trim()
-        if ($versionOutput -notmatch '^fact\s+(.+)$') {
-            throw "Could not determine the local binary version: $versionOutput"
+        $binaryVersionOutput = (& $candidate --version).Trim()
+        if ($binaryVersionOutput -notmatch '^fact\s+(.+)$') {
+            throw "Could not determine the local binary version: $binaryVersionOutput"
         }
-        $version = $Matches[1]
-        $tag = "v$version"
-        Write-Host "Local version: $version (checksums are not applicable to local builds)"
+        $resolvedVersion = $Matches[1]
+        $tag = "v$resolvedVersion"
+        Write-Host "Local version: $resolvedVersion (checksums are not applicable to local builds)"
     } else {
         if ($Version -eq "latest") {
             Write-Step "Looking up the latest FACT release"
@@ -235,7 +235,7 @@ try {
         if (-not $tag -or -not $tag.StartsWith("v")) {
             throw "Invalid release version: $Version"
         }
-        $version = $tag.TrimStart("v")
+        $resolvedVersion = $tag.TrimStart("v")
         $assetName = "fact-$tag-$AssetArch.zip"
         $zipPath = Join-Path $tempRoot $assetName
         $sumsPath = Join-Path $tempRoot "SHA256SUMS.txt"
@@ -268,8 +268,8 @@ try {
         }
         $candidate = $found.FullName
         $reported = (& $candidate --version).Trim()
-        if ($reported -ne "fact $version") {
-            throw "Downloaded binary reported '$reported', expected 'fact $version'."
+        if ($reported -ne "fact $resolvedVersion") {
+            throw "Downloaded binary reported '$reported', expected 'fact $resolvedVersion'."
         }
         $downloadedAsset = $assetName
     }
@@ -280,8 +280,8 @@ try {
             $existing = (& $installedExe --version).Trim()
         } catch {
         }
-        if (-not $Force -and $existing -eq "fact $version") {
-            Write-Host "FACT $version is already installed at $installedExe" -ForegroundColor Green
+        if (-not $Force -and $existing -eq "fact $resolvedVersion") {
+            Write-Host "FACT $resolvedVersion is already installed at $installedExe" -ForegroundColor Green
             if (-not $NoPath) {
                 Add-UserPath $InstallDir
             }
@@ -307,12 +307,12 @@ try {
     }
 
     $installedVersion = (& $installedExe --version).Trim()
-    if ($installedVersion -ne "fact $version") {
-        throw "Installed binary reported '$installedVersion', expected 'fact $version'."
+    if ($installedVersion -ne "fact $resolvedVersion") {
+        throw "Installed binary reported '$installedVersion', expected 'fact $resolvedVersion'."
     }
 
     Write-Host ""
-    Write-Host "FACT $version installed successfully." -ForegroundColor Green
+    Write-Host "FACT $resolvedVersion installed successfully." -ForegroundColor Green
     Write-Host "  Binary: $installedExe"
     if ($downloadedAsset) {
         Write-Host "  Verified asset: $downloadedAsset"

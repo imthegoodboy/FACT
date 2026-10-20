@@ -37,6 +37,12 @@ All notable changes to FACT are documented here. The format follows
 - Release workflow gated on format, Clippy and tests, with SHA-256 checksums and
   per-user install/uninstall scripts.
 
+### Fixed
+
+- The installer's release-download path now resolves pinned, unprefixed and
+  latest versions correctly. An offline regression test builds a fake release,
+  mocks the download, and verifies checksums and installed versions.
+
 ### Known limitations
 
 - Windows 11 is the primary verified target. Windows 10 1809+ is intended but not

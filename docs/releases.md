@@ -85,6 +85,7 @@ markers.
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace --no-fail-fast
+   .\scripts\test-install.ps1 -FactExe .\target\debug\fact.exe
    ```
 
 3. Complete the manual smoke checklist in
@@ -110,9 +111,10 @@ markers.
    - `cargo test --workspace --no-fail-fast`.
 
    Only then does the `package` job build `--release --locked`, smoke-test the
-   binary, create the zip and `SHA256SUMS.txt` and upload the workflow artifact.
-   It creates a **draft** GitHub release, verifies that both expected assets are
-   attached, and only then publishes the draft.
+   binary and TUI, exercise the installer download path offline, create the zip
+   and `SHA256SUMS.txt` and upload the workflow artifact. It creates a **draft**
+   GitHub release, verifies that both expected assets are attached, and only
+   then publishes the draft.
 7. Verify the published assets from a clean directory:
 
    ```powershell
@@ -122,11 +124,12 @@ markers.
    Get-Content .\SHA256SUMS.txt
    ```
 
-8. Install the downloaded zip through `scripts/install.ps1` and run
-   `fact doctor`. Then drive the downloaded binary through the real-ConPTY TUI
-   smoke test:
+8. Extract the downloaded zip and run its `scripts\install.ps1`, not a script
+   from a different checkout. Run `fact doctor`. Then drive the downloaded
+   binary through the real-ConPTY TUI smoke test:
 
    ```powershell
+   .\scripts\test-install.ps1 -FactExe .\fact.exe
    $env:FACT_SMOKE_EXE = "$env:LOCALAPPDATA\Programs\FACT\fact.exe"
    cargo test -p fact-cli --test tui -- --nocapture
    Remove-Item Env:\FACT_SMOKE_EXE
@@ -153,6 +156,7 @@ fact-v0.1.0-x86_64-pc-windows-msvc/
   scripts/
     install.ps1
     uninstall.ps1
+    test-install.ps1
   docs/
     ...
 ```
@@ -162,8 +166,11 @@ fact-v0.1.0-x86_64-pc-windows-msvc/
 ## Versioning and rollback
 
 - Use semantic versioning. A tag is `v` plus the workspace version.
-- Tags are immutable. If an artifact is wrong, do not move the tag or force-push.
-  Publish a new patch release with the fix.
+- A tag is immutable once its release is announced. If verification catches a
+  packaging defect before announcement, withdraw the release and tag, fix the
+  cause, rerun every gate and recut the same version. Record the withdrawal where
+  users could have seen it. After announcement, do not move the tag or
+  force-push; publish a new patch release with the fix.
 - If the workflow fails after creating the draft, the draft is not a release.
   Inspect it, delete the incomplete draft, fix the cause and publish a new patch
   tag. Never publish a draft whose assets were not produced by a green gate run.

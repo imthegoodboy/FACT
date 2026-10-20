@@ -103,6 +103,10 @@ jobs:
           cargo test -p fact-cli --test tui -- --nocapture
           if ($LASTEXITCODE -ne 0) { throw "Release TUI smoke test failed" }
 
+      - name: Test installer download path offline
+        shell: pwsh
+        run: ./scripts/test-install.ps1 -FactExe target\release\fact.exe
+
       - name: Package artifact and checksums
         shell: pwsh
         run: |
@@ -124,6 +128,26 @@ jobs:
           Write-Host "Created $zip"
           Write-Host "SHA256 $hash"
           Get-Content (Join-Path $PWD "dist\SHA256SUMS.txt")
+
+      - name: Verify the packaged installer offline
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $name = "fact-$tag-x86_64-pc-windows-msvc"
+          $zip = Join-Path $PWD "dist\$name.zip"
+          $extract = Join-Path $env:RUNNER_TEMP ("fact-package-test-" + [Guid]::NewGuid().ToString("N"))
+          try {
+            Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
+            $fact = Get-ChildItem -LiteralPath $extract -Filter "fact.exe" -Recurse -File |
+              Select-Object -First 1
+            $test = Get-ChildItem -LiteralPath $extract -Filter "test-install.ps1" -Recurse -File |
+              Select-Object -First 1
+            if (-not $fact -or -not $test) { throw "Packaged installer test files are missing" }
+            & $test.FullName -FactExe $fact.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Packaged installer test failed" }
+          } finally {
+            Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
