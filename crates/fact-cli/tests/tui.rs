@@ -508,11 +508,17 @@ fn maximize_and_show_all_work_in_a_small_window() {
         "show-all did not render the eight-pane grid:\n{screen}"
     );
 
-    // Prefix+M maximizes the focused pane even from the fit-all grid.
+    // Prefix+M maximizes the focused pane even from the fit-all grid. Wait for
+    // the daemon frame instead of assuming a fixed redraw latency; CI runners
+    // can take longer than the local machine.
     process.write(b"\x02m").expect("maximize the focused pane");
-    thread::sleep(Duration::from_millis(500));
-    drain(&process, &mut output);
-    let screen = screen_text(&output, 60, 18);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut screen = screen_text(&output, 60, 18);
+    while screen.matches("PS").count() > 1 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        drain(&process, &mut output);
+        screen = screen_text(&output, 60, 18);
+    }
     assert!(
         screen.matches("PS").count() <= 1,
         "maximize left more than one pane visible:\n{screen}"
