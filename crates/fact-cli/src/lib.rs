@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use fact_config::{Config, Paths};
-use fact_protocol::{AttachInfo, Command, DaemonStats, ResponsePayload, SessionSummary};
+use fact_protocol::{
+    AttachInfo, Command, DaemonStats, ResponsePayload, SessionSummary, ENV_ALLOW_NESTED, ENV_PANE,
+    ENV_SESSION,
+};
 use fact_runtime::DaemonClient;
 
 pub const DEFAULT_CONFIG: &str = r#"# FACT configuration (version 1)
@@ -345,6 +348,32 @@ pub fn run() -> Result<i32> {
     }
 }
 
+/// A FACT pane is a real terminal, so running another TUI inside it would
+/// attach to the session that owns the pane and recurse into the same terminal.
+/// Refuse before starting a client or daemon connection; shells keep working
+/// normally for every non-TUI subcommand.
+fn reject_nested_launch() -> Result<()> {
+    if std::env::var(ENV_ALLOW_NESTED).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    }) {
+        return Ok(());
+    }
+    let (Ok(session), Ok(pane)) = (std::env::var(ENV_SESSION), std::env::var(ENV_PANE)) else {
+        return Ok(());
+    };
+    if session.trim().is_empty() || pane.trim().is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "FACT is already running in this pane (session '{session}', pane {pane}). \
+         Open a new terminal window to start another FACT UI. Set \
+         {ENV_ALLOW_NESTED}=1 only if you deliberately want a nested UI."
+    )
+}
+
 fn launch_resume(
     paths: &Paths,
     config_override: Option<&Path>,
@@ -353,6 +382,7 @@ fn launch_resume(
     profile: Option<String>,
     cwd: Option<String>,
 ) -> Result<()> {
+    reject_nested_launch()?;
     let config = Config::load(paths)?;
     let (_, mut client) =
         startup::ensure_daemon(paths, config_override.map(Path::to_path_buf).as_ref())?;
@@ -445,6 +475,7 @@ fn grid_matches(session: &SessionSummary, grid: u8) -> bool {
 }
 
 fn launch_attach(paths: &Paths, name: &str) -> Result<()> {
+    reject_nested_launch()?;
     let config = Config::load(paths)?;
     let (_, mut client) = startup::existing_daemon(paths)?;
     let info = attached(

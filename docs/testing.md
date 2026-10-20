@@ -32,7 +32,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
+| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
@@ -48,6 +48,8 @@ directory, use a real shell and terminate the daemon during cleanup.
 | No network listeners | A source-level test scans every crate's `src` tree for TCP/UDP/HTTP listener and stream APIs. |
 | Import copies identity | `export_import_is_a_copy` and the daemon lifecycle test verify fresh session/pane IDs and reset process state. |
 | Clean, controllable UI | Layout tests prove 8 panes retain full content height and fit 120x35, 100x30 and 80x24. Client unit tests cover tab/new-tab geometry, the bottom-right minimized tray, scrollbar geometry and steady cursor styles. The real-ConPTY TUI test renders the screen and rejects pane-header buttons, shell paths, PIDs, pane counts, focused-mode labels, session names and theme names. |
+| Recover from a narrow window | Layout tests prove `zoom(false)`/`fit_all` keeps all eight panes visible at 60x18 and survives serialization. The real-ConPTY `maximize_and_show_all_work_in_a_small_window` test presses prefix+M/N and counts the rendered panes. |
+| Safe nested launch | The real-ConPTY `nested_launch_is_rejected_inside_a_pane` test launches `fact --grid 1` inside a pane and checks for the explicit refusal instead of a black second UI. |
 | Windows CI on every PR | `.github/workflows/ci.yml` runs format, Clippy and the full suite on `windows-latest` for every pull request. |
 
 A true second-Windows-user connection test requires creating a local account or
@@ -103,7 +105,7 @@ artifact. A tag cannot bypass a failing test.
 - Development and manual verification: Windows 11.
 - CI: GitHub's current Windows Server runner, which is not the same as Windows
   11 or Windows 10.
-- Windows 10 1809+: intended, but not verified for v0.2.1. Do not claim support
+- Windows 10 1809+: intended, but not verified for v0.2.2. Do not claim support
   until a run on a physical or VM Windows 10 installation passes the suite.
 
 ## Manual smoke check
@@ -118,8 +120,12 @@ fact --grid 8
 # confirm eight panes are visible, not focused-pane mode
 # right-click a pane or press Ctrl+Space then | and - to split; confirm input
 # press Ctrl+Space C; confirm a one-line tab strip appears and + is clickable
+# shrink the window below min_pane_width, then press Alt+N and confirm all panes return
+# press Alt+M to maximize the focused pane, then Alt+N to restore the grid
+# press Ctrl+Space M/N and confirm the same behavior
 # minimize a pane, then click the bottom-right tray to restore it
 # maximize a pane with Ctrl+Space Z and restore it with Ctrl+Space Z
+# from a pane, run `fact --grid 8` and confirm it refuses instead of going black
 # generate 200 lines, then click and drag the scrollbar; confirm output moves
 # select text, press Ctrl+C, focus another pane and press Ctrl+V
 # press Ctrl+Space and confirm the two-cell accent marker appears only while armed

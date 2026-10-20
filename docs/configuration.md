@@ -173,14 +173,16 @@ that is not a FACT binding is sent to the focused shell.
 | Close pane | `close_pane` | Prefix then `X` |
 | Close tab | `close_tab` | Prefix then `Shift+X` |
 | Restart pane | `restart_pane` | Prefix then `Shift+R` |
-| Maximize / restore pane | `zoom` | Prefix then `Z` |
-| Minimize pane | `minimize` | Prefix then `M` |
-| Restore panes | `restore` | Prefix then `Shift+M` |
+| Toggle maximize / full grid | `zoom` | Prefix then `Z` |
+| Maximize focused pane | `maximize` | Prefix then `M`, or `Alt+M` |
+| Show all panes | `show_all` | Prefix then `N`, or `Alt+N` |
+| Minimize pane | `minimize` | Prefix then `Shift+M` |
+| Restore minimized panes | `restore` | Prefix then `Shift+U` |
 | Focus left/right/up/down | `focus_left`, `focus_right`, `focus_up`, `focus_down` | Prefix then arrow key |
 | Next pane | `next_pane` | Prefix then `O` |
 | Previous pane | `prev_pane` | Prefix then `I` |
 | New tab | `new_tab` | Prefix then `C` |
-| Next tab | `next_tab` | Prefix then `N` |
+| Next tab | `next_tab` | Prefix then `Shift+N` |
 | Previous tab | `prev_tab` | Prefix then `P` |
 | Rename tab | `rename_tab` | Prefix then `Shift+T` |
 | Command palette | `palette` | Prefix then `K` |
@@ -197,6 +199,12 @@ that is not a FACT binding is sent to the focused shell.
 Additional interaction that is not a configurable chord:
 
 - `F2` cycles themes unless you bind `F2` to another action.
+- `Alt+M` maximizes the focused pane and `Alt+N` shows the full grid without
+  using the prefix. `Ctrl+M` is Enter in terminal input, so it cannot be used as
+  a direct shortcut.
+- In a window too small for the configured `min_pane_width`/`min_pane_height`,
+  FACT normally shows only the focused pane. `Alt+N` or the `show_all` action
+  keeps the whole grid visible even below those limits; `Alt+M` maximizes again.
 - Drag a split gutter with the mouse to resize.
 - Drag in pane content to select text; `Shift`+drag selects even when the
   application has requested mouse reporting.

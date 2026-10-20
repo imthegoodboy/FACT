@@ -31,6 +31,8 @@ const OUTPUT_CHUNKS_PER_TICK: usize = 64;
 const MAX_PANES_PER_SESSION: usize = 256;
 
 struct PaneSpec<'a> {
+    session_name: &'a str,
+    pane: u64,
     profile: Option<&'a str>,
     cwd: Option<&'a str>,
     cols: u16,
@@ -95,6 +97,7 @@ struct LivePane {
 }
 
 struct Subscriber {
+    id: u64,
     tx: SyncSender<fact_protocol::ServerMessage>,
     session_key: String,
     sent_versions: HashMap<u64, u64>,
@@ -466,6 +469,7 @@ impl SessionManager {
 
     pub(crate) fn subscribe(
         &mut self,
+        id: u64,
         token: &str,
         tx: SyncSender<fact_protocol::ServerMessage>,
     ) -> Result<(), ProtocolError> {
@@ -487,6 +491,7 @@ impl SessionManager {
             ));
         }
         self.subscribers.push(Subscriber {
+            id,
             tx,
             session_key: grant.session_key,
             sent_versions: HashMap::new(),
@@ -495,6 +500,10 @@ impl SessionManager {
         });
         self.pump_frames();
         Ok(())
+    }
+
+    pub(crate) fn unsubscribe(&mut self, id: u64) {
+        self.subscribers.retain(|subscriber| subscriber.id != id);
     }
 
     pub(crate) fn shutdown_requested(&self) -> bool {
@@ -721,6 +730,8 @@ impl SessionManager {
             let spawned = spawn_pane(
                 &self.config,
                 PaneSpec {
+                    session_name: &name,
+                    pane: *id,
                     profile,
                     cwd,
                     cols,
@@ -816,6 +827,8 @@ impl SessionManager {
             let spawned = spawn_pane(
                 &self.config,
                 PaneSpec {
+                    session_name: &data.name,
+                    pane: record.id,
                     profile: record.profile.as_deref(),
                     cwd: record.cwd.as_deref(),
                     cols,
@@ -1121,7 +1134,7 @@ impl SessionManager {
             .get(key)
             .map(|session| self.layout_options(session))
             .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
-        let (profile, cwd, cols, rows) = {
+        let (session_name, profile, cwd, cols, rows) = {
             let session = self
                 .sessions
                 .get(key)
@@ -1145,6 +1158,7 @@ impl SessionManager {
                 }
             };
             (
+                session.data.name.clone(),
                 record.profile.clone(),
                 record.cwd.clone(),
                 cols.max(1),
@@ -1156,6 +1170,8 @@ impl SessionManager {
         let spawned = spawn_pane(
             &self.config,
             PaneSpec {
+                session_name: &session_name,
+                pane: id,
                 profile: profile.as_deref(),
                 cwd: cwd.as_deref(),
                 cols,
@@ -1271,7 +1287,7 @@ impl SessionManager {
     }
 
     fn restart_pane(&mut self, key: &str, pane: u64) -> Result<(), ProtocolError> {
-        let (profile, cwd, cols, rows, title) = {
+        let (session_name, profile, cwd, cols, rows, title) = {
             let session = self
                 .sessions
                 .get(key)
@@ -1282,6 +1298,7 @@ impl SessionManager {
                 .ok_or_else(|| ProtocolError::not_found(format!("pane {pane}")))?;
             let record = session.data.pane(pane);
             (
+                session.data.name.clone(),
                 record.and_then(|r| r.profile.clone()),
                 record.and_then(|r| r.cwd.clone()),
                 live.term.cols(),
@@ -1293,6 +1310,8 @@ impl SessionManager {
         let mut spawned = spawn_pane(
             &self.config,
             PaneSpec {
+                session_name: &session_name,
+                pane,
                 profile: profile.as_deref(),
                 cwd: cwd.as_deref(),
                 cols,
@@ -1447,24 +1466,28 @@ impl SessionManager {
         profile: Option<String>,
         cwd: Option<String>,
     ) -> Result<(), ProtocolError> {
-        let (cols, rows) = {
+        let (session_name, cols, rows) = {
             let session = self
                 .sessions
                 .get(key)
                 .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
             let options = self.layout_options(session);
             let layout = session.data.layout.layout(options);
-            layout
+            let (cols, rows) = layout
                 .panes
                 .iter()
                 .find(|slot| Some(slot.pane) == layout.focused)
                 .map(|slot| (slot.content.width.max(1), slot.content.height.max(1)))
-                .unwrap_or((80, 24))
+                .unwrap_or((80, 24));
+            (session.data.name.clone(), cols, rows)
         };
+        let id = self.alloc_pane_id();
         let mut notes = Vec::new();
         let spawned = spawn_pane(
             &self.config,
             PaneSpec {
+                session_name: &session_name,
+                pane: id,
                 profile: profile.as_deref(),
                 cwd: cwd.as_deref(),
                 cols,
@@ -1475,7 +1498,6 @@ impl SessionManager {
             },
             &mut notes,
         )?;
-        let id = self.alloc_pane_id();
         let title = spawned.display_title.clone();
         let pid = spawned.pty.pid();
         let session = self
@@ -2072,6 +2094,8 @@ fn spawn_pane(
     notes: &mut Vec<String>,
 ) -> Result<LivePane, ProtocolError> {
     let PaneSpec {
+        session_name,
+        pane,
         profile,
         cwd,
         cols,
@@ -2151,6 +2175,13 @@ fn spawn_pane(
     options.args = resolved.args.clone();
     options.cwd = workdir.clone();
     options.env = resolved.env.clone();
+    options.env.insert(
+        fact_protocol::ENV_SESSION.to_string(),
+        session_name.to_string(),
+    );
+    options
+        .env
+        .insert(fact_protocol::ENV_PANE.to_string(), pane.to_string());
     let pty = PtyProcess::spawn(options)
         .map_err(|error| ProtocolError::internal(format!("could not start pane: {error}")))?;
 

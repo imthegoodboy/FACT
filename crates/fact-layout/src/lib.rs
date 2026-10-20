@@ -52,6 +52,11 @@ pub struct TabLayout {
     pub root: Option<LayoutNode>,
     pub focus: Option<u64>,
     pub zoomed: bool,
+    /// Keep the whole split tree visible even when slots fall below the
+    /// configured minimum sizes. Explicitly restoring a zoomed pane turns this
+    /// on so shrinking the terminal can no longer trap the user in focused-pane
+    /// mode.
+    pub fit_all: bool,
     pub minimized: Vec<u64>,
 }
 
@@ -64,6 +69,7 @@ impl Default for TabLayout {
             root: None,
             focus: None,
             zoomed: false,
+            fit_all: false,
             minimized: Vec::new(),
         }
     }
@@ -526,6 +532,10 @@ impl SessionLayout {
             return Err(LayoutError::Invalid("no focused pane to zoom".into()));
         }
         tab.zoomed = zoomed;
+        // Restoring from zoom is also the explicit escape hatch from
+        // focused-pane mode. Keep every pane visible even if the window is now
+        // too small for the configured minimum slot size.
+        tab.fit_all = !zoomed;
         Ok(())
     }
 
@@ -597,7 +607,7 @@ impl SessionLayout {
                 || s.content.height < options.min_content_rows
                 || s.content.height == 0
         });
-        let use_focused_only = too_small_viewport || too_small || tab.zoomed;
+        let use_focused_only = too_small_viewport || tab.zoomed || (too_small && !tab.fit_all);
         if use_focused_only {
             let hidden_panes: Vec<u64> = visible
                 .iter()
@@ -1172,6 +1182,35 @@ mod tests {
         assert!(result.zoomed);
         assert_eq!(result.panes.len(), 1);
         assert_eq!(result.panes[0].pane, 3);
+    }
+
+    #[test]
+    fn restoring_zoom_keeps_every_pane_visible_in_a_small_window() {
+        let mut layout = SessionLayout::new(1, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        layout.focus_pane(4).unwrap();
+        layout.zoom(true).unwrap();
+        assert_eq!(layout.layout(opts(60, 18)).panes.len(), 1);
+
+        layout.zoom(false).unwrap();
+        let result = layout.layout(opts(60, 18));
+        assert!(!result.tiny_mode);
+        assert!(!result.zoomed);
+        assert_eq!(result.panes.len(), 8);
+        for slot in &result.panes {
+            assert!(slot.slot.width > 0 && slot.slot.height > 0);
+            assert!(slot.content.width > 0 && slot.content.height > 0);
+        }
+        assert!(layout.tab(1).unwrap().fit_all);
+    }
+
+    #[test]
+    fn fit_all_survives_serialization() {
+        let mut layout = SessionLayout::new(1, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        layout.zoom(false).unwrap();
+        let json = serde_json::to_string(&layout).unwrap();
+        let restored: SessionLayout = serde_json::from_str(&json).unwrap();
+        assert!(restored.tab(1).unwrap().fit_all);
+        assert_eq!(restored.layout(opts(60, 18)).panes.len(), 8);
     }
 
     #[test]

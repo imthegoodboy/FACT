@@ -7,7 +7,7 @@ running when the UI detaches or the terminal window closes.
 FACT is not a wrapper around Windows Terminal or tmux. It owns its ConPTY
 processes, terminal models, layout tree and session database.
 
-> **Status:** v0.2.1. Windows 11 is the primary, continuously tested target.
+> **Status:** v0.2.2. Windows 11 is the primary, continuously tested target.
 > Windows 10 1809+ is intended to work but is not yet verified; see
 > [Compatibility](#compatibility). Release artifacts are produced only from
 > version tags after every gate in this repository passes.
@@ -23,7 +23,8 @@ processes, terminal models, layout tree and session database.
   into new shells. FACT reports that the previous processes were lost, and it
   never replays commands.
 - **Tabs, splits and grids.** Binary split tree, focus, zoom, minimize, move and
-  swap, plus focused-pane mode on tiny terminals.
+  swap. Tiny terminals temporarily focus one pane, with `Alt+M`/`Alt+N` to
+  maximize or restore the full grid at any size.
 - **Minimal black TUI.** Plain terminal panes with no title rows, buttons or
   permanent status bar. A one-line tab strip appears only when a session has
   more than one tab. Panes have a draggable scrollbar, a steady cursor,
@@ -89,10 +90,18 @@ remappable keybinding list. `Ctrl+Space k` opens the command palette and
 `Ctrl+Space /` searches the focused pane's visible screen and scrollback.
 
 There are no per-pane buttons. Use `Ctrl+Space` then the action from F1 help, or
-right-click a pane for split, zoom, minimize, restart, close and copy. Mouse
-wheel scrollback works in shells, and the scrollbar can be clicked or dragged.
-`Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
+right-click a pane for split, maximize/show-all, minimize, restart, close and
+copy. `Alt+M` maximizes the focused pane and `Alt+N` restores the full grid; use
+these when a narrow window would otherwise leave you in focused-pane mode.
+`Ctrl+M` is Enter in terminal input, so it is not available as a direct shortcut.
+Mouse wheel scrollback works in shells, and the scrollbar can be clicked or
+dragged. `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` remain available alongside `Ctrl+Insert` / `Shift+Insert`.
+
+Running `fact` inside a FACT pane is rejected with a clear message instead of
+nesting a second UI into the same terminal. Use a separate terminal window for a
+second FACT UI; other commands such as `fact sessions` and `fact doctor` still
+work inside a pane.
 
 `--grid N` is deterministic for every explicit value, including `--grid 1`: it
 starts or reattaches `grid-N` and never silently resumes an unrelated saved
@@ -210,7 +219,7 @@ the scrollback.
   GitHub's current Windows Server image, which is not Windows 11 itself.
 - **Windows 10 1809+:** expected to work because FACT uses ConPTY and Win32 APIs
   available since 1809. It has not been verified on a physical Windows 10
-  machine, so v0.2.1 does not claim Windows 10 support.
+  machine, so v0.2.2 does not claim Windows 10 support.
 - **Windows on ARM:** not tested.
 - **Linux/macOS:** not supported. The IPC and ConPTY layers are Windows-only.
 
