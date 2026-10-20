@@ -47,9 +47,82 @@ function Resolve-NormalizedPath([string]$Path) {
     return [IO.Path]::GetFullPath($Path).TrimEnd('\')
 }
 
+function Get-UserPathRaw {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment")
+    if (-not $key) {
+        return ""
+    }
+    try {
+        $value = $key.GetValue(
+            "Path",
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        if ($null -eq $value) {
+            return ""
+        }
+        return [string]$value
+    } finally {
+        $key.Close()
+    }
+}
+
+function Send-EnvironmentChanged {
+    try {
+        if (-not ("FactEnvironmentBroadcast" -as [type])) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class FactEnvironmentBroadcast {
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+        uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+}
+"@
+        }
+        $result = [UIntPtr]::Zero
+        [FactEnvironmentBroadcast]::SendMessageTimeout(
+            [IntPtr]0xffff,
+            0x001A,
+            [UIntPtr]::Zero,
+            "Environment",
+            2,
+            5000,
+            [ref]$result
+        ) | Out-Null
+    } catch {
+        # The registry update is still valid; new logons will see it.
+    }
+}
+
+function Set-UserPathRaw([string]$Value) {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    if (-not $key) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
+    }
+    try {
+        $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        try {
+            if ($key.GetValueKind("Path") -eq [Microsoft.Win32.RegistryValueKind]::String) {
+                $kind = [Microsoft.Win32.RegistryValueKind]::String
+            }
+        } catch {
+        }
+        if ([string]::IsNullOrWhiteSpace($Value)) {
+            $key.DeleteValue("Path", $false)
+        } else {
+            $key.SetValue("Path", $Value, $kind)
+        }
+    } finally {
+        $key.Close()
+    }
+    Send-EnvironmentChanged
+}
+
 function Add-UserPath([string]$Directory) {
     $target = Resolve-NormalizedPath $Directory
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $userPath = Get-UserPathRaw
     $parts = @()
     if (-not [string]::IsNullOrWhiteSpace($userPath)) {
         $parts = @($userPath -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -68,7 +141,7 @@ function Add-UserPath([string]$Directory) {
     }
     if (-not $present) {
         $newPath = if ($parts.Count -gt 0) { ($parts + $Directory) -join ";" } else { $Directory }
-        [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
+        Set-UserPathRaw $newPath
         Write-Host "Added to the user PATH: $Directory"
     }
     $processParts = @($env:Path -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
