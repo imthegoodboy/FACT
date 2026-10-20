@@ -44,6 +44,8 @@ All notable changes to FACT are documented here. The format follows
   the target pane first, so controls cannot act on the wrong pane.
 - Stale scrollbar glyphs are cleared when a pane leaves scrollback or changes
   layout.
+- The active tab remains visible and clickable when the tab strip overflows, and
+  long tab titles are capped so one title cannot hide the rest.
 
 ## [0.1.0] - 2026-10-20
 

@@ -44,6 +44,8 @@ const STATUS_LIFETIME: Duration = Duration::from_secs(6);
 
 /// Width of the new-tab button in the tab strip.
 const NEW_TAB_WIDTH: u16 = 3;
+/// Cap a single tab so one long title cannot push every other tab off-screen.
+const TAB_MAX_WIDTH: u16 = 24;
 /// Five two-column pane-header buttons (`V H _ ^ X`).
 const PANE_BUTTON_WIDTH: u16 = 2;
 const PANE_BUTTONS_WIDTH: u16 = PANE_BUTTON_WIDTH * 5;
@@ -392,15 +394,15 @@ struct TabRange {
     rect: RectDto,
 }
 
-fn tab_ranges(tabs: &[TabView], width: u16) -> Vec<TabRange> {
+fn pack_tab_ranges(tabs: &[TabView], width: u16, start: usize) -> Vec<TabRange> {
     let limit = width.saturating_sub(NEW_TAB_WIDTH + 1);
     let mut x = 0u16;
     let mut ranges = Vec::new();
-    for tab in tabs {
+    for tab in &tabs[start.min(tabs.len())..] {
         if x >= limit {
             break;
         }
-        let available = limit.saturating_sub(x);
+        let available = limit.saturating_sub(x).min(TAB_MAX_WIDTH);
         if available < 4 {
             break;
         }
@@ -423,6 +425,33 @@ fn tab_ranges(tabs: &[TabView], width: u16) -> Vec<TabRange> {
         x = rect.x.saturating_add(rect.width);
         if x < limit {
             x = x.saturating_add(1);
+        }
+    }
+    ranges
+}
+
+fn tab_ranges(tabs: &[TabView], width: u16) -> Vec<TabRange> {
+    let ranges = pack_tab_ranges(tabs, width, 0);
+    if tabs.is_empty()
+        || ranges
+            .iter()
+            .any(|range| tabs.iter().any(|tab| tab.id == range.id && tab.active))
+    {
+        return ranges;
+    }
+    let Some(active) = tabs.iter().position(|tab| tab.active) else {
+        return ranges;
+    };
+    // Keep the active tab clickable when the strip overflows. Starting at the
+    // first index whose window includes it preserves as many preceding tabs as
+    // possible while still showing the tab the user is working in.
+    for start in 1..=active {
+        let window = pack_tab_ranges(tabs, width, start);
+        if window
+            .iter()
+            .any(|range| tabs.iter().any(|tab| tab.id == range.id && tab.active))
+        {
+            return window;
         }
     }
     ranges
@@ -2246,6 +2275,29 @@ mod tests {
         }
         assert!(ranges[0].label.contains("PowerShell"));
         assert!(ranges[1].label.contains("Bash"));
+    }
+
+    #[test]
+    fn active_tab_stays_visible_when_the_strip_overflows() {
+        let tabs: Vec<TabView> = (1..=10)
+            .map(|id| TabView {
+                id,
+                title: format!("Tab {id}"),
+                active: id == 10,
+                pane_count: 1,
+                zoomed: false,
+            })
+            .collect();
+        let ranges = tab_ranges(&tabs, 40);
+        let active = ranges
+            .iter()
+            .find(|range| range.id == 10)
+            .expect("the active tab must stay clickable");
+        assert!(active.rect.width >= 4);
+        let plus = new_tab_rect(40).unwrap();
+        for range in &ranges {
+            assert!(range.rect.x + range.rect.width <= plus.x);
+        }
     }
 
     #[test]
