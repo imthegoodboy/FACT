@@ -13,7 +13,7 @@ use fact_protocol::{
     AttachInfo, ClientMessage, Command, ErrorCode, Frame, Hello, ResponsePayload, ServerMessage,
     SplitDirection,
 };
-use fact_runtime::{connect, DaemonClient, DaemonIdentity};
+use fact_runtime::{connect, DaemonClient, DaemonIdentity, RuntimeError};
 
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const FRAME_TIMEOUT: Duration = Duration::from_secs(20);
@@ -70,6 +70,21 @@ fn resume(client: &mut DaemonClient, name: &str, grid: u8) -> AttachInfo {
             cwd: None,
         })
         .expect("resume session")
+    {
+        ResponsePayload::Attached(info) => *info,
+        other => panic!("expected Attached response, got {other:?}"),
+    }
+}
+
+fn resume_existing(client: &mut DaemonClient, name: &str) -> AttachInfo {
+    match client
+        .request(Command::ResumeSession {
+            name: Some(name.to_string()),
+            grid: None,
+            profile: None,
+            cwd: None,
+        })
+        .expect("resume existing session")
     {
         ResponsePayload::Attached(info) => *info,
         other => panic!("expected Attached response, got {other:?}"),
@@ -272,6 +287,40 @@ fn grid_launches_independent_shells_and_streams_output() {
         .unwrap_or_else(|| panic!("shell output never arrived\n{}", read_log(&harness)));
     assert!(text.contains("FACT_MARKER_ONE"));
 
+    shutdown(client, handle, &harness);
+}
+
+#[test]
+fn resume_rejects_a_grid_shape_that_changed_before_attach() {
+    let harness = harness();
+    let handle = start_daemon(&harness);
+    let (_identity, mut client) = wait_for_daemon(&harness);
+
+    let info = resume(&mut client, "one", 1);
+    assert_eq!(info.session.pane_count, 1);
+
+    let error = client
+        .request(Command::ResumeSession {
+            name: Some("one".to_string()),
+            grid: Some(8),
+            profile: None,
+            cwd: None,
+        })
+        .expect_err("a one-pane session must not satisfy --grid 8");
+    match error {
+        RuntimeError::Request(error) => {
+            assert_eq!(error.code, ErrorCode::Conflict);
+            assert!(
+                error.message.contains("1 pane(s)"),
+                "unexpected error: {}",
+                error.message
+            );
+        }
+        other => panic!("unexpected resume error: {other:?}"),
+    }
+
+    let info = attach(&mut client, "one");
+    assert_eq!(info.session.pane_count, 1);
     shutdown(client, handle, &harness);
 }
 
@@ -733,7 +782,7 @@ fn session_lifecycle_rename_archive_export_import_and_delete() {
     };
     assert!(!unarchived.archived);
 
-    let recovered = resume(&mut client, "BETA", 1);
+    let recovered = resume_existing(&mut client, "BETA");
     assert!(recovered.cold_recovered);
     assert!(recovered
         .recovery_notes

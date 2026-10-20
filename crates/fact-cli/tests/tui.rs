@@ -369,6 +369,11 @@ fn grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session() {
         tail(&output)
     );
     let sessions = home.run(&["sessions", "--json"]);
+    assert!(
+        sessions.status.success(),
+        "fact sessions failed: {}",
+        String::from_utf8_lossy(&sessions.stderr)
+    );
     let parsed: Value = serde_json::from_slice(&sessions.stdout).expect("sessions JSON");
     let summaries = parsed.as_array().expect("sessions array");
     let one = summaries

@@ -97,10 +97,10 @@ wheel scrollback works in shells, and the scrollbar can be clicked or dragged.
 `--grid N` is deterministic for every explicit value, including `--grid 1`: it
 starts or reattaches `grid-N` and never silently resumes an unrelated saved
 session. If `grid-N` exists with a different pane count, FACT uses the next free
-`grid-N-2` name. An explicit `--session NAME --grid N` is only accepted when
-that session already matches; otherwise FACT asks for a new name instead of
-ignoring the grid request. Running `fact` without `--grid` retains the normal
-resume-latest behavior.
+`grid-N-2` name. An explicit `--session NAME --grid N` is accepted when the
+session is new or already has that shape; otherwise FACT asks for a new name
+instead of ignoring the grid request. Running `fact` without `--grid` retains the
+normal resume-latest behavior.
 
 Session management works offline against SQLite when the daemon is not running:
 
