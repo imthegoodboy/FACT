@@ -31,7 +31,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Sessions | Schema migration, save/load, case-insensitive names, checksum and layout corruption rejection, export/import copy semantics, archive/delete. |
 | Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards; a second test shuts the daemon down, resumes cold, checks the recovery modal and restored output, and proves a new shell PID accepts input. |
+| TUI | A driven real-ConPTY `--grid 8` session covering pane output, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards; a second test shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
@@ -40,7 +40,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | --- | --- |
 | `fact --grid 8` creates independent shells | `fact-daemon` integration test `grid_launches_independent_shells_and_streams_output` checks eight distinct PIDs and output routing. |
 | Live detach/reattach preserves processes | `detach_and_reattach_keep_the_same_processes` checks the original pane ID, PID and alive state after reattach. |
-| Restart cold-recovers layout/output only | `cold_recovery_restores_output_with_new_shells` checks `cold_recovered`, new PIDs, restored scrollback output and absence of command replay. The TUI cold-recovery test repeats the flow through the real UI and verifies a new shell accepts input. |
+| Restart cold-recovers layout/output only | `cold_recovery_restores_output_with_new_shells` checks `cold_recovered`, new PIDs, restored scrollback output and absence of command replay. The TUI cold-recovery test repeats the restart through the real UI and verifies a new shell accepts input. |
 | Snapshot integrity | `fact-session` tests `rejects_checksum_mismatch` and `rejects_pane_layout_mismatch`; `fact-term` validates snapshot size/shape before replay. |
 | Bad token rejection | `wrong_token_is_rejected_without_killing_the_daemon` verifies the daemon rejects authentication and remains available. |
 | Non-owner access | Pipe and identity files use a protected current-user/SYSTEM DACL. Tests assert exactly those grants, peer-user comparison is in the accept path, and local-only pipe names are enforced. |
@@ -64,9 +64,10 @@ These are intentionally not mock tests:
   palette, searches for an echoed marker, opens help, detaches with the configured
   prefix and verifies through `fact sessions --json` that the session is still
   live with eight panes. A second TUI test snapshots, stops the daemon, resumes
-  cold, dismisses the recovery modal and verifies the restored marker plus a new
-  shell PID. Set `FACT_SMOKE_EXE` to run both tests against a downloaded release
-  binary instead of the test build.
+  cold, dismisses the recovery modal and verifies a new shell PID. Set
+  `FACT_SMOKE_EXE` to run both tests against a downloaded release binary instead
+  of the test build. Restored visual content and no-command-replay behavior are
+  asserted directly by the daemon cold-recovery test.
 - Tests wait for frames and output with deadlines rather than fixed sleeps where
   possible. Cold-recovery assertions search the terminal buffer for restored
   output because a new shell's banner can scroll the restored screen.

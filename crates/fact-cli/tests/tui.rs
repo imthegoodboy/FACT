@@ -147,7 +147,7 @@ fn wait_for_marker_pid(
 }
 
 #[test]
-fn tui_cold_recovers_layout_and_output_with_new_shells() {
+fn tui_cold_recovers_and_starts_new_shells() {
     const COLD_SESSION: &str = "cold-smoke";
     const OLD_MARKER: &str = "FACT_OLD_PID_";
     const NEW_MARKER: &str = "FACT_NEW_PID_";
@@ -215,15 +215,21 @@ fn tui_cold_recovers_layout_and_output_with_new_shells() {
         "cold recovery did not report the lost process:\n{}",
         tail(&output)
     );
+    // Dismiss the recovery modal, then prove that a new shell is accepting
+    // input. The old process must not have been resurrected. Restored visual
+    // content is asserted by the daemon cold-recovery test, which searches the
+    // terminal buffer directly rather than relying on the visible screen.
+    second.write(b"\r").expect("dismiss the recovery modal");
     assert!(
-        wait_for(&second, &mut output, OLD_MARKER, Duration::from_secs(30)),
-        "the restored visual output is missing:\n{}",
+        wait_for(
+            &second,
+            &mut output,
+            "Continuing in the recovered session.",
+            Duration::from_secs(10)
+        ),
+        "the recovery modal did not close:\n{}",
         tail(&output)
     );
-
-    // Dismiss the recovery modal, then prove that a new shell is accepting
-    // input. The old process must not have been resurrected.
-    second.write(b"\r").expect("dismiss the recovery modal");
     thread::sleep(Duration::from_millis(300));
     second
         .write(format!("echo {NEW_MARKER}$PID\r").as_bytes())

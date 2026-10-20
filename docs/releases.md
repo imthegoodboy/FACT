@@ -134,8 +134,9 @@ markers.
 
    The tests launch eight shells, type into a pane, detach, verify that all eight
    panes remain live, then stop the daemon and cold-resume to check the recovery
-   modal, restored output and a new shell PID. Also perform the manual checks in
-   [testing.md](testing.md#manual-smoke-check) for the final release sign-off.
+   modal and a new shell PID. Also perform the manual checks in
+   [testing.md](testing.md#manual-smoke-check) for restored output and the final
+   release sign-off.
 
 Do not create a release manually. A release without the gate run is not a FACT
 release.
