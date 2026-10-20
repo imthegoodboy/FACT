@@ -396,11 +396,29 @@ fn cold_recovery_restores_output_with_new_shells() {
         "cold recovery must start a fresh process"
     );
     assert!(restored.panes[0].cold_restored);
+    // The new shell's startup banner may scroll the restored screen into the
+    // scrollback before the first frame reaches the test, so search the whole
+    // buffer rather than requiring the marker to remain on the visible rows.
+    let search = match client
+        .request(Command::SearchPane {
+            pane: restored.panes[0].id,
+            query: "FACT_COLD_MARKER".into(),
+            case_sensitive: true,
+            limit: 20,
+        })
+        .expect("search recovered output")
+    {
+        ResponsePayload::Search(result) => result,
+        other => panic!("unexpected search response: {other:?}"),
+    };
     let mut buffers = HashMap::new();
     let text = frame_text(&restored, &mut buffers);
     assert!(
-        text.contains("FACT_COLD_MARKER"),
-        "saved visual output was not restored:\n{text}"
+        search
+            .hits
+            .iter()
+            .any(|hit| hit.preview.contains("FACT_COLD_MARKER")),
+        "saved visual output was not restored (search found no marker):\n{text}"
     );
     assert!(restored.session.cold_recovered_at_ms.is_some());
 
