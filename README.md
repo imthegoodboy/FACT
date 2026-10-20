@@ -177,7 +177,7 @@ The default data root is `%LOCALAPPDATA%\FACT`:
 | `config.toml` | Optional configuration. |
 | `sessions.db` | SQLite sessions, layouts and SHA-256-checked snapshots. |
 | `runtime\daemon.json` | Daemon identity, PID, pipe name and token. |
-| `logs\daemon.log` | Rotating daemon log. |
+| `logs\daemon.log` | Append-only daemon log; `fact doctor` warns when it grows large. |
 | `exports\` | Default destination for `fact export`. |
 
 On a clean shutdown, live sessions are snapshotted. If the daemon is killed,

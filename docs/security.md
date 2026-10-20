@@ -41,8 +41,8 @@ rejected.
 The listening pipe uses:
 
 - `PIPE_REJECT_REMOTE_CLIENTS`
-- `FILE_FLAG_FIRST_PIPE_INSTANCE` for the first instance, preventing another
-  process from squatting the daemon's name after it starts
+- `FILE_FLAG_FIRST_PIPE_INSTANCE` for the first instance, preventing a squatter
+  from owning the name before the daemon binds it
 - byte mode with 64 KiB buffers
 - a protected DACL generated for the current user SID and SYSTEM
 
@@ -140,7 +140,7 @@ print the daemon token.
 | --- | --- |
 | Remote connection to the daemon | Local-only pipe name, `PIPE_REJECT_REMOTE_CLIENTS`, no network listener. |
 | Another local user connects | Protected current-user/SYSTEM DACL and server-side peer SID check. |
-| Another process squats the pipe after daemon start | `FILE_FLAG_FIRST_PIPE_INSTANCE`. |
+| Another process squats the pipe name before daemon start | `FILE_FLAG_FIRST_PIPE_INSTANCE` on the first instance. |
 | Client impersonation by a malicious server | Identification-only impersonation. |
 | Unauthenticated command injection over IPC | Random 256-bit token, constant-time comparison, one-time stream grants. |
 | Forged or corrupted recovery data | Snapshot checksum, dimensions, size/NUL checks and layout validation. |

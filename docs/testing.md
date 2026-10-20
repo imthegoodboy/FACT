@@ -31,7 +31,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Sessions | Schema migration, save/load, case-insensitive names, checksum and layout corruption rejection, export/import copy semantics, archive/delete. |
 | Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
-| TUI | A driven real-ConPTY session: pane output, keyboard input, palette, search, F1 help, prefix detach, daemon still live afterwards. |
+| TUI | A driven real-ConPTY `--grid 8` session: pane output, keyboard input, palette, search, F1 help, prefix detach, daemon still live with eight panes afterwards. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
@@ -59,7 +59,7 @@ These are intentionally not mock tests:
 - Daemon tests use the testkit harness to write an isolated config, start the
   daemon executable, connect over the real named pipe and run `powershell.exe` or
   the detected shell.
-- The TUI test allocates a 120x35 ConPTY, launches `fact --grid 2`, waits for pane
+- The TUI test allocates a 120x35 ConPTY, launches `fact --grid 8`, waits for pane
   title output before typing (early input can race the first frame), opens the
   palette, searches for an echoed marker, opens help, detaches with the configured
   prefix and verifies through `fact sessions --json` that the session is still

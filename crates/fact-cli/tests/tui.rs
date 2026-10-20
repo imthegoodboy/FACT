@@ -114,7 +114,7 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
         "--session".into(),
         SESSION.into(),
         "--grid".into(),
-        "2".into(),
+        "8".into(),
     ];
     let process = PtyProcess::spawn(options).expect("start the FACT TUI in ConPTY");
     let mut output = Vec::new();
@@ -217,17 +217,21 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
         String::from_utf8_lossy(&sessions.stderr)
     );
     let parsed: Value = serde_json::from_slice(&sessions.stdout).expect("sessions JSON");
-    let live = parsed
+    let summary = parsed
         .as_array()
         .expect("sessions array")
         .iter()
         .find(|session| session.get("name").and_then(Value::as_str) == Some(SESSION))
-        .and_then(|session| session.get("live"))
-        .and_then(Value::as_bool);
+        .expect("the detached session is missing from fact sessions");
     assert_eq!(
-        live,
+        summary.get("live").and_then(Value::as_bool),
         Some(true),
         "detaching from the UI must leave the session running"
+    );
+    assert_eq!(
+        summary.get("pane_count").and_then(Value::as_u64),
+        Some(8),
+        "the CLI --grid 8 launch must create eight panes"
     );
 
     let shutdown = home.run(&["shutdown"]);
