@@ -14,7 +14,7 @@ use std::ffi::{c_void, OsStr};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStrExt;
-use std::os::windows::io::FromRawHandle;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
 use std::ptr;
 
@@ -37,8 +37,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PIPE_READMODE_BYTE,
-    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, PeekNamedPipe,
+    PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES,
+    PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -319,6 +320,26 @@ impl PipeConnection {
     /// PID of the server for a client-side connection.
     pub fn server_pid(&self) -> Option<u32> {
         self.server_pid
+    }
+
+    /// Bytes currently queued in the pipe, without blocking. Event readers use
+    /// this to remain cancellable while waiting for the next frame.
+    pub fn bytes_available(&self) -> io::Result<u32> {
+        let mut available = 0u32;
+        let ok = unsafe {
+            PeekNamedPipe(
+                self.file.as_raw_handle() as HANDLE,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                &mut available,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(available)
     }
 }
 
@@ -606,6 +627,11 @@ mod tests {
             }
         });
         let mut server = listener.accept().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while server.bytes_available().unwrap() == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(server.bytes_available().unwrap(), 4);
         let mut buffer = [0u8; 4];
         server.read_exact(&mut buffer).unwrap();
         assert_eq!(&buffer, b"ping");
