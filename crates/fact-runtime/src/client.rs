@@ -100,6 +100,13 @@ impl DaemonClient {
 }
 
 impl EventStream {
+    /// Whether at least one byte is queued, without blocking. This lets a
+    /// reader loop wake up and check a cancellation flag when a session is
+    /// switched or the UI closes.
+    pub fn available(&self) -> Result<bool, RuntimeError> {
+        Ok(self.conn.bytes_available()? > 0)
+    }
+
     /// Receive the next frame or lifecycle message.
     pub fn recv(&mut self) -> Result<ServerMessage, RuntimeError> {
         loop {
