@@ -458,6 +458,7 @@ struct ScrollbarGeometry {
     thumb_y: u16,
     thumb_height: u16,
     max_offset: usize,
+    scroll_offset: usize,
 }
 
 fn scrollbar_geometry(pane: &PaneView) -> Option<ScrollbarGeometry> {
@@ -497,25 +498,50 @@ fn scrollbar_geometry(pane: &PaneView) -> Option<ScrollbarGeometry> {
         thumb_y: pane.slot.y.saturating_add(1).saturating_add(thumb_top),
         thumb_height,
         max_offset: pane.history_lines,
+        scroll_offset: offset,
     })
 }
 
-fn scrollbar_offset_at(geometry: &ScrollbarGeometry, content_y: u16) -> usize {
-    if geometry.max_offset == 0 || geometry.track.height <= 1 {
-        return geometry.max_offset;
+fn scrollbar_thumb_span(geometry: &ScrollbarGeometry) -> u16 {
+    geometry.track.height.saturating_sub(geometry.thumb_height)
+}
+
+fn scrollbar_jump_offset(geometry: &ScrollbarGeometry, content_y: u16) -> usize {
+    let span = scrollbar_thumb_span(geometry);
+    if geometry.max_offset == 0 || span == 0 {
+        return 0;
     }
     let relative = content_y
         .saturating_sub(geometry.track.y)
         .min(geometry.track.height.saturating_sub(1));
-    let span = geometry.track.height.saturating_sub(1);
-    let ratio = f64::from(relative) / f64::from(span);
-    ((1.0 - ratio) * geometry.max_offset as f64).round() as usize
+    let thumb_top = relative.saturating_sub(geometry.thumb_height / 2).min(span);
+    let numerator = u64::from(span.saturating_sub(thumb_top)) * geometry.max_offset as u64
+        + u64::from(span) / 2;
+    (numerator / u64::from(span)) as usize
+}
+
+fn scrollbar_drag_offset(
+    geometry: &ScrollbarGeometry,
+    anchor_y: u16,
+    base_offset: usize,
+    content_y: u16,
+) -> usize {
+    let span = scrollbar_thumb_span(geometry);
+    if geometry.max_offset == 0 || span == 0 {
+        return base_offset.min(geometry.max_offset);
+    }
+    let moved = (f64::from(i32::from(content_y) - i32::from(anchor_y)) / f64::from(span)
+        * geometry.max_offset as f64)
+        .round() as i64;
+    (base_offset as i64 - moved).clamp(0, geometry.max_offset as i64) as usize
 }
 
 #[derive(Debug, Clone)]
 struct ScrollDrag {
     geometry: ScrollbarGeometry,
     last_sent: Instant,
+    anchor_y: u16,
+    base_offset: usize,
 }
 
 #[derive(Debug)]
@@ -1499,6 +1525,17 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+            if let Some(drag) = self.scroll_drag.take() {
+                if mouse.row > 0 && mouse.row + 1 < self.height {
+                    self.scroll_drag_to(&drag, mouse.row - 1);
+                }
+                return;
+            }
+            if self.drag_split.take().is_some() {
+                return;
+            }
+        }
         if mouse.row == 0 {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
                 if new_tab_rect(self.width).is_some_and(|rect| rect.contains(mouse.column, 0)) {
@@ -1558,10 +1595,23 @@ impl App {
                         pane: geometry.pane,
                     });
                     self.bells.remove(&geometry.pane);
-                    self.scroll_to(&geometry, content_y);
+                    let on_thumb = content_y >= geometry.thumb_y
+                        && content_y < geometry.thumb_y.saturating_add(geometry.thumb_height);
+                    let base_offset = if on_thumb {
+                        geometry.scroll_offset
+                    } else {
+                        let offset = scrollbar_jump_offset(&geometry, content_y);
+                        let _ = self.send(Command::SetScrollOffset {
+                            pane: geometry.pane,
+                            offset,
+                        });
+                        offset
+                    };
                     self.scroll_drag = Some(ScrollDrag {
                         geometry,
                         last_sent: Instant::now() - Duration::from_millis(100),
+                        anchor_y: content_y,
+                        base_offset,
                     });
                     return;
                 }
@@ -1658,7 +1708,7 @@ impl App {
                 if button == MouseButton::Left {
                     if let Some(drag) = self.scroll_drag.clone() {
                         if drag.last_sent.elapsed() >= Duration::from_millis(35) {
-                            self.scroll_to(&drag.geometry, content_y);
+                            self.scroll_drag_to(&drag, content_y);
                             if let Some(active) = &mut self.scroll_drag {
                                 active.last_sent = Instant::now();
                             }
@@ -1697,13 +1747,6 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(drag) = self.scroll_drag.take() {
-                    self.scroll_to(&drag.geometry, content_y);
-                    return;
-                }
-                if self.drag_split.take().is_some() {
-                    return;
-                }
                 if let Some((button, pane)) = self.app_mouse_down.take() {
                     if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
                         self.forward_mouse_button(button, pane, x, y, false, mouse.modifiers);
@@ -1789,10 +1832,11 @@ impl App {
         })
     }
 
-    fn scroll_to(&mut self, geometry: &ScrollbarGeometry, content_y: u16) {
-        let offset = scrollbar_offset_at(geometry, content_y);
+    fn scroll_drag_to(&mut self, drag: &ScrollDrag, content_y: u16) {
+        let offset =
+            scrollbar_drag_offset(&drag.geometry, drag.anchor_y, drag.base_offset, content_y);
         let _ = self.send(Command::SetScrollOffset {
-            pane: geometry.pane,
+            pane: drag.geometry.pane,
             offset,
         });
     }
@@ -2214,7 +2258,7 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_maps_track_position_to_scrollback_offset() {
+    fn scrollbar_maps_pointer_to_scrollback_offset() {
         let mut view = test_view(40);
         view.history_lines = 2;
         view.content_rows = 10;
@@ -2227,11 +2271,16 @@ mod tests {
         assert_eq!(bottom.track.y, 3);
         assert_eq!(bottom.track.height, 10);
         assert_eq!(bottom.max_offset, 100);
-        assert_eq!(scrollbar_offset_at(&bottom, bottom.track.y), 100);
+        assert_eq!(scrollbar_jump_offset(&bottom, bottom.track.y), 100);
         assert_eq!(
-            scrollbar_offset_at(&bottom, bottom.track.y + bottom.track.height - 1),
+            scrollbar_jump_offset(&bottom, bottom.track.y + bottom.track.height - 1),
             0
         );
+        view.scroll_offset = 50;
+        let middle = scrollbar_geometry(&view).unwrap();
+        let anchor = middle.thumb_y;
+        assert_eq!(scrollbar_drag_offset(&middle, anchor, 50, anchor), 50);
+        assert!(scrollbar_drag_offset(&middle, anchor, 50, anchor + 1) < 50);
         view.scroll_offset = 100;
         let top = scrollbar_geometry(&view).unwrap();
         assert_eq!(top.thumb_y, top.track.y);

@@ -30,6 +30,9 @@ All notable changes to FACT are documented here. The format follows
   counts, tab counts, focused-mode text, theme name and clock were removed.
 - Layout reserves the rightmost column of every pane for the scrollbar so output
   is never hidden underneath it.
+- The wire protocol is now version 2. An old daemon must be stopped before a
+  v0.2.0 client attaches; the installer does this and saved sessions cold-recover
+  on the next launch.
 
 ### Fixed
 

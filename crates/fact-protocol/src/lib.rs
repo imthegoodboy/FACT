@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Bumped when command/frame variants change in a way that a previous daemon
+/// cannot decode. Version 2 added the direct scroll-offset command.
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
@@ -210,8 +212,8 @@ pub enum Command {
         path: Vec<u8>,
         ratio: f32,
     },
-    /// Set the scrollback offset directly (0 = live output). Appended last so
-    /// existing variant indices remain wire-compatible with a running daemon.
+    /// Set the scrollback offset directly (0 = live output). Appended last to
+    /// keep the existing variant indices stable.
     SetScrollOffset {
         pane: u64,
         offset: usize,

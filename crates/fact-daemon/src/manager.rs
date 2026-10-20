@@ -673,7 +673,9 @@ impl SessionManager {
         let mut panes = HashMap::new();
         let mut records = Vec::new();
         let mut notes = Vec::new();
-        let profile_title = resolved.label();
+        // Only an explicit profile title is preserved verbatim. Automatic
+        // labels are normalized from the resolved executable by spawn_pane.
+        let profile_title = resolved.title.clone().unwrap_or_default();
         for id in &ids {
             let (cols, rows) = dims.get(id).copied().unwrap_or((80, 24));
             let spawned = spawn_pane(
@@ -1117,7 +1119,7 @@ impl SessionManager {
                 cols,
                 rows,
                 snapshot: None,
-                title_hint: "Shell",
+                title_hint: "",
                 cold_recovery: false,
             },
             &mut notes,
@@ -1426,7 +1428,7 @@ impl SessionManager {
                 cols,
                 rows,
                 snapshot: None,
-                title_hint: "Shell",
+                title_hint: "",
                 cold_recovery: false,
             },
             &mut notes,
@@ -2070,9 +2072,15 @@ fn spawn_pane(
     });
 
     let title = if title_hint.trim().is_empty() {
-        fact_protocol::friendly_title(&resolved.label())
+        if let Some(explicit) = &resolved.title {
+            // An explicit profile title is user-authored: keep slashes and
+            // other punctuation that friendly_title would treat as a path.
+            sanitize_title(explicit)
+        } else {
+            fact_protocol::friendly_title(&resolved.label())
+        }
     } else {
-        fact_protocol::friendly_title(title_hint)
+        sanitize_title(title_hint)
     };
     let sink = TerminalEventSink::new();
     let (response_tx, response_rx) = std::sync::mpsc::sync_channel(16);

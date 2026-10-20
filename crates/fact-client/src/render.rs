@@ -374,8 +374,14 @@ impl App {
         let x = content.x.saturating_add(pane.cursor.x);
         let y = content.y.saturating_add(pane.cursor.y);
         let buffer = frame.buffer_mut();
-        let style = buffer[(x, y)].style().add_modifier(modifier);
-        buffer[(x, y)].set_style(style);
+        let style = buffer[(x, y)].style();
+        if let Some(glyph) = beam_glyph(pane.cursor.shape, buffer[(x, y)].symbol()) {
+            buffer[(x, y)]
+                .set_symbol(glyph)
+                .set_style(style.fg(self.theme.accent));
+        } else {
+            buffer[(x, y)].set_style(style.add_modifier(modifier));
+        }
     }
 
     fn render_scrollbar(&self, frame: &mut Frame, main: Rect, pane: &PaneView) {
@@ -1123,6 +1129,13 @@ fn cursor_modifier(shape: CursorShape) -> Option<Modifier> {
     }
 }
 
+/// A true beam cursor needs a vertical stroke inside the cell. Ratatui can only
+/// style or replace whole cells, so draw a thin bar when the cell is blank and
+/// fall back to an underline when replacing the cell would hide real text.
+fn beam_glyph(shape: CursorShape, symbol: &str) -> Option<&'static str> {
+    (shape == CursorShape::Beam && symbol.trim().is_empty()).then_some("│")
+}
+
 fn cell_style(cell: &CellDto, theme: &crate::theme::Theme) -> Style {
     let mut fg = color(cell.fg, theme);
     let mut bg = color(cell.bg, theme);
@@ -1227,6 +1240,9 @@ mod tests {
             Some(Modifier::UNDERLINED)
         );
         assert_eq!(cursor_modifier(CursorShape::Hidden), None);
+        assert_eq!(beam_glyph(CursorShape::Beam, " "), Some("│"));
+        assert_eq!(beam_glyph(CursorShape::Beam, "x"), None);
+        assert_eq!(beam_glyph(CursorShape::Block, " "), None);
     }
 
     #[test]

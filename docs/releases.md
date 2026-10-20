@@ -35,6 +35,11 @@ Existing sessions remain in `%LOCALAPPDATA%\FACT`. A replaced daemon is cold
 recovered on the next launch; saved output is restored but old processes are
 gone by design.
 
+v0.2.0 uses wire protocol 2. The installer stops the previous daemon before
+replacing the binary. If you replace `fact.exe` manually, run `fact shutdown`
+with the old binary first; a v0.2.0 client refuses to attach to a daemon speaking
+the older protocol.
+
 To install a local build:
 
 ```powershell

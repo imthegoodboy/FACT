@@ -90,7 +90,8 @@ Each pane header has clickable `V` (split right), `H` (split down), `_`
 (minimize), `^`/`v` (maximize/restore) and `X` (close) controls. The `+` button
 in the tab strip opens a new tab. Mouse-wheel scrollback works in shells, and the
 scrollbar can be clicked or dragged. `Ctrl+C` copies a selection, `Ctrl+V`
-pastes, and `Ctrl+Shift+C` / `Ctrl+Shift+V` remain available.
+pastes, and `Ctrl+Shift+C` / `Ctrl+Shift+V` remain available alongside
+`Ctrl+Insert` / `Shift+Insert`.
 
 Session management works offline against SQLite when the daemon is not running:
 

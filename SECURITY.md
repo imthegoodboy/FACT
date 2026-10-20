@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-FACT is pre-1.0. Security fixes target the latest `0.1.x` release and `main`.
+FACT is pre-1.0. Security fixes target the latest `0.2.x` release and `main`.
 
 ## Reporting a vulnerability
 
@@ -27,7 +27,7 @@ The full threat model, controls and limitations are in
 - a process already running as your user can control FACT and read its data;
 - administrators and SYSTEM can bypass file and pipe ACLs;
 - terminal output may contain secrets and is saved in snapshots;
-- release artifacts are checksummed but not code-signed in v0.1.0.
+- release artifacts are checksummed but not code-signed in v0.2.0.
 
 ## Token rotation
 
