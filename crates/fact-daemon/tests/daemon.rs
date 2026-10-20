@@ -161,24 +161,6 @@ fn wait_for_frame(
     }
 }
 
-fn strip_ansi(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 fn frame_text(frame: &Frame, buffers: &mut HashMap<u64, String>) -> String {
     for pane in &frame.panes {
         if let Some(cells) = &pane.cells {
@@ -257,7 +239,6 @@ fn grid_launches_independent_shells_and_streams_output() {
     assert!(info.session.live);
     assert_eq!(info.session.pane_count, 8);
     assert_eq!(info.session.tab_count, 1);
-    assert!(!info.cold_recovered);
 
     let events = event_reader(&client, &info.stream_token);
     let first = wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
@@ -352,7 +333,6 @@ fn detach_and_reattach_keep_the_same_processes() {
     drop(events);
 
     let reattached = attach(&mut client, "detach");
-    assert!(!reattached.cold_recovered);
     assert_eq!(reattached.session.name, "detach");
     let events = event_reader(&client, &reattached.stream_token);
     let frame = wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
@@ -370,106 +350,84 @@ fn detach_and_reattach_keep_the_same_processes() {
 }
 
 #[test]
-fn cold_recovery_restores_output_with_new_shells() {
+fn saved_layout_starts_fresh_shells_without_replaying_output() {
     let harness = harness();
     let handle = start_daemon(&harness);
     let (_identity, mut client) = wait_for_daemon(&harness);
 
-    let info = resume(&mut client, "cold", 1);
+    let info = resume(&mut client, "restart", 2);
     let events = event_reader(&client, &info.stream_token);
-    wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
-        frame.panes.len() == 1 && frame.panes[0].cells.is_some()
+    let initial = wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
+        frame.panes.len() == 2 && frame.panes.iter().all(|pane| pane.cells.is_some())
     })
     .expect("initial frame");
+    let old_pids: Vec<u32> = initial.panes.iter().map(|pane| pane.pid).collect();
+    let first_pane = initial.panes[0].id;
 
     client
         .request(Command::Input {
-            pane: 1,
-            data: b"echo FACT_COLD_MARKER\r".to_vec(),
+            pane: first_pane,
+            data: b"echo FACT_OLD_MARKER\r".to_vec(),
         })
         .expect("send input");
     let mut buffers = HashMap::new();
-    let (frame, _) = wait_for_text(&events, &mut buffers, "FACT_COLD_MARKER", FRAME_TIMEOUT)
-        .expect("marker output");
-    let old_pid = frame.panes[0].pid;
+    wait_for_text(&events, &mut buffers, "FACT_OLD_MARKER", FRAME_TIMEOUT).expect("marker output");
     drop(events);
 
     assert!(matches!(
         client
             .request(Command::SaveSession {
-                name: "cold".into()
+                name: "restart".into()
             })
             .expect("save session"),
         ResponsePayload::Ack
     ));
     shutdown(client, handle, &harness);
 
-    let stored = fact_session::SessionStore::open(&harness.paths.db_file)
-        .expect("open session database")
-        .load("cold")
-        .expect("load saved session");
-    let snapshot = stored.panes[0]
-        .snapshot
-        .as_ref()
-        .expect("saved pane snapshot");
-    assert!(
-        strip_ansi(&snapshot.ansi).contains("FACT_COLD_MARKER"),
-        "snapshot itself lost the marker ({} bytes, {}x{}): {:?}",
-        snapshot.ansi.len(),
-        snapshot.cols,
-        snapshot.rows,
-        &snapshot.ansi[snapshot.ansi.len().saturating_sub(800)..]
-    );
-
     let handle = start_daemon(&harness);
     let (_identity, mut client) = wait_for_daemon(&harness);
-    let recovered = resume(&mut client, "cold", 1);
-    assert!(recovered.cold_recovered);
-    assert!(recovered.session.live);
-    assert!(recovered
-        .recovery_notes
-        .iter()
-        .any(|note| note.contains("previous shell processes were lost")));
-    assert!(recovered
-        .recovery_notes
-        .iter()
-        .any(|note| note.contains("Commands were not replayed")));
+    let restored = resume(&mut client, "restart", 2);
+    assert!(restored.session.live);
 
-    let events = event_reader(&client, &recovered.stream_token);
-    let restored = wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
-        frame.panes.len() == 1 && frame.panes[0].cells.is_some()
+    let events = event_reader(&client, &restored.stream_token);
+    let frame = wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
+        frame.panes.len() == 2 && frame.panes.iter().all(|pane| pane.cells.is_some())
     })
-    .expect("cold recovery frame");
-    assert_ne!(
-        restored.panes[0].pid, old_pid,
-        "cold recovery must start a fresh process"
-    );
-    assert!(restored.panes[0].cold_restored);
-    // The new shell's startup banner may scroll the restored screen into the
-    // scrollback before the first frame reaches the test, so search the whole
-    // buffer rather than requiring the marker to remain on the visible rows.
+    .expect("restored layout frame");
+    for pane in &frame.panes {
+        assert!(
+            !old_pids.contains(&pane.pid),
+            "a saved layout must start fresh processes, not reuse old pids"
+        );
+    }
+
+    let pane = frame.panes[0].id;
     let search = match client
         .request(Command::SearchPane {
-            pane: restored.panes[0].id,
-            query: "FACT_COLD_MARKER".into(),
+            pane,
+            query: "FACT_OLD_MARKER".into(),
             case_sensitive: true,
             limit: 20,
         })
-        .expect("search recovered output")
+        .expect("search fresh pane")
     {
         ResponsePayload::Search(result) => result,
         other => panic!("unexpected search response: {other:?}"),
     };
-    let mut buffers = HashMap::new();
-    let text = frame_text(&restored, &mut buffers);
     assert!(
-        search
-            .hits
-            .iter()
-            .any(|hit| hit.preview.contains("FACT_COLD_MARKER")),
-        "saved visual output was not restored (search found no marker):\n{text}"
+        search.hits.is_empty(),
+        "old screen output must not be replayed after a daemon restart: {:?}",
+        search.hits
     );
-    assert!(restored.session.cold_recovered_at_ms.is_some());
+
+    client
+        .request(Command::Input {
+            pane,
+            data: b"echo FACT_NEW_MARKER\r".to_vec(),
+        })
+        .expect("send input to fresh shell");
+    wait_for_text(&events, &mut buffers, "FACT_NEW_MARKER", FRAME_TIMEOUT)
+        .expect("fresh shell should accept input");
 
     shutdown(client, handle, &harness);
 }
@@ -783,11 +741,7 @@ fn session_lifecycle_rename_archive_export_import_and_delete() {
     assert!(!unarchived.archived);
 
     let recovered = resume_existing(&mut client, "BETA");
-    assert!(recovered.cold_recovered);
-    assert!(recovered
-        .recovery_notes
-        .iter()
-        .any(|note| note.contains("Saved output was replayed")));
+    assert!(recovered.session.live);
 
     let imported = match client
         .request(Command::ImportSession {

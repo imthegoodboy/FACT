@@ -25,14 +25,14 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Protocol framing | Round-trip, malformed bincode, zero/oversize frame rejection, name and cell validation. |
 | Configuration | Defaults, unknown-field rejection, version mismatch, environment expansion, profiles, duplicate/invalid keybindings, theme and range checks. |
 | Layout | Grid construction, split/close/focus, zoom, minimize/restore, move/swap, ratio clamping and serialization. |
-| Terminal | ANSI colors/styles, wide and zero-width cells, alternate screen, cursor/modes, bounded scrollback, search, snapshot checksum and blank-row trimming. |
+| Terminal | ANSI colors/styles, wide and zero-width cells, alternate screen, cursor/modes, bounded scrollback, search and frame snapshots. |
 | ConPTY | Independent processes, input/output, resize, exit status, environment block and argument quoting. |
 | IPC | Pipe round-trip, peer PID/current-user check, protected DACL, local name validation, identity file ACL, DACL diagnostics. |
-| Sessions | Schema migration, save/load, case-insensitive names, checksum and layout corruption rejection, export/import copy semantics, archive/delete. |
-| Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
+| Sessions | Schema migration (including v1 snapshot cleanup), save/load, case-insensitive names, layout corruption rejection, export/import copy semantics, archive/delete. |
+| Daemon | Grid of eight independent shells, live detach/reattach PID preservation, saved-layout restart with fresh shells and discarded output, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. A replacement install also proves a dead daemon identity is cleared. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. A seventh writes a stale protocol-3 identity and proves startup clears it and renders a live pane. |
+| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes the saved layout, proves the old marker and recovery screen are absent, and verifies a new shell PID accepts input. A seventh writes a stale protocol-3 identity and proves startup clears it and renders a live pane. An eighth generates 120 lines, enters scroll mode with the configured prefix and `[`, verifies the offset moves on PageUp and that Esc returns to the shell. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
@@ -41,8 +41,8 @@ directory, use a real shell and terminate the daemon during cleanup.
 | --- | --- |
 | `fact --grid 8` creates independent shells | `fact-daemon` integration test `grid_launches_independent_shells_and_streams_output` checks eight distinct PIDs and output routing. `fact-cli` test `grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session` proves a prior saved/live session cannot swallow the grid request. |
 | Live detach/reattach preserves processes | `detach_and_reattach_keep_the_same_processes` checks the original pane ID, PID and alive state after reattach. |
-| Restart cold-recovers layout/output only | `cold_recovery_restores_output_with_new_shells` checks `cold_recovered`, new PIDs, restored scrollback output and absence of command replay. The TUI cold-recovery test repeats the restart through the real UI and verifies a new shell accepts input. |
-| Snapshot integrity | `fact-session` tests `rejects_checksum_mismatch` and `rejects_pane_layout_mismatch`; `fact-term` validates snapshot size/shape before replay. |
+| Restart reopens layout with fresh shells | `saved_layout_starts_fresh_shells_without_replaying_output` checks the saved pane count, new PIDs, an empty search for the old marker and a new shell that accepts input. The TUI test repeats the restart through the real UI and rejects both the old marker and the removed recovery screen. |
+| Layout integrity | `fact-session` tests `rejects_pane_layout_mismatch` and validates pane IDs before a saved layout can start processes. The v1 migration clears legacy snapshots. |
 | Bad token rejection | `wrong_token_is_rejected_without_killing_the_daemon` verifies the daemon rejects authentication and remains available. |
 | Non-owner access | Pipe and identity files use a protected current-user/SYSTEM DACL. Tests assert exactly those grants, peer-user comparison is in the accept path, and local-only pipe names are enforced. |
 | No network listeners | A source-level test scans every crate's `src` tree for TCP/UDP/HTTP listener and stream APIs. |
@@ -70,16 +70,16 @@ These are intentionally not mock tests:
   configured prefix and verifies through `fact sessions --json` that the session
   is still live with eight panes. Another test first detaches a one-pane session,
   then proves a bare `fact --grid 8` creates `grid-8` instead of attaching to it.
-  A third snapshots, stops the daemon, resumes cold, dismisses the recovery modal
-  and verifies a new shell PID. Further tests cover a second live client, a
-  60x18 grid recovering with prefix+M/N, nested-launch refusal and a stale
-  protocol-3 identity that must not block startup. Set `FACT_SMOKE_EXE` to run
-  all seven tests against a downloaded release binary instead of the test build.
-  Restored visual content and no-command-replay behavior are asserted directly
-  by the daemon cold-recovery test.
+  A third saves the layout, stops the daemon, resumes it, proves the old output
+  and recovery screen are absent and verifies a new shell PID. Further tests
+  cover a second live client, a 60x18 grid with prefix+M/N, nested-launch
+  refusal, a stale protocol-3 identity that must not block startup, and scroll
+  mode reading real history. Set `FACT_SMOKE_EXE` to run all eight tests against
+  a downloaded release binary instead of the test build. Fresh PIDs and discarded old output are asserted
+  directly by the daemon saved-layout test.
 - Tests wait for frames and output with deadlines rather than fixed sleeps where
-  possible. Cold-recovery assertions search the terminal buffer for restored
-  output because a new shell's banner can scroll the restored screen.
+  possible. Restart assertions search the whole pane buffer, not only the visible
+  screen, so a new shell's banner cannot mask a replay bug.
 
 Run the focused integration suites with:
 
@@ -109,7 +109,7 @@ artifact. A tag cannot bypass a failing test.
 - Development and manual verification: Windows 11.
 - CI: GitHub's current Windows Server runner, which is not the same as Windows
   11 or Windows 10.
-- Windows 10 1809+: intended, but not verified for v0.2.3. Do not claim support
+- Windows 10 1809+: intended, but not verified for v0.3.0. Do not claim support
   until a run on a physical or VM Windows 10 installation passes the suite.
 
 ## Manual smoke check
@@ -127,10 +127,13 @@ fact --grid 8
 # shrink the window below min_pane_width, then press Alt+N and confirm all panes return
 # press Alt+M to maximize the focused pane, then Alt+N to restore the grid
 # press Ctrl+Space M/N and confirm the same behavior
+# press Alt+T, cancel the confirmation, then confirm and verify the grid closes
 # minimize a pane, then click the bottom-right tray to restore it
 # maximize a pane with Ctrl+Space Z and restore it with Ctrl+Space Z
 # from a pane, run `fact --grid 8` and confirm it refuses instead of going black
 # generate 200 lines, then click and drag the scrollbar; confirm output moves
+# press Ctrl+Space then [, scroll with Up/Down and PgUp/PgDn, and press Esc
+# hold Shift and use the wheel over a pane; confirm it scrolls FACT, not the app
 # select text, press Ctrl+C, focus another pane and press Ctrl+V
 # press Ctrl+Space and confirm the two-cell accent marker appears only while armed
 # detach with Ctrl+Space D
@@ -142,8 +145,9 @@ fact resume
 
 fact shutdown
 fact resume
-# verify the cold-recovery modal and restored output
-# confirm the old PIDs are reported as lost and no command was replayed
+# verify the saved grid reopens directly with a fresh shell prompt in every pane
+# confirm there is no recovery modal and no old output on screen
+# print $PID in a pane and confirm it differs from the pre-shutdown PID
 
 fact export <session> --output .\exports
 fact import .\exports\<file>.json --name imported

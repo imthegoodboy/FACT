@@ -11,8 +11,8 @@ use ratatui::layout::Position;
 
 use crate::{
     action_label, filtered_palette, fit_text as fit, help_lines, minimized_tray_rect, new_tab_rect,
-    palette_items, scrollbar_geometry, tab_ranges, utc_clock, App, ColdState, ContextState,
-    HelpState, Overlay, PaletteState, PromptKind, PromptState, SearchState, SessionsState,
+    palette_items, scrollbar_geometry, tab_ranges, utc_clock, App, ContextState, HelpState,
+    Overlay, PaletteState, PromptKind, PromptState, SearchState, SessionsState,
 };
 
 impl App {
@@ -384,6 +384,36 @@ impl App {
                 right_edge = tray_x;
             }
 
+            if let Some((offset, history)) = self.scroll_mode.and_then(|pane_id| {
+                self.frame
+                    .as_ref()?
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == pane_id)
+                    .map(|pane| (pane.scroll_offset, pane.history_lines))
+            }) {
+                let available = right_edge.saturating_sub(area.x);
+                let message = fit(
+                    &format!(" SCROLL {offset}/{history}  Esc "),
+                    usize::from(available),
+                );
+                let width = (message.chars().count() as u16).min(available);
+                let message_x = right_edge.saturating_sub(width);
+                if width > 0 {
+                    buffer.set_stringn(
+                        message_x,
+                        y,
+                        message,
+                        usize::from(width),
+                        Style::default()
+                            .bg(self.theme.accent)
+                            .fg(self.theme.bg)
+                            .add_modifier(Modifier::BOLD),
+                    );
+                    right_edge = message_x;
+                }
+            }
+
             if let Some((message, _)) = &self.status {
                 let available = right_edge.saturating_sub(area.x);
                 let message = fit(&format!(" {message} "), usize::from(available));
@@ -420,7 +450,6 @@ impl App {
             return;
         };
         match overlay {
-            Overlay::Cold(cold) => self.render_cold(frame, area, cold),
             Overlay::Help(help) => self.render_help(frame, area, help),
             Overlay::Palette(palette) => self.render_palette(frame, area, palette),
             Overlay::Search(search) => self.render_search(frame, area, search),
@@ -429,47 +458,6 @@ impl App {
             Overlay::Context(context) => self.render_context(frame, area, context),
             Overlay::Sessions(sessions) => self.render_sessions(frame, area, sessions),
         }
-    }
-
-    fn render_cold(&self, frame: &mut Frame, area: Rect, cold: &ColdState) {
-        let height = (cold.notes.len() as u16 + 5).min(area.height.saturating_sub(2));
-        let inner = panel(
-            frame,
-            area,
-            " Session recovered ",
-            66,
-            height.max(7),
-            self.theme.warning,
-            &self.theme,
-        );
-        if inner.height == 0 {
-            return;
-        }
-        let mut lines = Vec::new();
-        lines.push(Line::from(Span::styled(
-            "The layout and visible output were restored.",
-            Style::default()
-                .fg(self.theme.warning)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(""));
-        for note in &cold.notes {
-            lines.push(Line::from(vec![
-                Span::styled("• ", Style::default().fg(self.theme.warning)),
-                Span::styled(note.clone(), Style::default().fg(self.theme.fg)),
-            ]));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Press Enter to continue.",
-            Style::default().fg(self.theme.muted),
-        )));
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(self.theme.bg).fg(self.theme.fg)),
-            inner,
-        );
     }
 
     fn render_help(&self, frame: &mut Frame, area: Rect, help: &HelpState) {

@@ -1,4 +1,4 @@
-//! Daemon-owned session state: real panes, layouts, snapshots and frame fan-out.
+//! Daemon-owned session state: real panes, layouts and frame fan-out.
 //!
 //! All mutation happens on one owner thread. Control connections submit
 //! commands through a channel, which keeps PTY/output handling and SQLite
@@ -19,9 +19,7 @@ use fact_protocol::{
     MAX_INPUT_CHUNK, MAX_PASTE_BYTES, MAX_SESSIONS,
 };
 use fact_pty::{PtyProcess, SpawnOptions};
-use fact_session::{
-    now_ms, PaneRecord, PaneSnapshot, SessionData, SessionError, SessionMeta, SessionStore,
-};
+use fact_session::{now_ms, PaneRecord, SessionData, SessionError, SessionMeta, SessionStore};
 use fact_term::{TerminalEventSink, TerminalModel};
 
 const DEFAULT_VIEWPORT_COLS: u16 = 120;
@@ -37,9 +35,7 @@ struct PaneSpec<'a> {
     cwd: Option<&'a str>,
     cols: u16,
     rows: u16,
-    snapshot: Option<&'a PaneSnapshot>,
     title_hint: &'a str,
-    cold_recovery: bool,
 }
 
 pub(crate) struct SessionManager {
@@ -63,10 +59,7 @@ struct LiveSession {
     layout_epoch: u64,
     metadata_epoch: u64,
     detach_seq: u64,
-    cold_recovered: bool,
-    recovery_notes: Vec<String>,
     last_persist: Instant,
-    last_snapshot: Instant,
     last_active_ms: i64,
 }
 
@@ -165,7 +158,6 @@ impl SessionManager {
                 .map(ResponsePayload::Session),
             Command::SaveSession { name } => {
                 let key = self.session_key(&name)?;
-                self.snapshot_session(&key)?;
                 self.persist_session(&key)?;
                 Ok(ResponsePayload::Ack)
             }
@@ -185,7 +177,6 @@ impl SessionManager {
             }
             Command::ExportSession { name } => {
                 if let Some(key) = self.session_key_opt(&name) {
-                    self.snapshot_session(&key)?;
                     self.persist_session(&key)?;
                 } else if !self.store.exists(&name).map_err(map_session_error)? {
                     return Err(ProtocolError::not_found(format!("session '{name}'")));
@@ -364,13 +355,6 @@ impl SessionManager {
         let keys: Vec<String> = self.sessions.keys().cloned().collect();
         for key in keys {
             let mut meta_delta = 0u64;
-            let snapshot_due = {
-                let Some(session) = self.sessions.get(&key) else {
-                    continue;
-                };
-                session.last_snapshot.elapsed()
-                    >= Duration::from_secs(self.config.snapshot_interval_secs.max(1))
-            };
             if let Some(session) = self.sessions.get_mut(&key) {
                 for pane in session.panes.values_mut() {
                     let mut dirty = false;
@@ -450,10 +434,6 @@ impl SessionManager {
                         session.metadata_epoch.wrapping_add(title_changes.min(1));
                 }
             }
-            if snapshot_due && self.snapshot_session(&key).is_ok() {
-                let _ = self.persist_session(&key);
-                continue;
-            }
             let persist_due = self.sessions.get(&key).is_some_and(|session| {
                 session.last_persist.elapsed()
                     >= Duration::from_secs(self.config.persist_interval_secs.max(1))
@@ -513,7 +493,6 @@ impl SessionManager {
     pub(crate) fn shutdown(&mut self) {
         let keys: Vec<String> = self.sessions.keys().cloned().collect();
         for key in keys {
-            let _ = self.snapshot_session(&key);
             let _ = self.persist_session(&key);
         }
         for (_, session) in self.sessions.drain() {
@@ -589,7 +568,7 @@ impl SessionManager {
             if let Some(grid) = grid {
                 Self::ensure_grid_shape(&data, &name, grid)?;
             }
-            self.cold_recover(data)?;
+            self.restore_saved(data)?;
             let key = key_of(&name);
             return self.attach_live(&key);
         }
@@ -654,8 +633,6 @@ impl SessionManager {
             .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
         session.last_active_ms = now_ms();
         let summary = session.data.summary(true);
-        let cold_recovered = session.cold_recovered;
-        let recovery_notes = session.recovery_notes.clone();
         let session_key = key.to_string();
         self.stream_grants.insert(
             token.clone(),
@@ -667,8 +644,6 @@ impl SessionManager {
         Ok(AttachInfo {
             session: summary,
             stream_token: token,
-            cold_recovered,
-            recovery_notes,
         })
     }
 
@@ -721,7 +696,6 @@ impl SessionManager {
             .collect();
         let mut panes = HashMap::new();
         let mut records = Vec::new();
-        let mut notes = Vec::new();
         // Only an explicit profile title is preserved verbatim. Automatic
         // labels are normalized from the resolved executable by spawn_pane.
         let profile_title = resolved.title.clone().unwrap_or_default();
@@ -736,11 +710,8 @@ impl SessionManager {
                     cwd,
                     cols,
                     rows,
-                    snapshot: None,
                     title_hint: &profile_title,
-                    cold_recovery: false,
                 },
-                &mut notes,
             )?;
             let record = PaneRecord {
                 id: *id,
@@ -749,7 +720,6 @@ impl SessionManager {
                 exit_code: None,
                 profile: profile.map(str::to_string),
                 cwd: cwd.map(str::to_string),
-                snapshot: None,
             };
             panes.insert(*id, spawned);
             records.push(record);
@@ -767,10 +737,7 @@ impl SessionManager {
             layout_epoch: 1,
             metadata_epoch: 1,
             detach_seq: 0,
-            cold_recovered: false,
-            recovery_notes: notes,
             last_persist: Instant::now(),
-            last_snapshot: Instant::now(),
             last_active_ms: now_ms(),
         };
         let key = key_of(&name);
@@ -778,7 +745,7 @@ impl SessionManager {
         self.attach_live(&key)
     }
 
-    fn cold_recover(&mut self, mut data: SessionData) -> Result<(), ProtocolError> {
+    fn restore_saved(&mut self, mut data: SessionData) -> Result<(), ProtocolError> {
         let old_ids: Vec<u64> = data.layout.all_panes_including_minimized();
         let mut remap = BTreeMap::new();
         for old in old_ids {
@@ -816,14 +783,8 @@ impl SessionManager {
             .collect();
 
         let mut panes = HashMap::new();
-        let mut notes = vec![
-            "The previous shell processes were lost; new shells were started.".to_string(),
-            "Commands were not replayed automatically.".to_string(),
-        ];
-        let mut had_snapshot = false;
         for record in &data.panes {
             let (cols, rows) = dims.get(&record.id).copied().unwrap_or((80, 24));
-            had_snapshot |= record.snapshot.is_some();
             let spawned = spawn_pane(
                 &self.config,
                 PaneSpec {
@@ -833,30 +794,15 @@ impl SessionManager {
                     cwd: record.cwd.as_deref(),
                     cols,
                     rows,
-                    snapshot: record.snapshot.as_ref(),
                     title_hint: &record.title,
-                    cold_recovery: true,
                 },
-                &mut notes,
             )?;
             panes.insert(record.id, spawned);
-        }
-        if had_snapshot {
-            notes.insert(
-                0,
-                "Saved output was replayed from the last snapshot.".to_string(),
-            );
-        } else {
-            notes.insert(
-                0,
-                "No saved output was available for these panes.".to_string(),
-            );
         }
         for record in &mut data.panes {
             record.pid = panes.get(&record.id).map_or(0, |pane| pane.pty.pid());
             record.exit_code = None;
         }
-        data.cold_recovered_at_ms = Some(now_ms());
         data.updated_at_ms = now_ms();
         let key = key_of(&data.name);
         let session = LiveSession {
@@ -867,10 +813,7 @@ impl SessionManager {
             layout_epoch: 1,
             metadata_epoch: 1,
             detach_seq: 0,
-            cold_recovered: true,
-            recovery_notes: notes,
             last_persist: Instant::now(),
-            last_snapshot: Instant::now(),
             last_active_ms: now_ms(),
         };
         self.sessions.insert(key.clone(), session);
@@ -995,7 +938,6 @@ impl SessionManager {
 
     fn terminate_live(&mut self, key: &str, save: bool) -> Result<SessionData, ProtocolError> {
         if save {
-            self.snapshot_session(key)?;
             self.persist_session(key)?;
         }
         let Some(session) = self.sessions.remove(key) else {
@@ -1166,7 +1108,6 @@ impl SessionManager {
             )
         };
         let id = self.alloc_pane_id();
-        let mut notes = Vec::new();
         let spawned = spawn_pane(
             &self.config,
             PaneSpec {
@@ -1176,11 +1117,8 @@ impl SessionManager {
                 cwd: cwd.as_deref(),
                 cols,
                 rows,
-                snapshot: None,
                 title_hint: "",
-                cold_recovery: false,
             },
-            &mut notes,
         )?;
         let pid = spawned.pty.pid();
         let title = spawned.display_title.clone();
@@ -1208,7 +1146,6 @@ impl SessionManager {
             exit_code: None,
             profile,
             cwd,
-            snapshot: None,
         });
         session.panes.insert(id, spawned);
         session.layout_epoch = session.layout_epoch.wrapping_add(1);
@@ -1306,7 +1243,6 @@ impl SessionManager {
                 live.display_title.clone(),
             )
         };
-        let mut notes = Vec::new();
         let mut spawned = spawn_pane(
             &self.config,
             PaneSpec {
@@ -1316,11 +1252,8 @@ impl SessionManager {
                 cwd: cwd.as_deref(),
                 cols,
                 rows,
-                snapshot: None,
                 title_hint: &title,
-                cold_recovery: false,
             },
-            &mut notes,
         )?;
         let session = self
             .sessions
@@ -1482,7 +1415,6 @@ impl SessionManager {
             (session.data.name.clone(), cols, rows)
         };
         let id = self.alloc_pane_id();
-        let mut notes = Vec::new();
         let spawned = spawn_pane(
             &self.config,
             PaneSpec {
@@ -1492,11 +1424,8 @@ impl SessionManager {
                 cwd: cwd.as_deref(),
                 cols,
                 rows,
-                snapshot: None,
                 title_hint: "",
-                cold_recovery: false,
             },
-            &mut notes,
         )?;
         let title = spawned.display_title.clone();
         let pid = spawned.pty.pid();
@@ -1524,7 +1453,6 @@ impl SessionManager {
             exit_code: None,
             profile,
             cwd,
-            snapshot: None,
         });
         session.panes.insert(id, spawned);
         session.layout_epoch = session.layout_epoch.wrapping_add(1);
@@ -1751,30 +1679,6 @@ impl SessionManager {
         Ok(())
     }
 
-    fn snapshot_session(&mut self, key: &str) -> Result<(), ProtocolError> {
-        let max_bytes = self.config.snapshot_max_bytes;
-        let now = now_ms();
-        let session = self
-            .sessions
-            .get_mut(key)
-            .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
-        for (id, pane) in &mut session.panes {
-            let snapshot = pane.term.recovery_snapshot(max_bytes, now);
-            if let Some(record) = session.data.pane_mut(*id) {
-                record.snapshot = Some(PaneSnapshot::new(
-                    snapshot.ansi,
-                    snapshot.cols,
-                    snapshot.rows,
-                    snapshot.format_version,
-                    snapshot.captured_at_ms,
-                    snapshot.truncated,
-                ));
-            }
-        }
-        session.last_snapshot = Instant::now();
-        Ok(())
-    }
-
     fn persist_session(&mut self, key: &str) -> Result<(), ProtocolError> {
         let now = now_ms();
         let SessionManager {
@@ -1942,7 +1846,6 @@ impl SessionManager {
                 scroll_offset: snapshot.scroll_offset,
                 history_lines: snapshot.history_lines,
                 bell_seq: snapshot.bell_seq,
-                cold_restored: pane.term.cold_restored(),
                 focused: Some(slot.pane) == layout.focused,
             });
         }
@@ -2088,11 +1991,7 @@ impl SessionManager {
     }
 }
 
-fn spawn_pane(
-    config: &Config,
-    spec: PaneSpec<'_>,
-    notes: &mut Vec<String>,
-) -> Result<LivePane, ProtocolError> {
+fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolError> {
     let PaneSpec {
         session_name,
         pane,
@@ -2100,9 +1999,7 @@ fn spawn_pane(
         cwd,
         cols,
         rows,
-        snapshot,
         title_hint,
-        cold_recovery,
     } = spec;
     let resolved = config.resolve_profile(profile).map_err(map_config_error)?;
     let mut workdir = cwd
@@ -2116,26 +2013,10 @@ fn spawn_pane(
         .transpose()?;
     if let Some(dir) = &workdir {
         if !dir.is_dir() {
-            notes.push(format!(
-                "Working directory '{}' is unavailable; using the profile default.",
-                dir.display()
-            ));
             workdir = None;
         }
     }
-    let workdir = workdir.or_else(|| {
-        resolved.cwd.clone().filter(|dir| {
-            if dir.is_dir() {
-                true
-            } else {
-                notes.push(format!(
-                    "Profile working directory '{}' is unavailable; using the daemon directory.",
-                    dir.display()
-                ));
-                false
-            }
-        })
-    });
+    let workdir = workdir.or_else(|| resolved.cwd.clone().filter(|dir| dir.is_dir()));
 
     let title = if title_hint.trim().is_empty() {
         if let Some(explicit) = &resolved.title {
@@ -2151,25 +2032,7 @@ fn spawn_pane(
     let sink = TerminalEventSink::new();
     let (response_tx, response_rx) = std::sync::mpsc::sync_channel(16);
     sink.attach_writer(response_tx);
-    let initial = snapshot
-        .map(|snap| (snap.cols.max(1), snap.rows.max(1)))
-        .unwrap_or((cols, rows));
-    let mut term = TerminalModel::new(initial.0, initial.1, config.scrollback_lines, sink);
-    if cold_recovery {
-        if let Some(snapshot) = snapshot {
-            if let Err(error) = term.restore_snapshot(&snapshot.ansi) {
-                notes.push(format!("A saved snapshot could not be replayed: {error}"));
-            }
-        } else {
-            term.mark_cold_restored();
-        }
-        term.feed(
-            "\r\n\x1b[33m[FACT] Cold recovery: the previous process is gone; a new shell was started.\x1b[0m\r\n\
-             \x1b[90m[FACT] Saved output is visual only and commands were not replayed.\x1b[0m\r\n"
-                .as_bytes(),
-        );
-        term.resize(cols, rows);
-    }
+    let term = TerminalModel::new(cols, rows, config.scrollback_lines, sink);
 
     let mut options = SpawnOptions::new(resolved.command.clone(), cols, rows);
     options.args = resolved.args.clone();

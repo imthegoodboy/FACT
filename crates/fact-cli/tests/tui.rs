@@ -119,6 +119,27 @@ fn wait_for(process: &PtyProcess, output: &mut Vec<u8>, needle: &str, timeout: D
     }
 }
 
+fn wait_for_screen(
+    process: &PtyProcess,
+    output: &mut Vec<u8>,
+    needle: &str,
+    cols: u16,
+    rows: u16,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        drain(process, output);
+        if screen_text(output, cols, rows).contains(needle) {
+            return true;
+        }
+        if process.exit().is_some() || Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn tail(output: &[u8]) -> String {
     let text = String::from_utf8_lossy(output);
     let reversed: String = text.chars().rev().take(6000).collect();
@@ -198,18 +219,18 @@ fn stale_daemon_identity_does_not_block_launch() {
 }
 
 #[test]
-fn tui_cold_recovers_and_starts_new_shells() {
-    const COLD_SESSION: &str = "cold-smoke";
+fn tui_saved_layout_starts_fresh_shell_without_recovery_screen() {
+    const SAVED_SESSION: &str = "saved-smoke";
     const OLD_MARKER: &str = "FACT_OLD_PID_";
     const NEW_MARKER: &str = "FACT_NEW_PID_";
 
-    let home = TestHome::new("tui-cold");
+    let home = TestHome::new("tui-restart");
     let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
     options.args = vec![
         "--data-dir".into(),
         home.path.to_string_lossy().into_owned(),
         "--session".into(),
-        COLD_SESSION.into(),
+        SAVED_SESSION.into(),
         "--grid".into(),
         "1".into(),
     ];
@@ -239,7 +260,7 @@ fn tui_cold_recovers_and_starts_new_shells() {
     home.shutdown();
     assert!(
         !home.path.join("runtime").join("daemon.json").exists(),
-        "the daemon did not stop before cold recovery"
+        "the daemon did not stop before the restart"
     );
 
     let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
@@ -247,54 +268,136 @@ fn tui_cold_recovers_and_starts_new_shells() {
         "--data-dir".into(),
         home.path.to_string_lossy().into_owned(),
         "--session".into(),
-        COLD_SESSION.into(),
+        SAVED_SESSION.into(),
     ];
     let second = PtyProcess::spawn(options).expect("resume the session in ConPTY");
     let mut output = Vec::new();
     assert!(
-        wait_for(
-            &second,
-            &mut output,
-            "Session recovered",
-            Duration::from_secs(30)
-        ),
-        "cold recovery did not report the lost process:\n{}",
+        wait_for(&second, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
+        "the saved layout did not open a fresh shell:\n{}",
         tail(&output)
     );
-    // Dismiss the recovery modal, then prove that a new shell is accepting
-    // input. The old process must not have been resurrected. Restored visual
-    // content is asserted by the daemon cold-recovery test, which searches the
-    // terminal buffer directly rather than relying on the visible screen.
-    second.write(b"\r").expect("dismiss the recovery modal");
+    let screen = String::from_utf8_lossy(&output);
     assert!(
-        wait_for(
-            &second,
-            &mut output,
-            "Continuing in the recovered session.",
-            Duration::from_secs(10)
-        ),
-        "the recovery modal did not close:\n{}",
+        !screen.contains("Session recovered"),
+        "the recovery screen should no longer exist:\n{}",
         tail(&output)
     );
+    assert!(
+        !screen.contains(OLD_MARKER),
+        "old screen output must not be replayed:\n{}",
+        tail(&output)
+    );
+
     thread::sleep(Duration::from_millis(300));
     second
         .write(format!("echo {NEW_MARKER}$PID\r").as_bytes())
         .expect("print the new shell PID");
     let new_pid = wait_for_marker_pid(&second, &mut output, NEW_MARKER, Duration::from_secs(20))
-        .unwrap_or_else(|| {
-            panic!(
-                "the recovered shell did not accept input:\n{}",
-                tail(&output)
-            )
-        });
-    assert_ne!(new_pid, old_pid, "cold recovery must start a new shell");
+        .unwrap_or_else(|| panic!("the fresh shell did not accept input:\n{}", tail(&output)));
+    assert_ne!(new_pid, old_pid, "a saved layout must start a new shell");
 
-    second.write(b"\x02d").expect("detach the recovered TUI");
+    second.write(b"\x02d").expect("detach the TUI");
     let exit = second.wait_for_exit(Duration::from_secs(15));
     assert_eq!(
         exit,
         Some(0),
-        "the recovered TUI did not detach cleanly:\n{}",
+        "the TUI did not detach cleanly:\n{}",
+        tail(&output)
+    );
+    home.shutdown();
+}
+
+#[test]
+fn scroll_mode_reads_history_without_sending_keys_to_the_shell() {
+    const LINE_MARKER: &str = "FACT_SCROLL_LINE_";
+
+    let home = TestHome::new("tui-scroll");
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--session".into(),
+        "scroll-smoke".into(),
+        "--grid".into(),
+        "1".into(),
+    ];
+    let process = PtyProcess::spawn(options).expect("start the scroll test TUI");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(&process, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
+        "the scroll test pane did not start:\n{}",
+        tail(&output)
+    );
+    thread::sleep(Duration::from_millis(300));
+
+    process
+        .write(
+            format!(
+                "1..120 | ForEach-Object {{ \"{LINE_MARKER}$_\" }}; Write-Host (\"FACT_SCROLL_\" + \"DONE\")\r"
+            )
+            .as_bytes(),
+        )
+        .expect("print scrollback lines");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "FACT_SCROLL_DONE",
+            120,
+            35,
+            Duration::from_secs(20)
+        ),
+        "the shell did not print scrollback lines:\n{}",
+        tail(&output)
+    );
+    thread::sleep(Duration::from_millis(300));
+
+    process.write(b"\x02[").expect("enter scroll mode");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "SCROLL 0/",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "scroll mode did not show its offset:\n{}",
+        tail(&output)
+    );
+    process.write(b"\x1b[5~").expect("page up in scroll mode");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "SCROLL 35/",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "PageUp did not move the scroll offset:\n{}",
+        tail(&output)
+    );
+    process.write(b"\x1b").expect("leave scroll mode");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "Scroll mode closed",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "scroll mode did not close with Esc:\n{}",
+        tail(&output)
+    );
+
+    process.write(b"\x02d").expect("detach the scroll test TUI");
+    assert_eq!(
+        process.wait_for_exit(Duration::from_secs(15)),
+        Some(0),
+        "the scroll test TUI did not detach cleanly:\n{}",
         tail(&output)
     );
     home.shutdown();

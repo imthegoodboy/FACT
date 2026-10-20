@@ -3,6 +3,48 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.3.0] - 2026-10-21
+
+### Changed
+
+- After a daemon restart, FACT now reopens the saved session name, tabs, splits,
+  profiles and working directories with a fresh shell in every pane. It no longer
+  restores or replays old screen output. Live detach and reattach still keep the
+  original processes, PIDs, terminal state and scrollback.
+- The v1 database migration clears legacy snapshot columns before loading a
+  session. Existing saved sessions keep their layout and start fresh shells.
+- The wire protocol is now version 5. The installer stops the previous daemon,
+  and a stale daemon identity is cleared as before.
+- `snapshot_interval_secs` and `snapshot_max_bytes` remain accepted in existing
+  configuration files but are ignored. New config templates omit them.
+- Session exports no longer contain terminal output; v1 exports still import, and
+  their snapshot fields are ignored.
+
+### Removed
+
+- The cold-recovery modal, recovery notes, recovery timestamps, pane restore
+  markers and all ANSI snapshot capture, storage, validation and replay.
+- The client no longer has a `Cold` overlay, and the protocol no longer has
+  `cold_recovered`, `recovery_notes`, `cold_recovered_at_ms` or `cold_restored`
+  fields.
+
+### Added
+
+- `Alt+T` directly terminates the active grid (tab) and all of its panes after
+  the usual close confirmation. The right-click menu also lists the close-grid
+  action.
+- Prefix then `[` enters a scroll mode for the focused pane: Up/Down by a line,
+  PgUp/PgDn by a page, Home/End for top/bottom, and Esc to exit. The mode shows
+  the current offset and never forwards its keys to the application.
+- Shift+wheel bypasses application mouse capture and scrolls FACT's terminal
+  history, which makes agent chats and other full-screen applications readable.
+
+### Fixed
+
+- A fresh terminal model is always created on restart, so old output cannot
+  appear above a new shell or be mistaken for live output. No saved bytes are
+  ever submitted as input.
+
 ## [0.2.3] - 2026-10-21
 
 ### Fixed
@@ -163,6 +205,7 @@ All notable changes to FACT are documented here. The format follows
 - Terminal snapshots are visual state, not process resurrection; unsaved work in
   a lost process cannot be recovered.
 
+[0.3.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.0
 [0.2.3]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.3
 [0.2.2]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.2
 [0.2.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.1

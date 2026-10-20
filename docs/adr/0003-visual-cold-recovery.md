@@ -1,6 +1,6 @@
 # 0003: Alacritty terminal model and visual-only cold recovery
 
-- **Status:** Accepted
+- **Status:** Superseded by [0007](0007-fresh-shells-no-replay.md)
 - **Date:** 2026-10-19
 
 ## Context

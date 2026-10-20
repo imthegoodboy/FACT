@@ -29,7 +29,7 @@ daemon owns:
 - ConPTY processes and job objects
 - terminal emulation and scrollback
 - the layout tree and session metadata
-- the SQLite store and snapshots
+- the SQLite store and saved layouts
 - IPC authentication and frame fan-out
 
 The client owns only presentation and input encoding. There is exactly one
@@ -39,7 +39,8 @@ ACL-protected identity file.
 ## Consequences
 
 - `fact detach`, closing the UI and losing the client do not terminate shells.
-- A daemon crash loses live processes, but saved layout/output can cold-recover.
+- A daemon crash loses live processes, but the saved layout reopens with fresh
+  shells in every pane.
 - The daemon is a single point of failure for all sessions of that user.
 - Protocol versioning and client/daemon compatibility become explicit concerns.
 - No elevation, service registration or machine-wide state is required.

@@ -50,8 +50,6 @@ confirm_close = true
 copy_on_select = false
 
 persist_interval_secs = 10
-snapshot_interval_secs = 20
-snapshot_max_bytes = 262144
 max_sessions = 32
 max_frame_cells = 2000000
 daemon_log_level = "info"
@@ -71,12 +69,14 @@ default_profile = "auto"
 | `confirm_close` | `true` | Ask before closing a pane, tab or the UI with live shells. |
 | `copy_on_select` | `false` | Copy a completed mouse selection automatically. |
 | `persist_interval_secs` | `10` | 1-600 seconds between metadata/layout saves. |
-| `snapshot_interval_secs` | `20` | 1-3600 seconds between visual snapshots. |
-| `snapshot_max_bytes` | `262144` | 16 KiB-4 MiB per pane snapshot. |
 | `max_sessions` | `32` | 1-128. |
 | `max_frame_cells` | `2000000` | 10000-50000000; upper bound for one frame. |
 | `daemon_log_level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. |
 | `default_profile` | `auto` | `auto` or a key from `[profiles]`. |
+
+The v0.2 keys `snapshot_interval_secs` and `snapshot_max_bytes` are still accepted
+so existing configuration files continue to load, but they are ignored. FACT no
+longer captures or persists terminal output.
 
 `F2` cycles themes for the current UI session without writing the config. The
 next launch uses the `theme` value again. The command palette also has a
@@ -134,8 +134,8 @@ MY_PROJECT_ROOT = "C:\\src"
 ```
 
 Global values apply to every pane. Profile values override them. Environment
-values are applied to the child process and are never written to logs or
-snapshots. Do not put secrets in the config file: it is ordinary user-readable
+values are applied to the child process and are never written to logs or the
+session database. Do not put secrets in the config file: it is ordinary user-readable
 state, not a credential store.
 
 ## Keybindings
@@ -171,7 +171,7 @@ that is not a FACT binding is sent to the focused shell.
 | Split right | `split_right` | Prefix then `\|` |
 | Split down | `split_down` | Prefix then `-` |
 | Close pane | `close_pane` | Prefix then `X` |
-| Close tab | `close_tab` | Prefix then `Shift+X` |
+| Close tab / grid | `close_tab` | Prefix then `Shift+X`, or `Alt+T` |
 | Restart pane | `restart_pane` | Prefix then `Shift+R` |
 | Toggle maximize / full grid | `zoom` | Prefix then `Z` |
 | Maximize focused pane | `maximize` | Prefix then `M`, or `Alt+M` |
@@ -187,6 +187,7 @@ that is not a FACT binding is sent to the focused shell.
 | Rename tab | `rename_tab` | Prefix then `Shift+T` |
 | Command palette | `palette` | Prefix then `K` |
 | Search focused pane | `search` | Prefix then `/` |
+| Browse scrollback | `scroll_mode` | Prefix then `[` |
 | Switch session | `sessions` | Prefix then `S` |
 | Detach, keep shells | `detach` | Prefix then `D` |
 | Help | `help` | `F1` |
@@ -200,8 +201,13 @@ Additional interaction that is not a configurable chord:
 
 - `F2` cycles themes unless you bind `F2` to another action.
 - `Alt+M` maximizes the focused pane and `Alt+N` shows the full grid without
-  using the prefix. `Ctrl+M` is Enter in terminal input, so it cannot be used as
-  a direct shortcut.
+  using the prefix. `Alt+T` terminates the active grid and all of its panes after
+  confirmation. `Ctrl+M` is Enter in terminal input, so it cannot be used as a
+  direct shortcut.
+- Prefix then `[` enters scroll mode without sending keys to the application.
+  Up/Down scroll one line, PgUp/PgDn scroll one page, Home/End jump to the top or
+  bottom, and Esc or `q` exits. Shift+wheel always scrolls FACT's history instead
+  of forwarding the wheel to an application that captures the mouse.
 - In a window too small for the configured `min_pane_width`/`min_pane_height`,
   FACT normally shows only the focused pane. `Alt+N` or the `show_all` action
   keeps the whole grid visible even below those limits; `Alt+M` maximizes again.
@@ -225,7 +231,7 @@ including your overrides.
 
 ## Examples
 
-A three-profile setup with a custom prefix and a quieter snapshot cadence:
+A three-profile setup with a custom prefix and a longer autosave interval:
 
 ```toml
 config_version = 1
@@ -233,7 +239,6 @@ prefix = "ctrl+b"
 theme = "nord"
 default_profile = "pwsh"
 persist_interval_secs = 15
-snapshot_interval_secs = 60
 
 [profiles.pwsh]
 command = "pwsh.exe"

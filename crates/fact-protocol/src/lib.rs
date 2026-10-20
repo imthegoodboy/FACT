@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 /// title row from slot geometry and made chrome rows conditional; an older
 /// client would render every pane one row too low. Version 4 gives
 /// `ZoomPane { zoomed: false }` restore-to-full-grid semantics; an older daemon
-/// would leave a small viewport stuck in focused-pane mode.
-pub const PROTOCOL_VERSION: u16 = 4;
+/// would leave a small viewport stuck in focused-pane mode. Version 5 removes
+/// cold-recovery metadata and pane snapshot fields; saved layouts now always
+/// start fresh shells.
+pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
@@ -271,8 +273,6 @@ pub struct AttachInfo {
     pub session: SessionSummary,
     /// One-time token used by the separate events pipe.
     pub stream_token: String,
-    pub cold_recovered: bool,
-    pub recovery_notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,7 +299,6 @@ pub struct SessionSummary {
     pub live: bool,
     pub pane_count: usize,
     pub tab_count: usize,
-    pub cold_recovered_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -364,7 +363,6 @@ pub struct PaneView {
     pub scroll_offset: usize,
     pub history_lines: usize,
     pub bell_seq: u64,
-    pub cold_restored: bool,
     pub focused: bool,
 }
 
