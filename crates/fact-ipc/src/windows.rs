@@ -580,9 +580,24 @@ mod tests {
     #[test]
     fn current_user_security_descriptor_parses() {
         let security = PipeSecurity::current_user_only().unwrap();
-        assert!(security.sddl().contains("S-1-"));
-        assert!(security.sddl().starts_with("D:P"));
-        assert!(!security.sddl().contains("WD)"));
+        let sddl = security.sddl();
+        assert!(sddl.contains("S-1-"));
+        assert!(sddl.starts_with("D:P"));
+        assert_eq!(
+            sddl.matches("(A;;GA;;;").count(),
+            2,
+            "pipe DACL should grant exactly the current user and SYSTEM: {sddl}"
+        );
+        assert!(
+            sddl.contains("(A;;GA;;;SY)"),
+            "pipe DACL is missing SYSTEM: {sddl}"
+        );
+        for broad in ["WD", "BU", "AU", "AN", "AC", "OW"] {
+            assert!(
+                !sddl.contains(&format!(";;;{broad})")),
+                "pipe DACL grants broad access to {broad}: {sddl}"
+            );
+        }
     }
 
     #[test]
