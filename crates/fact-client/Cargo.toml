@@ -15,5 +15,6 @@ fact-config = { path = "../fact-config" }
 fact-ipc = { path = "../fact-ipc" }
 fact-layout = { path = "../fact-layout" }
 fact-protocol = { path = "../fact-protocol" }
+fact-runtime = { path = "../fact-runtime" }
 ratatui.workspace = true
 serde.workspace = true
