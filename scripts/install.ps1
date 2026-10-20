@@ -173,6 +173,27 @@ function Stop-InstalledDaemon([string]$Executable) {
     Start-Sleep -Milliseconds 500
 }
 
+function Remove-StaleDaemonIdentity {
+    $dataRoot = if ($env:FACT_HOME) { $env:FACT_HOME } else { Join-Path $env:LOCALAPPDATA "FACT" }
+    $identityPath = Join-Path $dataRoot "runtime\daemon.json"
+    if (-not (Test-Path -LiteralPath $identityPath)) {
+        return
+    }
+    $daemonId = $null
+    try {
+        $daemonId = (Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json).pid
+    } catch {
+        # A malformed identity is stale by definition; remove it below.
+    }
+    if ($daemonId) {
+        $live = Get-Process -Id $daemonId -ErrorAction SilentlyContinue
+        if ($live) {
+            return
+        }
+    }
+    Remove-Item -LiteralPath $identityPath -Force -ErrorAction SilentlyContinue
+}
+
 function Copy-WithRetry([string]$Source, [string]$Destination) {
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         try {
@@ -295,6 +316,7 @@ try {
     if ($replacingExisting) {
         Write-Step "Stopping the existing FACT daemon"
         Stop-InstalledDaemon $installedExe
+        Remove-StaleDaemonIdentity
     }
 
     Write-Step "Installing to $InstallDir"

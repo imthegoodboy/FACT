@@ -31,8 +31,8 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Sessions | Schema migration, save/load, case-insensitive names, checksum and layout corruption rejection, export/import copy semantics, archive/delete. |
 | Daemon | Grid of eight independent shells, live detach/reattach PID preservation, cold recovery, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
-| Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. |
+| Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. A replacement install also proves a dead daemon identity is cleared. |
+| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes cold, checks the recovery modal and proves a new shell PID accepts input. A seventh writes a stale protocol-3 identity and proves startup clears it and renders a live pane. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
@@ -50,6 +50,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Clean, controllable UI | Layout tests prove 8 panes retain full content height and fit 120x35, 100x30 and 80x24. Client unit tests cover tab/new-tab geometry, the bottom-right minimized tray, scrollbar geometry and steady cursor styles. The real-ConPTY TUI test renders the screen and rejects pane-header buttons, shell paths, PIDs, pane counts, focused-mode labels, session names and theme names. |
 | Recover from a narrow window | Layout tests prove `zoom(false)`/`fit_all` keeps all eight panes visible at 60x18 and survives serialization. The real-ConPTY `maximize_and_show_all_work_in_a_small_window` test presses prefix+M/N and counts the rendered panes. |
 | Safe nested launch | The real-ConPTY `nested_launch_is_rejected_inside_a_pane` test launches `fact --grid 1` inside a pane and checks for the explicit refusal instead of a black second UI. |
+| Upgrade over a stale daemon | The startup unit test removes an unusable protocol-3 identity; the real-ConPTY stale-identity test proves the TUI then starts; the installer replacement test proves a dead identity is cleared. A live incompatible daemon is never overwritten and produces a stop-and-retry error. |
 | Windows CI on every PR | `.github/workflows/ci.yml` runs format, Clippy and the full suite on `windows-latest` for every pull request. |
 
 A true second-Windows-user connection test requires creating a local account or
@@ -70,9 +71,12 @@ These are intentionally not mock tests:
   is still live with eight panes. Another test first detaches a one-pane session,
   then proves a bare `fact --grid 8` creates `grid-8` instead of attaching to it.
   A third snapshots, stops the daemon, resumes cold, dismisses the recovery modal
-  and verifies a new shell PID. Set `FACT_SMOKE_EXE` to run the three tests
-  against a downloaded release binary instead of the test build. Restored visual content and no-command-replay behavior are
-  asserted directly by the daemon cold-recovery test.
+  and verifies a new shell PID. Further tests cover a second live client, a
+  60x18 grid recovering with prefix+M/N, nested-launch refusal and a stale
+  protocol-3 identity that must not block startup. Set `FACT_SMOKE_EXE` to run
+  all seven tests against a downloaded release binary instead of the test build.
+  Restored visual content and no-command-replay behavior are asserted directly
+  by the daemon cold-recovery test.
 - Tests wait for frames and output with deadlines rather than fixed sleeps where
   possible. Cold-recovery assertions search the terminal buffer for restored
   output because a new shell's banner can scroll the restored screen.
@@ -105,7 +109,7 @@ artifact. A tag cannot bypass a failing test.
 - Development and manual verification: Windows 11.
 - CI: GitHub's current Windows Server runner, which is not the same as Windows
   11 or Windows 10.
-- Windows 10 1809+: intended, but not verified for v0.2.2. Do not claim support
+- Windows 10 1809+: intended, but not verified for v0.2.3. Do not claim support
   until a run on a physical or VM Windows 10 installation passes the suite.
 
 ## Manual smoke check

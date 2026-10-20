@@ -157,6 +157,47 @@ fn wait_for_marker_pid(
 }
 
 #[test]
+fn stale_daemon_identity_does_not_block_launch() {
+    let home = TestHome::new("tui-stale-identity");
+    let runtime = home.path.join("runtime");
+    fs::create_dir_all(&runtime).expect("create runtime directory");
+    let stale = serde_json::json!({
+        "protocol": 3,
+        "daemon_version": "0.2.1",
+        "pid": 999_999,
+        "token": "a".repeat(64),
+        "pipe": format!(r"\\.\pipe\fact-stale-tui-{}", std::process::id()),
+        "started_at_ms": 0,
+    });
+    fs::write(runtime.join("daemon.json"), stale.to_string()).expect("write stale identity");
+
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--session".into(),
+        "stale-smoke".into(),
+        "--grid".into(),
+        "1".into(),
+    ];
+    let process = PtyProcess::spawn(options).expect("start FACT with a stale identity");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(&process, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
+        "a stale daemon identity blocked the launch:\n{}",
+        tail(&output)
+    );
+    process.write(b"\x02d").expect("detach the TUI");
+    let exit = process.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the recovered TUI did not detach cleanly:\n{}",
+        tail(&output)
+    );
+}
+
+#[test]
 fn tui_cold_recovers_and_starts_new_shells() {
     const COLD_SESSION: &str = "cold-smoke";
     const OLD_MARKER: &str = "FACT_OLD_PID_";

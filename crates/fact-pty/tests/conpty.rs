@@ -82,6 +82,10 @@ fn resize_then_continue() {
     let process = PtyProcess::spawn(options).unwrap();
     std::thread::sleep(Duration::from_millis(200));
     process.resize(120, 40).unwrap();
+    // ConPTY rebuilds the console around a resize; input sent in the same
+    // instant can be discarded. Give the resize a moment to settle, as a real
+    // client does between redrawing and accepting the next keystroke.
+    std::thread::sleep(Duration::from_millis(300));
     process.write(b"echo FACT_RESIZED\r\nexit\r\n").unwrap();
     let (output, _) = collect(&process, Duration::from_secs(15));
     assert!(String::from_utf8_lossy(&output).contains("FACT_RESIZED"));

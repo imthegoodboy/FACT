@@ -26,6 +26,16 @@ pub fn ensure_daemon(
     match connect(paths) {
         Ok(connected) => return Ok(connected),
         Err(error) if should_start(&error) => {}
+        Err(RuntimeError::InvalidIdentity(message)) => {
+            // An upgrade can leave a daemon identity from a previous protocol
+            // (or a crashed daemon's stale file) behind. If no process still
+            // owns the pipe, clear it and start a fresh daemon. If the old
+            // daemon is still alive, keep the file and report it clearly so we
+            // never race two daemons for the same pipe.
+            recover_invalid_identity(paths).with_context(|| {
+                format!("could not clear the previous daemon identity ({message})")
+            })?;
+        }
         Err(error) => return Err(error).context("could not connect to the FACT daemon"),
     }
 
@@ -109,6 +119,40 @@ fn should_start(error: &RuntimeError) -> bool {
     )
 }
 
+/// Recover from an identity file that `connect` rejected before opening the
+/// authenticated pipe. A live incompatible daemon is never overwritten; stale
+/// files left by an upgrade or a crash are removed so the next launch can start
+/// the current daemon.
+fn recover_invalid_identity(paths: &Paths) -> Result<()> {
+    let identity_path = &paths.daemon_json;
+    if !identity_path.exists() {
+        return Ok(());
+    }
+    if let Ok(text) = std::fs::read_to_string(identity_path) {
+        if let Ok(identity) = serde_json::from_str::<DaemonIdentity>(&text) {
+            let plausible_pipe = identity.pipe.starts_with(r"\\.\pipe\fact-")
+                && identity.pipe.len() <= 256
+                && !identity.pipe[r"\\.\pipe\".len()..].contains('\\');
+            if plausible_pipe && fact_ipc::client_connect(&identity.pipe).is_ok() {
+                bail!(
+                    "an incompatible FACT daemon (version {}, protocol {}) is still running on {}. \
+                     Stop that daemon with the previous fact.exe, then try again.",
+                    identity.daemon_version,
+                    identity.protocol,
+                    identity.pipe
+                );
+            }
+        }
+    }
+    match std::fs::remove_file(identity_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("could not remove {}", identity_path.display()))
+        }
+    }
+}
+
 fn spawn_daemon(paths: &Paths, config_override: Option<&PathBuf>) -> Result<Child> {
     let executable = std::env::current_exe().context("could not locate the FACT executable")?;
     let log = OpenOptions::new()
@@ -167,4 +211,28 @@ fn read_tail(path: &std::path::Path, limit: u64) -> String {
     let mut bytes = Vec::new();
     let _ = file.read_to_end(&mut bytes);
     String::from_utf8_lossy(&bytes).replace('\0', "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_identity_from_an_older_protocol_is_removed() {
+        let dir = tempfile::tempdir().expect("create temp directory");
+        let paths = Paths::from_parts(dir.path().join("home"), dir.path().join("config.toml"));
+        paths.ensure().expect("create test paths");
+        let stale = DaemonIdentity {
+            protocol: fact_protocol::PROTOCOL_VERSION.saturating_sub(1),
+            daemon_version: "0.2.1".into(),
+            pid: 999_999,
+            token: "a".repeat(64),
+            pipe: format!(r"\\.\pipe\fact-stale-{}", std::process::id()),
+            started_at_ms: 0,
+        };
+        std::fs::write(&paths.daemon_json, serde_json::to_vec(&stale).unwrap())
+            .expect("write stale identity");
+        recover_invalid_identity(&paths).expect("clear stale identity");
+        assert!(!paths.daemon_json.exists());
+    }
 }
