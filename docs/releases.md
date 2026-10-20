@@ -109,8 +109,9 @@ root.
    - `cargo test --workspace --no-fail-fast`.
 
    Only then does the `package` job build `--release --locked`, smoke-test the
-   binary, create the zip and `SHA256SUMS.txt`, upload the workflow artifact and
-   publish the GitHub release.
+   binary, create the zip and `SHA256SUMS.txt` and upload the workflow artifact.
+   It creates a **draft** GitHub release, verifies that both expected assets are
+   attached, and only then publishes the draft.
 7. Verify the published assets from a clean directory:
 
    ```powershell
@@ -149,6 +150,9 @@ fact-v0.1.0-x86_64-pc-windows-msvc/
 - Use semantic versioning. A tag is `v` plus the workspace version.
 - Tags are immutable. If an artifact is wrong, do not move the tag or force-push.
   Publish a new patch release with the fix.
+- If the workflow fails after creating the draft, the draft is not a release.
+  Inspect it, delete the incomplete draft, fix the cause and publish a new patch
+  tag. Never publish a draft whose assets were not produced by a green gate run.
 - A bad release can be marked as a pre-release or removed from the releases page,
   but users who already downloaded it are not affected retroactively. Rotate any
   credentials that may have been exposed.

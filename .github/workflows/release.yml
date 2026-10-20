@@ -134,10 +134,27 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $assets = @(Get-ChildItem -LiteralPath "dist" -File | ForEach-Object { $_.FullName })
           if ($assets.Count -lt 2) { throw "Expected a zip and SHA256SUMS.txt" }
+          $expected = @($assets | ForEach-Object { Split-Path $_ -Leaf })
+
+          # Create a draft first. A public release must never exist with a
+          # partial or unverified asset set.
           gh release create $tag @assets `
             --repo $env:GITHUB_REPOSITORY `
             --title "FACT $tag" `
             --generate-notes `
             --verify-tag `
-            --latest
+            --draft
           if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+
+          $release = gh release view $tag --repo $env:GITHUB_REPOSITORY --json isDraft,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect the draft release" }
+          if (-not $release.isDraft) { throw "Release $tag is public before asset verification" }
+          $uploaded = @($release.assets | ForEach-Object { $_.name })
+          foreach ($name in $expected) {
+            if ($uploaded -notcontains $name) { throw "Draft release is missing $name" }
+          }
+          Write-Host "Draft assets verified: $($uploaded -join ', ')"
+
+          gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw "gh release edit failed; the draft was not published" }
+          Write-Host "Published $tag with $($uploaded.Count) assets"
