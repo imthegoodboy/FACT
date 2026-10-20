@@ -53,9 +53,11 @@ pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("close_pane", "Close pane"),
     ("close_tab", "Close tab"),
     ("restart_pane", "Restart pane"),
-    ("zoom", "Maximize / restore pane"),
+    ("zoom", "Toggle maximize / full grid"),
+    ("maximize", "Maximize focused pane"),
+    ("show_all", "Show all panes"),
     ("minimize", "Minimize pane"),
-    ("restore", "Restore panes"),
+    ("restore", "Restore minimized panes"),
     ("focus_left", "Focus left"),
     ("focus_right", "Focus right"),
     ("focus_up", "Focus up"),
@@ -867,6 +869,11 @@ impl App {
             return;
         }
 
+        if let Some(action) = direct_grid_action(key) {
+            self.do_action(action);
+            return;
+        }
+
         // Windows-terminal muscle memory: Ctrl+C copies a visible selection,
         // Ctrl+V pastes, and Ctrl/Shift+Insert are accepted as aliases.
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -978,10 +985,19 @@ impl App {
                 }
             }
             "zoom" => {
-                if let Some(tab) = self.active_tab() {
-                    let zoomed = !tab.zoomed;
-                    let _ = self.send(Command::ZoomPane { zoomed });
-                }
+                // When the window is too small the daemon falls back to
+                // focused-pane mode without setting the tab's zoom flag. In
+                // that state the useful toggle is "show all", not another
+                // no-op maximize request.
+                let tiny = self.frame.as_ref().is_some_and(|frame| frame.tiny_mode);
+                let zoomed = !tiny && self.active_tab().is_some_and(|tab| !tab.zoomed);
+                let _ = self.send(Command::ZoomPane { zoomed });
+            }
+            "maximize" => {
+                let _ = self.send(Command::ZoomPane { zoomed: true });
+            }
+            "show_all" => {
+                let _ = self.send(Command::ZoomPane { zoomed: false });
             }
             "minimize" => {
                 if let Some(pane) = self.focused_id() {
@@ -1607,6 +1623,8 @@ impl App {
                         actions: vec![
                             "split_right",
                             "split_down",
+                            "maximize",
+                            "show_all",
                             "zoom",
                             "minimize",
                             "new_tab",
@@ -1921,6 +1939,20 @@ fn filtered_palette<'a>(items: &'a [PaletteItem], query: &str) -> Vec<&'a Palett
         .collect()
 }
 
+/// Direct M/N aliases for maximize/show-all. Ctrl+M is indistinguishable from
+/// Enter in terminal input, so Alt is the safe modifier for a direct chord; the
+/// remappable prefix+M/N bindings do the same thing.
+fn direct_grid_action(key: KeyEvent) -> Option<&'static str> {
+    if !key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+    match key.code {
+        CKeyCode::Char('m' | 'M') => Some("maximize"),
+        CKeyCode::Char('n' | 'N') => Some("show_all"),
+        _ => None,
+    }
+}
+
 pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
     let mut lines: Vec<(String, String)> = ACTION_INFO
         .iter()
@@ -1945,6 +1977,7 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
         "Select text".into(),
         "drag in a pane (Shift+drag if the app uses the mouse)".into(),
     ));
+    lines.push(("Direct maximize / show all".into(), "Alt+M / Alt+N".into()));
     lines.push(("Prefix".into(), keys.prefix.to_string()));
     lines
 }
@@ -2051,6 +2084,25 @@ mod tests {
             end: (3, 0),
         };
         assert_eq!(selection_text(&buffers, &selection).unwrap(), "界 !");
+    }
+
+    #[test]
+    fn alt_m_and_alt_n_are_direct_grid_actions() {
+        let alt_m = KeyEvent::new(CKeyCode::Char('m'), KeyModifiers::ALT);
+        let alt_n = KeyEvent::new(CKeyCode::Char('n'), KeyModifiers::ALT);
+        assert_eq!(direct_grid_action(alt_m), Some("maximize"));
+        assert_eq!(direct_grid_action(alt_n), Some("show_all"));
+        assert_eq!(
+            direct_grid_action(KeyEvent::new(CKeyCode::Char('m'), KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(
+            direct_grid_action(KeyEvent::new(
+                CKeyCode::Char('n'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT
+            )),
+            None
+        );
     }
 
     #[test]

@@ -3,6 +3,31 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.2.2] - 2026-10-21
+
+### Fixed
+
+- A narrow window no longer traps the TUI in focused-pane mode. `Alt+N` (or
+  prefix then `N`) shows the full grid even below `min_pane_width`/
+  `min_pane_height`, and `Alt+M` (or prefix then `M`) maximizes the focused pane.
+  Restoring a zoomed pane also restores the full grid instead of falling back to
+  focused-pane mode.
+- Running `fact` or `fact attach` inside a FACT pane now fails with a clear
+  message instead of nesting a second UI in the same terminal and rendering a
+  black screen. Every pane receives `FACT_SESSION`/`FACT_PANE`; set
+  `FACT_ALLOW_NESTED=1` only for deliberate nested testing.
+- The minimized-pane restore binding moved to prefix then `Shift+U`, next-tab to
+  prefix then `Shift+N`, and minimize to prefix then `Shift+M`, leaving `M`/`N`
+  for maximize/show-all.
+
+### Changed
+
+- The right-click menu and command palette include Maximize focused pane and
+  Show all panes.
+- The wire protocol is now version 4 because restoring a zoomed pane has
+  full-grid semantics. The installer stops the previous daemon; saved sessions
+  cold-recover on the next launch.
+
 ## [0.2.1] - 2026-10-20
 
 ### Fixed
@@ -128,6 +153,7 @@ All notable changes to FACT are documented here. The format follows
 - Terminal snapshots are visual state, not process resurrection; unsaved work in
   a lost process cannot be recovered.
 
+[0.2.2]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.2
 [0.2.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.1
 [0.2.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.0
 [0.1.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.1.0

@@ -396,6 +396,210 @@ fn grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session() {
 }
 
 #[test]
+fn second_client_attaches_to_the_live_grid() {
+    let home = TestHome::new("tui-second-client");
+    let args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--grid".into(),
+        "8".into(),
+    ];
+
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = args.clone();
+    let first = PtyProcess::spawn(options).expect("start the first grid client");
+    let mut first_output = Vec::new();
+    assert!(
+        wait_for(
+            &first,
+            &mut first_output,
+            SHELL_PROMPT,
+            Duration::from_secs(30)
+        ),
+        "the first grid client did not render:\n{}",
+        tail(&first_output)
+    );
+
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = args;
+    let second = PtyProcess::spawn(options).expect("start the second grid client");
+    let mut second_output = Vec::new();
+    assert!(
+        wait_for(
+            &second,
+            &mut second_output,
+            SHELL_PROMPT,
+            Duration::from_secs(30)
+        ),
+        "the second client rendered a blank screen:\n{}",
+        tail(&second_output)
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut screen = screen_text(&second_output, 120, 35);
+    while screen.matches("PS").count() < 8 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        drain(&second, &mut second_output);
+        screen = screen_text(&second_output, 120, 35);
+    }
+    assert!(
+        screen.matches("PS").count() >= 8,
+        "the second client did not show the full grid:\n{screen}"
+    );
+
+    second
+        .write(b"\x02d")
+        .expect("detach the second grid client");
+    let exit = second.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the second grid client did not detach:\n{}",
+        tail(&second_output)
+    );
+
+    thread::sleep(Duration::from_millis(300));
+    drain(&first, &mut first_output);
+    let first_screen = screen_text(&first_output, 120, 35);
+    assert!(
+        first_screen.matches("PS").count() >= 8,
+        "the first client lost its grid after the second detached:\n{first_screen}"
+    );
+
+    first.write(b"\x02d").expect("detach the first grid client");
+    let exit = first.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the first grid client did not detach:\n{}",
+        tail(&first_output)
+    );
+}
+
+#[test]
+fn maximize_and_show_all_work_in_a_small_window() {
+    let home = TestHome::new("tui-maximize");
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 60, 18);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--grid".into(),
+        "8".into(),
+    ];
+    let process = PtyProcess::spawn(options).expect("start the small grid client");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(&process, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
+        "the small grid client did not render:\n{}",
+        tail(&output)
+    );
+
+    // The window is below min_pane_width, so FACT starts in focused-pane mode.
+    // Prefix+N explicitly restores the full grid.
+    process.write(b"\x02n").expect("show every pane");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut screen = screen_text(&output, 60, 18);
+    while screen.matches("PS").count() < 8 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        drain(&process, &mut output);
+        screen = screen_text(&output, 60, 18);
+    }
+    assert!(
+        screen.matches("PS").count() >= 8,
+        "show-all did not render the eight-pane grid:\n{screen}"
+    );
+
+    // Prefix+M maximizes the focused pane even from the fit-all grid. Wait for
+    // the daemon frame instead of assuming a fixed redraw latency; CI runners
+    // can take longer than the local machine.
+    process.write(b"\x02m").expect("maximize the focused pane");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut screen = screen_text(&output, 60, 18);
+    while screen.matches("PS").count() > 1 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        drain(&process, &mut output);
+        screen = screen_text(&output, 60, 18);
+    }
+    assert!(
+        screen.matches("PS").count() <= 1,
+        "maximize left more than one pane visible:\n{screen}"
+    );
+
+    // Prefix+N brings the grid back again.
+    process.write(b"\x02n").expect("show every pane again");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut screen = screen_text(&output, 60, 18);
+    while screen.matches("PS").count() < 8 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        drain(&process, &mut output);
+        screen = screen_text(&output, 60, 18);
+    }
+    assert!(
+        screen.matches("PS").count() >= 8,
+        "show-all did not restore the grid after maximize:\n{screen}"
+    );
+
+    process.write(b"\x02d").expect("detach the grid client");
+    let exit = process.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the small grid client did not detach:\n{}",
+        tail(&output)
+    );
+}
+
+#[test]
+fn nested_launch_is_rejected_inside_a_pane() {
+    let home = TestHome::new("tui-nested");
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--session".into(),
+        "nested".into(),
+        "--grid".into(),
+        "1".into(),
+    ];
+    let process = PtyProcess::spawn(options).expect("start the outer grid client");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(&process, &mut output, SHELL_PROMPT, Duration::from_secs(30)),
+        "the outer grid client did not render:\n{}",
+        tail(&output)
+    );
+
+    let command = format!("& '{}' --grid 1\r", fact_exe().display());
+    process
+        .write(command.as_bytes())
+        .expect("run a nested FACT launch");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut screen = String::new();
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+        drain(&process, &mut output);
+        screen = screen_text(&output, 120, 35);
+        if screen.contains("already running in this pane") {
+            break;
+        }
+    }
+    assert!(
+        screen.contains("already running in this pane"),
+        "the nested launch was not rejected:\n{screen}"
+    );
+
+    process
+        .write(b"\x02d")
+        .expect("detach the outer grid client");
+    let exit = process.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the outer grid client did not detach:\n{}",
+        tail(&output)
+    );
+}
+
+#[test]
 fn tui_renders_accepts_input_and_detaches_cleanly() {
     let home = TestHome::new("tui");
     let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);

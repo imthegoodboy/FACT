@@ -10,14 +10,23 @@ use serde::{Deserialize, Serialize};
 /// interpret safely, even if bincode can still decode the message shape.
 /// Version 2 added the direct scroll-offset command. Version 3 removed the pane
 /// title row from slot geometry and made chrome rows conditional; an older
-/// client would render every pane one row too low.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// client would render every pane one row too low. Version 4 gives
+/// `ZoomPane { zoomed: false }` restore-to-full-grid semantics; an older daemon
+/// would leave a small viewport stuck in focused-pane mode.
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SESSIONS: usize = 128;
 pub const MAX_GRID_PANES: u8 = 32;
 pub const MAX_SEARCH_QUERY: usize = 256;
+
+/// Environment variables injected into every shell started by FACT. They let a
+/// nested `fact` invocation fail with a useful message instead of attaching to
+/// the session that owns the pane it is running inside.
+pub const ENV_SESSION: &str = "FACT_SESSION";
+pub const ENV_PANE: &str = "FACT_PANE";
+pub const ENV_ALLOW_NESTED: &str = "FACT_ALLOW_NESTED";
 
 /// Cell drawing flags. Kept as a plain bitfield for protocol stability.
 pub mod cell_flags {

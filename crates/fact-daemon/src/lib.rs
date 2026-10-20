@@ -7,7 +7,7 @@
 
 mod manager;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
 use std::thread;
@@ -29,6 +29,7 @@ use manager::SessionManager;
 const TICK: Duration = Duration::from_millis(33);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const EVENT_QUEUE: usize = 8;
+static NEXT_SUBSCRIBER_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Start a daemon using the configuration file for `paths`.
 pub fn run(paths: Paths) -> anyhow::Result<()> {
@@ -106,14 +107,18 @@ pub fn run_with_config(paths: Paths, config: Config) -> anyhow::Result<()> {
                 }
             }
             Ok(DaemonEvent::Subscribe {
+                id,
                 token: stream_token,
                 tx,
             }) => {
-                if let Err(error) = manager.subscribe(&stream_token, tx.clone()) {
+                if let Err(error) = manager.subscribe(id, &stream_token, tx.clone()) {
                     let _ = tx.try_send(ServerMessage::Fatal(error));
                 } else {
                     manager.tick();
                 }
+            }
+            Ok(DaemonEvent::Unsubscribe { id }) => {
+                manager.unsubscribe(id);
             }
             Err(RecvTimeoutError::Timeout) => manager.tick(),
             Err(RecvTimeoutError::Disconnected) => {
@@ -155,8 +160,12 @@ enum DaemonEvent {
         reply: SyncSender<Result<ResponsePayload, ProtocolError>>,
     },
     Subscribe {
+        id: u64,
         token: String,
         tx: SyncSender<ServerMessage>,
+    },
+    Unsubscribe {
+        id: u64,
     },
 }
 
@@ -288,15 +297,23 @@ fn handle_connection(
                 }
             }
             ClientMessage::Subscribe { token } => {
+                let id = NEXT_SUBSCRIBER_ID.fetch_add(1, Ordering::Relaxed);
                 let (tx, rx) = mpsc::sync_channel::<ServerMessage>(EVENT_QUEUE);
-                if events.send(DaemonEvent::Subscribe { token, tx }).is_err() {
+                if events
+                    .send(DaemonEvent::Subscribe { id, token, tx })
+                    .is_err()
+                {
                     return;
                 }
-                for message in rx {
+                while let Ok(message) = rx.recv() {
                     if send_server(&mut connection, &message).is_err() {
-                        return;
+                        break;
                     }
                 }
+                // The event stream is the lifetime of the subscriber. Tell the
+                // manager even when the pipe closed on the last frame so
+                // `fact stats` does not count dead clients forever.
+                let _ = events.send(DaemonEvent::Unsubscribe { id });
                 return;
             }
             ClientMessage::Hello(_) => {

@@ -95,8 +95,13 @@ pane has no title row: terminal content uses the full slot height. The daemon
 subtracts one row from the client viewport only when the session has more than
 one tab; a single-tab session has no persistent chrome at all. When slots fall
 below `min_pane_width` or `min_pane_height`, the layout switches to focused-pane
-mode instead of rendering unusably small terminals. Minimized panes keep their
-processes and terminal state; zoom shows only the focused pane.
+mode instead of rendering unusably small terminals. The explicit show-all
+action sets a per-tab `fit_all` flag that bypasses those minimums; restoring a
+zoomed pane turns it on so a resize can never trap the UI in focused-pane mode.
+Minimized panes keep their processes and terminal state; zoom shows only the
+focused pane. Every pane is started with `FACT_SESSION` and `FACT_PANE` in its
+environment, which lets the CLI reject a nested TUI launch instead of attaching
+to the session that owns the current terminal.
 
 ## Frame protocol
 
