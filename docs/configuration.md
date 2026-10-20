@@ -173,7 +173,7 @@ that is not a FACT binding is sent to the focused shell.
 | Close pane | `close_pane` | Prefix then `X` |
 | Close tab | `close_tab` | Prefix then `Shift+X` |
 | Restart pane | `restart_pane` | Prefix then `Shift+R` |
-| Zoom pane | `zoom` | Prefix then `Z` |
+| Maximize / restore pane | `zoom` | Prefix then `Z` |
 | Minimize pane | `minimize` | Prefix then `M` |
 | Restore panes | `restore` | Prefix then `Shift+M` |
 | Focus left/right/up/down | `focus_left`, `focus_right`, `focus_up`, `focus_down` | Prefix then arrow key |
@@ -188,8 +188,8 @@ that is not a FACT binding is sent to the focused shell.
 | Switch session | `sessions` | Prefix then `S` |
 | Detach, keep shells | `detach` | Prefix then `D` |
 | Help | `help` | `F1` |
-| Copy selection | `copy` | `Ctrl+Shift+C` |
-| Paste | `paste` | `Ctrl+Shift+V` |
+| Copy selection | `copy` | `Ctrl+Shift+C` or `Ctrl+C` with a selection |
+| Paste | `paste` | `Ctrl+Shift+V` or `Ctrl+V` |
 | Quit UI | `quit` | Prefix then `Shift+Q` |
 | Swap with next pane | `swap_pane` | Prefix then `W` |
 | Move pane to next tab | `move_pane` | Prefix then `Shift+O` |
@@ -201,8 +201,12 @@ Additional interaction that is not a configurable chord:
 - Drag in pane content to select text; `Shift`+drag selects even when the
   application has requested mouse reporting.
 - Click a tab to select it and click a pane title or pane body to focus it.
-- The mouse wheel is forwarded to the focused application when it requested
-  mouse reporting.
+- Pane header buttons: `V` splits right, `H` splits down, `_` minimizes, `^`
+  maximizes and `v` restores, and `X` closes. The `+` button adds a tab.
+- Click or drag the scrollbar to move through scrollback. The mouse wheel is
+  forwarded to the focused application when it requested mouse reporting.
+- `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Insert` /
+  `Shift+Insert` are accepted aliases outside the remappable action table.
 
 `F1` help and the palette show the bindings currently compiled from this file,
 including your overrides.

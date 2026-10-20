@@ -6,7 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Bumped when command/frame variants change in a way that a previous daemon
+/// cannot decode. Version 2 added the direct scroll-offset command.
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
@@ -209,6 +211,12 @@ pub enum Command {
     DragSplit {
         path: Vec<u8>,
         ratio: f32,
+    },
+    /// Set the scrollback offset directly (0 = live output). Appended last to
+    /// keep the existing variant indices stable.
+    SetScrollOffset {
+        pane: u64,
+        offset: usize,
     },
 }
 
@@ -579,6 +587,35 @@ pub fn sanitize_title(input: &str) -> String {
     }
 }
 
+/// Turn the noisy title a shell publishes (often a full executable path) into a
+/// short label that is safe to show in a tab or pane header.
+pub fn friendly_title(input: &str) -> String {
+    // Strip the path before applying the 80-character display cap: Windows
+    // shell titles routinely start with a long WindowsApps path ending in the
+    // actual executable name.
+    let cleaned: String = input.chars().filter(|c| !c.is_control()).collect();
+    let text = cleaned.trim();
+    let base = text.rsplit(['\\', '/']).next().unwrap_or(text).trim();
+    let base = base
+        .get(base.len().saturating_sub(4)..)
+        .filter(|suffix| suffix.eq_ignore_ascii_case(".exe"))
+        .map(|_| &base[..base.len() - 4])
+        .unwrap_or(base);
+    let lower = base.to_ascii_lowercase();
+    let label = match lower.as_str() {
+        "pwsh" | "powershell" | "powershell_ise" => "PowerShell".to_string(),
+        "cmd" | "command" => "Command Prompt".to_string(),
+        "wsl" | "wslhost" => "WSL".to_string(),
+        "bash" => "Bash".to_string(),
+        "zsh" => "Zsh".to_string(),
+        "fish" => "Fish".to_string(),
+        "nu" | "nushell" => "Nushell".to_string(),
+        "" => "Shell".to_string(),
+        _ => base.to_string(),
+    };
+    sanitize_title(&label)
+}
+
 pub fn truncate_text(text: &str, max_chars: usize) -> String {
     let mut out = String::new();
     for (i, c) in text.chars().enumerate() {
@@ -611,6 +648,28 @@ mod tests {
         assert_eq!(sanitize_title("\u{1b}[31mred"), "[31mred");
         assert_eq!(sanitize_title("   "), "Shell");
         assert!(sanitize_title(&"x".repeat(200)).chars().count() <= 80);
+    }
+
+    #[test]
+    fn shell_paths_become_friendly_titles() {
+        assert_eq!(
+            friendly_title(
+                r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.6.7.0_x64__8wekyb3d8bbwe\pwsh.exe"
+            ),
+            "PowerShell"
+        );
+        assert_eq!(
+            friendly_title(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+            "PowerShell"
+        );
+        assert_eq!(
+            friendly_title(r"C:\Windows\System32\cmd.exe"),
+            "Command Prompt"
+        );
+        assert_eq!(friendly_title("pwsh"), "PowerShell");
+        assert_eq!(friendly_title("claude"), "claude");
+        assert_eq!(friendly_title("日本語"), "日本語");
+        assert_eq!(friendly_title("   "), "Shell");
     }
 
     #[test]

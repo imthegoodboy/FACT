@@ -917,7 +917,11 @@ mod tests {
         assert!(t.history_lines() >= 40);
         t.scroll(10);
         assert_eq!(t.scroll_offset(), 10);
-        t.scroll_to_bottom();
+        t.set_scroll_offset(25);
+        assert_eq!(t.scroll_offset(), 25);
+        t.set_scroll_offset(usize::MAX);
+        assert_eq!(t.scroll_offset(), t.history_lines());
+        t.set_scroll_offset(0);
         assert_eq!(t.scroll_offset(), 0);
         let (hits, truncated) = t.search("line-042", true, 10);
         assert!(!truncated);

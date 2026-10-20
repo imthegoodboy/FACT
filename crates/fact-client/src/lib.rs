@@ -29,7 +29,7 @@ use crossterm::terminal::{
 };
 use fact_config::{CompiledKeybinds, Config};
 use fact_protocol::{
-    cell_flags, pane_modes, AttachInfo, CellDto, Command, Frame, PaneView, RectDto,
+    cell_flags, friendly_title, pane_modes, AttachInfo, CellDto, Command, Frame, PaneView, RectDto,
     ResponsePayload, SearchResult, SessionSummary, SplitDirection, SplitOrientation, TabView,
     MAX_PASTE_BYTES, MAX_SEARCH_QUERY,
 };
@@ -42,13 +42,21 @@ const FRAME_POLL: Duration = Duration::from_millis(30);
 const EVENT_POLL: Duration = Duration::from_millis(10);
 const STATUS_LIFETIME: Duration = Duration::from_secs(6);
 
+/// Width of the new-tab button in the tab strip.
+const NEW_TAB_WIDTH: u16 = 3;
+/// Cap a single tab so one long title cannot push every other tab off-screen.
+const TAB_MAX_WIDTH: u16 = 24;
+/// Five two-column pane-header buttons (`V H _ ^ X`).
+const PANE_BUTTON_WIDTH: u16 = 2;
+const PANE_BUTTONS_WIDTH: u16 = PANE_BUTTON_WIDTH * 5;
+
 pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("split_right", "Split right"),
     ("split_down", "Split down"),
     ("close_pane", "Close pane"),
     ("close_tab", "Close tab"),
     ("restart_pane", "Restart pane"),
-    ("zoom", "Zoom pane"),
+    ("zoom", "Maximize / restore pane"),
     ("minimize", "Minimize pane"),
     ("restore", "Restore panes"),
     ("focus_left", "Focus left"),
@@ -324,6 +332,247 @@ struct DragSplit {
     last_sent: Instant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneChromeAction {
+    SplitRight,
+    SplitDown,
+    Minimize,
+    ToggleZoom,
+    Close,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaneButton {
+    action: PaneChromeAction,
+    x: u16,
+}
+
+/// The header controls are right-aligned and share one render/hit-test layout.
+/// Each button owns two columns: the glyph and the blank separator after it.
+fn pane_buttons(width: u16) -> Vec<PaneButton> {
+    if width < PANE_BUTTONS_WIDTH + 2 {
+        return Vec::new();
+    }
+    let start = width - PANE_BUTTONS_WIDTH;
+    let buttons = [
+        PaneChromeAction::SplitRight,
+        PaneChromeAction::SplitDown,
+        PaneChromeAction::Minimize,
+        PaneChromeAction::ToggleZoom,
+        PaneChromeAction::Close,
+    ];
+    buttons
+        .into_iter()
+        .enumerate()
+        .map(|(index, action)| PaneButton {
+            action,
+            x: start + index as u16 * PANE_BUTTON_WIDTH,
+        })
+        .collect()
+}
+
+fn pane_button_strip(zoomed: bool) -> String {
+    format!("V H _ {} X ", if zoomed { 'v' } else { '^' })
+}
+
+fn pane_button_at(pane: &PaneView, column: u16, content_y: u16) -> Option<PaneChromeAction> {
+    if content_y != pane.slot.y || !pane.slot.contains(column, content_y) {
+        return None;
+    }
+    pane_buttons(pane.slot.width)
+        .into_iter()
+        .find(|button| {
+            let x = pane.slot.x.saturating_add(button.x);
+            column >= x && column < x.saturating_add(PANE_BUTTON_WIDTH)
+        })
+        .map(|button| button.action)
+}
+
+struct TabRange {
+    id: u32,
+    label: String,
+    rect: RectDto,
+}
+
+fn pack_tab_ranges(tabs: &[TabView], width: u16, start: usize) -> Vec<TabRange> {
+    let limit = width.saturating_sub(NEW_TAB_WIDTH + 1);
+    let mut x = 0u16;
+    let mut ranges = Vec::new();
+    for tab in &tabs[start.min(tabs.len())..] {
+        if x >= limit {
+            break;
+        }
+        let available = limit.saturating_sub(x).min(TAB_MAX_WIDTH);
+        if available < 4 {
+            break;
+        }
+        let raw = format!(" {} ", tab.title);
+        let label = fit_text(&raw, usize::from(available));
+        let rect = RectDto {
+            x,
+            y: 0,
+            width: label.chars().count() as u16,
+            height: 1,
+        };
+        if rect.width == 0 {
+            break;
+        }
+        ranges.push(TabRange {
+            id: tab.id,
+            label,
+            rect,
+        });
+        x = rect.x.saturating_add(rect.width);
+        if x < limit {
+            x = x.saturating_add(1);
+        }
+    }
+    ranges
+}
+
+fn tab_ranges(tabs: &[TabView], width: u16) -> Vec<TabRange> {
+    let ranges = pack_tab_ranges(tabs, width, 0);
+    if tabs.is_empty()
+        || ranges
+            .iter()
+            .any(|range| tabs.iter().any(|tab| tab.id == range.id && tab.active))
+    {
+        return ranges;
+    }
+    let Some(active) = tabs.iter().position(|tab| tab.active) else {
+        return ranges;
+    };
+    // Keep the active tab clickable when the strip overflows. Starting at the
+    // first index whose window includes it preserves as many preceding tabs as
+    // possible while still showing the tab the user is working in.
+    for start in 1..=active {
+        let window = pack_tab_ranges(tabs, width, start);
+        if window
+            .iter()
+            .any(|range| tabs.iter().any(|tab| tab.id == range.id && tab.active))
+        {
+            return window;
+        }
+    }
+    ranges
+}
+
+fn new_tab_rect(width: u16) -> Option<RectDto> {
+    (width >= NEW_TAB_WIDTH).then(|| RectDto {
+        x: width - NEW_TAB_WIDTH,
+        y: 0,
+        width: NEW_TAB_WIDTH,
+        height: 1,
+    })
+}
+
+fn minimized_tray_rect(width: u16, count: usize) -> Option<RectDto> {
+    if count == 0 || width < 8 {
+        return None;
+    }
+    let label = format!("▣ {count} ");
+    let tray_width = label.chars().count() as u16;
+    Some(RectDto {
+        x: width.saturating_sub(tray_width),
+        y: 0,
+        width: tray_width,
+        height: 1,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ScrollbarGeometry {
+    pane: u64,
+    track: RectDto,
+    thumb_y: u16,
+    thumb_height: u16,
+    max_offset: usize,
+    scroll_offset: usize,
+}
+
+fn scrollbar_geometry(pane: &PaneView) -> Option<ScrollbarGeometry> {
+    let height = pane.slot.height.saturating_sub(1).min(pane.content_rows);
+    // Only show the bar once scrollback is meaningful. One or two prompt lines
+    // would otherwise render a near-full-height thumb that reads as a border.
+    let meaningful = (usize::from(pane.content_rows) / 2).max(1);
+    if pane.history_lines < meaningful || height == 0 || pane.slot.width < 2 {
+        return None;
+    }
+    let total = pane
+        .history_lines
+        .saturating_add(usize::from(pane.content_rows));
+    if total == 0 {
+        return None;
+    }
+    let track_height = height;
+    let thumb_height = ((usize::from(track_height) * usize::from(track_height) / total)
+        .max(1)
+        .min(usize::from(track_height))) as u16;
+    let span = track_height.saturating_sub(thumb_height);
+    let offset = pane.scroll_offset.min(pane.history_lines);
+    let thumb_top =
+        span.saturating_sub(((u64::from(span) * offset as u64) / pane.history_lines as u64) as u16);
+    Some(ScrollbarGeometry {
+        pane: pane.id,
+        track: RectDto {
+            x: pane
+                .slot
+                .x
+                .saturating_add(pane.slot.width)
+                .saturating_sub(1),
+            y: pane.slot.y.saturating_add(1),
+            width: 1,
+            height: track_height,
+        },
+        thumb_y: pane.slot.y.saturating_add(1).saturating_add(thumb_top),
+        thumb_height,
+        max_offset: pane.history_lines,
+        scroll_offset: offset,
+    })
+}
+
+fn scrollbar_thumb_span(geometry: &ScrollbarGeometry) -> u16 {
+    geometry.track.height.saturating_sub(geometry.thumb_height)
+}
+
+fn scrollbar_jump_offset(geometry: &ScrollbarGeometry, content_y: u16) -> usize {
+    let span = scrollbar_thumb_span(geometry);
+    if geometry.max_offset == 0 || span == 0 {
+        return 0;
+    }
+    let relative = content_y
+        .saturating_sub(geometry.track.y)
+        .min(geometry.track.height.saturating_sub(1));
+    let thumb_top = relative.saturating_sub(geometry.thumb_height / 2).min(span);
+    let numerator = u64::from(span.saturating_sub(thumb_top)) * geometry.max_offset as u64
+        + u64::from(span) / 2;
+    (numerator / u64::from(span)) as usize
+}
+
+fn scrollbar_drag_offset(
+    geometry: &ScrollbarGeometry,
+    anchor_y: u16,
+    base_offset: usize,
+    content_y: u16,
+) -> usize {
+    let span = scrollbar_thumb_span(geometry);
+    if geometry.max_offset == 0 || span == 0 {
+        return base_offset.min(geometry.max_offset);
+    }
+    let moved = (f64::from(i32::from(content_y) - i32::from(anchor_y)) / f64::from(span)
+        * geometry.max_offset as f64)
+        .round() as i64;
+    (base_offset as i64 - moved).clamp(0, geometry.max_offset as i64) as usize
+}
+
+#[derive(Debug, Clone)]
+struct ScrollDrag {
+    geometry: ScrollbarGeometry,
+    last_sent: Instant,
+    anchor_y: u16,
+    base_offset: usize,
+}
+
 #[derive(Debug)]
 enum Overlay {
     Cold(ColdState),
@@ -417,6 +666,7 @@ struct App {
     prefix_armed: bool,
     selection: Option<Selection>,
     drag_split: Option<DragSplit>,
+    scroll_drag: Option<ScrollDrag>,
     app_mouse_down: Option<(MouseButton, u64)>,
     status: Option<(String, Instant)>,
     exit_message: Option<String>,
@@ -454,6 +704,7 @@ impl App {
             prefix_armed: false,
             selection: None,
             drag_split: None,
+            scroll_drag: None,
             app_mouse_down: None,
             status: None,
             exit_message: None,
@@ -643,7 +894,6 @@ impl App {
         if self.prefix_armed {
             self.prefix_armed = false;
             if chord == self.keys.prefix {
-                self.set_status("Prefix cancelled.");
                 return;
             }
             if let Some(action) = self.keys.action_for(true, chord).map(str::to_string) {
@@ -656,10 +906,6 @@ impl App {
 
         if chord == self.keys.prefix {
             self.prefix_armed = true;
-            self.set_status(format!(
-                "PREFIX ({}) — waiting for a command",
-                self.keys.prefix
-            ));
             return;
         }
 
@@ -668,9 +914,32 @@ impl App {
             return;
         }
 
+        // Windows-terminal muscle memory: Ctrl+C copies a visible selection,
+        // Ctrl+V pastes, and Ctrl/Shift+Insert are accepted as aliases.
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        match key.code {
+            CKeyCode::Char('v' | 'V') if control && !shift => {
+                self.paste_clipboard();
+                return;
+            }
+            CKeyCode::Char('c' | 'C') if control && !shift && self.selection.is_some() => {
+                self.copy_selection();
+                return;
+            }
+            CKeyCode::Insert if shift => {
+                self.paste_clipboard();
+                return;
+            }
+            CKeyCode::Insert if control => {
+                self.copy_selection();
+                return;
+            }
+            _ => {}
+        }
+
         if key.code == CKeyCode::F(2) {
             self.theme = self.theme.next();
-            self.set_status(format!("Theme: {}", self.theme.name));
             return;
         }
 
@@ -881,11 +1150,57 @@ impl App {
         }
     }
 
+    fn do_pane_action(&mut self, pane: u64, action: PaneChromeAction) {
+        self.bells.clear();
+        match action {
+            PaneChromeAction::SplitRight => {
+                let _ = self.send(Command::SplitPane {
+                    pane,
+                    direction: SplitDirection::Right,
+                });
+            }
+            PaneChromeAction::SplitDown => {
+                let _ = self.send(Command::SplitPane {
+                    pane,
+                    direction: SplitDirection::Down,
+                });
+            }
+            PaneChromeAction::Minimize => {
+                if self.send(Command::MinimizePane { pane }).is_some() {
+                    let restore = self
+                        .keys
+                        .binding("restore")
+                        .map(|binding| binding.to_string())
+                        .unwrap_or_else(|| "prefix+Shift+M".into());
+                    self.set_status(format!(
+                        "Pane minimized. Click the tray or press {restore} to restore."
+                    ));
+                }
+            }
+            PaneChromeAction::ToggleZoom => {
+                if let Some(tab) = self.active_tab() {
+                    let _ = self.send(Command::ZoomPane {
+                        zoomed: !tab.zoomed,
+                    });
+                }
+            }
+            PaneChromeAction::Close => {
+                self.confirm_or_send(
+                    format!(
+                        "Close pane '{}'? Its process will be stopped.",
+                        self.pane_label(pane)
+                    ),
+                    Command::ClosePane { pane },
+                );
+            }
+        }
+    }
+
     fn pane_label(&self, pane: u64) -> String {
         self.frame
             .as_ref()
             .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-            .map(|view| view.title.clone())
+            .map(|view| friendly_title(&view.title))
             .unwrap_or_else(|| format!("pane {pane}"))
     }
 
@@ -942,6 +1257,7 @@ impl App {
         self.bells.clear();
         self.selection = None;
         self.drag_split = None;
+        self.scroll_drag = None;
         self.app_mouse_down = None;
         self.overlay = cold.map(Overlay::Cold);
         self.set_status(format!("Attached to '{display_name}'."));
@@ -954,14 +1270,20 @@ impl App {
             return;
         };
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
-            Ok(()) => self.set_status("Copied selection to the clipboard."),
+            Ok(()) => self.set_status("Copied."),
             Err(error) => self.set_status(format!("Clipboard copy failed: {error}")),
         }
     }
 
     fn paste_clipboard(&mut self) {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
-            Ok(text) => self.paste_text(text),
+            Ok(text) => {
+                if text.is_empty() {
+                    self.set_status("The clipboard is empty.");
+                } else {
+                    self.paste_text(text);
+                }
+            }
             Err(error) => self.set_status(format!("Clipboard paste failed: {error}")),
         }
     }
@@ -1232,8 +1554,26 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
+        if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+            if let Some(drag) = self.scroll_drag.take() {
+                if mouse.row > 0 && mouse.row + 1 < self.height {
+                    self.scroll_drag_to(&drag, mouse.row - 1);
+                }
+                return;
+            }
+            if self.drag_split.take().is_some() {
+                return;
+            }
+        }
         if mouse.row == 0 {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+                if new_tab_rect(self.width).is_some_and(|rect| rect.contains(mouse.column, 0)) {
+                    let _ = self.send(Command::NewTab {
+                        profile: None,
+                        cwd: None,
+                    });
+                    return;
+                }
                 if let Some(tab) = self.tab_at(mouse.column) {
                     let _ = self.send(Command::SelectTab { tab });
                 }
@@ -1241,12 +1581,69 @@ impl App {
             return;
         }
         if mouse.row + 1 >= self.height {
+            let count = self
+                .frame
+                .as_ref()
+                .map(|frame| frame.minimized.len())
+                .unwrap_or(0);
+            if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                && minimized_tray_rect(self.width, count)
+                    .is_some_and(|rect| rect.contains(mouse.column, 0))
+            {
+                let _ = self.send(Command::RestorePanes);
+            }
             return;
         }
 
         let content_y = mouse.row - 1;
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                if let Some((pane, action)) = self.pane_header_at(mouse.column, content_y) {
+                    let _ = self.send(Command::FocusPane { pane });
+                    self.bells.remove(&pane);
+                    self.do_pane_action(pane, action);
+                    return;
+                }
+                if self
+                    .pane_slot_at(mouse.column, content_y)
+                    .is_some_and(|pane| {
+                        self.frame
+                            .as_ref()
+                            .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+                            .is_some_and(|view| view.slot.y == content_y)
+                    })
+                {
+                    if let Some(pane) = self.pane_slot_at(mouse.column, content_y) {
+                        let _ = self.send(Command::FocusPane { pane });
+                        self.bells.remove(&pane);
+                    }
+                    return;
+                }
+                if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
+                    let _ = self.send(Command::FocusPane {
+                        pane: geometry.pane,
+                    });
+                    self.bells.remove(&geometry.pane);
+                    let on_thumb = content_y >= geometry.thumb_y
+                        && content_y < geometry.thumb_y.saturating_add(geometry.thumb_height);
+                    let base_offset = if on_thumb {
+                        geometry.scroll_offset
+                    } else {
+                        let offset = scrollbar_jump_offset(&geometry, content_y);
+                        let _ = self.send(Command::SetScrollOffset {
+                            pane: geometry.pane,
+                            offset,
+                        });
+                        offset
+                    };
+                    self.scroll_drag = Some(ScrollDrag {
+                        geometry,
+                        last_sent: Instant::now() - Duration::from_millis(100),
+                        anchor_y: content_y,
+                        base_offset,
+                    });
+                    return;
+                }
                 if let Some(handle) = self.split_at(mouse.column, content_y) {
                     self.drag_split = Some(handle);
                     return;
@@ -1338,6 +1735,15 @@ impl App {
             }
             MouseEventKind::Drag(button) => {
                 if button == MouseButton::Left {
+                    if let Some(drag) = self.scroll_drag.clone() {
+                        if drag.last_sent.elapsed() >= Duration::from_millis(35) {
+                            self.scroll_drag_to(&drag, content_y);
+                            if let Some(active) = &mut self.scroll_drag {
+                                active.last_sent = Instant::now();
+                            }
+                        }
+                        return;
+                    }
                     if let Some(drag) = self.drag_split.clone() {
                         self.drag_split_to(drag, mouse.column, content_y);
                         return;
@@ -1370,9 +1776,6 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.drag_split.take().is_some() {
-                    return;
-                }
                 if let Some((button, pane)) = self.app_mouse_down.take() {
                     if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
                         self.forward_mouse_button(button, pane, x, y, false, mouse.modifiers);
@@ -1390,6 +1793,18 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
+                    let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
+                        3
+                    } else {
+                        -3
+                    };
+                    let _ = self.send(Command::ScrollPane {
+                        pane: geometry.pane,
+                        delta,
+                    });
+                    return;
+                }
                 let Some((pane, x, y)) = self.pane_at(mouse.column, content_y) else {
                     return;
                 };
@@ -1430,6 +1845,29 @@ impl App {
     ) {
         let data = keymap::sgr_mouse(button, x, y, pressed, modifiers);
         let _ = self.send(Command::Input { pane, data });
+    }
+
+    fn pane_header_at(&self, column: u16, content_y: u16) -> Option<(u64, PaneChromeAction)> {
+        let frame = self.frame.as_ref()?;
+        frame.panes.iter().find_map(|pane| {
+            pane_button_at(pane, column, content_y).map(|action| (pane.id, action))
+        })
+    }
+
+    fn scrollbar_at(&self, column: u16, content_y: u16) -> Option<ScrollbarGeometry> {
+        let frame = self.frame.as_ref()?;
+        frame.panes.iter().find_map(|pane| {
+            scrollbar_geometry(pane).filter(|geometry| geometry.track.contains(column, content_y))
+        })
+    }
+
+    fn scroll_drag_to(&mut self, drag: &ScrollDrag, content_y: u16) {
+        let offset =
+            scrollbar_drag_offset(&drag.geometry, drag.anchor_y, drag.base_offset, content_y);
+        let _ = self.send(Command::SetScrollOffset {
+            pane: drag.geometry.pane,
+            offset,
+        });
     }
 
     fn pane_at(&self, column: u16, content_y: u16) -> Option<(u64, u16, u16)> {
@@ -1486,25 +1924,10 @@ impl App {
 
     fn tab_at(&self, column: u16) -> Option<u32> {
         let frame = self.frame.as_ref()?;
-        let mut x = 6u16;
-        for (index, tab) in frame.tabs.iter().enumerate() {
-            let remaining = self.width.saturating_sub(x);
-            if remaining < 6 {
-                break;
-            }
-            let zoom = if tab.zoomed { " [z]" } else { "" };
-            let raw = format!(" {} {}{} ", index + 1, tab.title, zoom);
-            let label = fit_text(&raw, usize::from(remaining.saturating_sub(1)));
-            let width = label.chars().count() as u16;
-            if column >= x && column < x + width {
-                return Some(tab.id);
-            }
-            x = x.saturating_add(width);
-            if x < self.width {
-                x = x.saturating_add(1);
-            }
-        }
-        None
+        tab_ranges(&frame.tabs, self.width)
+            .into_iter()
+            .find(|tab| tab.rect.contains(column, 0))
+            .map(|tab| tab.id)
     }
 
     fn split_at(&self, column: u16, content_y: u16) -> Option<DragSplit> {
@@ -1626,6 +2049,17 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
         .collect();
     lines.push(("Cycle theme".into(), "F2".into()));
     lines.push(("Resize split".into(), "drag the gutter".into()));
+    lines.push((
+        "Pane buttons".into(),
+        "V split right · H split down · _ min · ^ max · X close".into(),
+    ));
+    lines.push(("New tab".into(), "click + in the tab bar".into()));
+    lines.push(("Scrollback".into(), "mouse wheel or drag the bar".into()));
+    lines.push(("Bell".into(), "the pane title turns amber".into()));
+    lines.push((
+        "Quick clipboard".into(),
+        "Ctrl+C copy · Ctrl+V paste".into(),
+    ));
     lines.push((
         "Select text".into(),
         "drag in a pane (Shift+drag if the app uses the mouse)".into(),
@@ -1754,5 +2188,153 @@ mod tests {
     fn clock_formats_utc() {
         assert_eq!(utc_clock(0), "00:00:00Z");
         assert_eq!(utc_clock(3_661_000), "01:01:01Z");
+    }
+
+    fn test_view(width: u16) -> PaneView {
+        PaneView {
+            id: 7,
+            tab: 1,
+            title: "PowerShell".into(),
+            pid: 42,
+            alive: true,
+            exit_code: None,
+            slot: RectDto {
+                x: 10,
+                y: 2,
+                width,
+                height: 11,
+            },
+            content_cols: width.saturating_sub(1),
+            content_rows: 10,
+            version: 1,
+            cells: None,
+            cursor: fact_protocol::CursorDto {
+                x: 0,
+                y: 0,
+                visible: true,
+                shape: fact_protocol::CursorShape::Block,
+            },
+            modes: 0,
+            scroll_offset: 0,
+            history_lines: 0,
+            bell_seq: 0,
+            cold_restored: false,
+            focused: true,
+        }
+    }
+
+    #[test]
+    fn pane_header_buttons_have_stable_hit_targets() {
+        let view = test_view(24);
+        assert_eq!(pane_buttons(24).len(), 5);
+        assert!(pane_buttons(11).is_empty());
+        assert_eq!(
+            pane_button_at(&view, 24, 2),
+            Some(PaneChromeAction::SplitRight)
+        );
+        assert_eq!(
+            pane_button_at(&view, 26, 2),
+            Some(PaneChromeAction::SplitDown)
+        );
+        assert_eq!(
+            pane_button_at(&view, 28, 2),
+            Some(PaneChromeAction::Minimize)
+        );
+        assert_eq!(
+            pane_button_at(&view, 30, 2),
+            Some(PaneChromeAction::ToggleZoom)
+        );
+        assert_eq!(pane_button_at(&view, 32, 2), Some(PaneChromeAction::Close));
+        assert_eq!(pane_button_at(&view, 24, 3), None);
+        assert_eq!(pane_button_at(&view, 34, 2), None);
+    }
+
+    #[test]
+    fn tabs_and_new_tab_button_do_not_overlap() {
+        let tabs = vec![
+            TabView {
+                id: 1,
+                title: "PowerShell".into(),
+                active: true,
+                pane_count: 1,
+                zoomed: false,
+            },
+            TabView {
+                id: 2,
+                title: "Bash".into(),
+                active: false,
+                pane_count: 1,
+                zoomed: false,
+            },
+        ];
+        let ranges = tab_ranges(&tabs, 40);
+        assert_eq!(ranges.len(), 2);
+        let plus = new_tab_rect(40).unwrap();
+        for range in &ranges {
+            assert!(range.rect.x + range.rect.width <= plus.x);
+        }
+        assert!(ranges[0].label.contains("PowerShell"));
+        assert!(ranges[1].label.contains("Bash"));
+    }
+
+    #[test]
+    fn active_tab_stays_visible_when_the_strip_overflows() {
+        let tabs: Vec<TabView> = (1..=10)
+            .map(|id| TabView {
+                id,
+                title: format!("Tab {id}"),
+                active: id == 10,
+                pane_count: 1,
+                zoomed: false,
+            })
+            .collect();
+        let ranges = tab_ranges(&tabs, 40);
+        let active = ranges
+            .iter()
+            .find(|range| range.id == 10)
+            .expect("the active tab must stay clickable");
+        assert!(active.rect.width >= 4);
+        let plus = new_tab_rect(40).unwrap();
+        for range in &ranges {
+            assert!(range.rect.x + range.rect.width <= plus.x);
+        }
+    }
+
+    #[test]
+    fn minimized_tray_is_right_aligned() {
+        let tray = minimized_tray_rect(10, 2).unwrap();
+        assert_eq!(tray.x + tray.width, 10);
+        assert!(tray.contains(6, 0));
+        assert!(tray.contains(9, 0));
+        assert!(!tray.contains(5, 0));
+    }
+
+    #[test]
+    fn scrollbar_maps_pointer_to_scrollback_offset() {
+        let mut view = test_view(40);
+        view.history_lines = 2;
+        view.content_rows = 10;
+        assert!(scrollbar_geometry(&view).is_none());
+        view.history_lines = 100;
+        view.content_rows = 10;
+        view.slot.height = 11;
+        let bottom = scrollbar_geometry(&view).unwrap();
+        assert_eq!(bottom.track.x, 49);
+        assert_eq!(bottom.track.y, 3);
+        assert_eq!(bottom.track.height, 10);
+        assert_eq!(bottom.max_offset, 100);
+        assert_eq!(scrollbar_jump_offset(&bottom, bottom.track.y), 100);
+        assert_eq!(
+            scrollbar_jump_offset(&bottom, bottom.track.y + bottom.track.height - 1),
+            0
+        );
+        view.scroll_offset = 50;
+        let middle = scrollbar_geometry(&view).unwrap();
+        let anchor = middle.thumb_y;
+        assert_eq!(scrollbar_drag_offset(&middle, anchor, 50, anchor), 50);
+        assert!(scrollbar_drag_offset(&middle, anchor, 50, anchor + 1) < 50);
+        view.scroll_offset = 100;
+        let top = scrollbar_geometry(&view).unwrap();
+        assert_eq!(top.thumb_y, top.track.y);
     }
 }

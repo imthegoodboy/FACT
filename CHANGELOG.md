@@ -3,6 +3,50 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.2.0] - 2026-10-20
+
+### Added
+
+- Per-pane header controls for split right (`V`), split down (`H`), minimize
+  (`_`), maximize/restore (`^`/`v`) and close (`X`), with identical mouse hit
+  targets and keyboard actions.
+- A persistent draggable scrollbar for each pane, including click-to-jump,
+  drag-to-scroll and wheel support even when the focused application captures
+  the mouse.
+- A `+` new-tab button and a clickable minimized-pane tray.
+- `Ctrl+C` copy, `Ctrl+V` paste, `Ctrl+Insert` copy and `Shift+Insert` paste
+  shortcuts alongside the existing configurable bindings.
+
+### Changed
+
+- `fact-dark` is now a true black theme; active tabs and focused pane headers no
+  longer use the light-blue accent.
+- Pane and tab titles discard Windows executable paths and show friendly names
+  such as `PowerShell` and `Command Prompt`. The pid, scroll-offset and recovered
+  text markers were removed from pane headers; a bell now colors the pane and tab
+  title amber instead of adding text.
+- The status bar is minimal by default: it shows the session name and transient
+  messages only. The prefix badge appears only while the prefix is armed; pane
+  counts, tab counts, focused-mode text, theme name and clock were removed.
+- Layout reserves the rightmost column of every pane for the scrollbar so output
+  is never hidden underneath it.
+- The wire protocol is now version 2. An old daemon must be stopped before a
+  v0.2.0 client attaches; the installer does this and saved sessions cold-recover
+  on the next launch.
+
+### Fixed
+
+- The terminal cursor is rendered as a steady cell overlay instead of a
+  repositioned hardware cursor. This removes cursor blinking/flicker while
+  fast-repainting applications such as AI agents update the screen.
+- Pane-header controls remain visible while a pane is maximized, and the
+  maximize button becomes a restore button. Clicking any header control focuses
+  the target pane first, so controls cannot act on the wrong pane.
+- Stale scrollbar glyphs are cleared when a pane leaves scrollback or changes
+  layout.
+- The active tab remains visible and clickable when the tab strip overflows, and
+  long tab titles are capped so one title cannot hide the rest.
+
 ## [0.1.0] - 2026-10-20
 
 ### Added
@@ -54,4 +98,5 @@ All notable changes to FACT are documented here. The format follows
 - Terminal snapshots are visual state, not process resurrection; unsaved work in
   a lost process cannot be recovered.
 
+[0.2.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.0
 [0.1.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.1.0

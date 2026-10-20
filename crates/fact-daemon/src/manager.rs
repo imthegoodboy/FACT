@@ -321,6 +321,11 @@ impl SessionManager {
                 self.scroll_to_line(&key, pane, line)?;
                 Ok(ResponsePayload::Ack)
             }
+            Command::SetScrollOffset { pane, offset } => {
+                let key = self.pane_owner(pane, bound_session)?;
+                self.set_scroll_offset(&key, pane, offset)?;
+                Ok(ResponsePayload::Ack)
+            }
             Command::SearchPane {
                 pane,
                 query,
@@ -392,7 +397,7 @@ impl SessionManager {
                     let title = if pane.term.title().trim().is_empty() {
                         pane.default_title.clone()
                     } else {
-                        sanitize_title(&pane.term.title())
+                        fact_protocol::friendly_title(&pane.term.title())
                     };
                     if title != pane.display_title {
                         pane.display_title = title;
@@ -668,7 +673,9 @@ impl SessionManager {
         let mut panes = HashMap::new();
         let mut records = Vec::new();
         let mut notes = Vec::new();
-        let profile_title = resolved.label();
+        // Only an explicit profile title is preserved verbatim. Automatic
+        // labels are normalized from the resolved executable by spawn_pane.
+        let profile_title = resolved.title.clone().unwrap_or_default();
         for id in &ids {
             let (cols, rows) = dims.get(id).copied().unwrap_or((80, 24));
             let spawned = spawn_pane(
@@ -1112,7 +1119,7 @@ impl SessionManager {
                 cols,
                 rows,
                 snapshot: None,
-                title_hint: "Shell",
+                title_hint: "",
                 cold_recovery: false,
             },
             &mut notes,
@@ -1421,7 +1428,7 @@ impl SessionManager {
                 cols,
                 rows,
                 snapshot: None,
-                title_hint: "Shell",
+                title_hint: "",
                 cold_recovery: false,
             },
             &mut notes,
@@ -1601,6 +1608,25 @@ impl SessionManager {
             .get_mut(&pane)
             .ok_or_else(|| ProtocolError::not_found(format!("pane {pane}")))?;
         live.term.scroll_to_line(line);
+        live.version = live.version.wrapping_add(1);
+        Ok(())
+    }
+
+    fn set_scroll_offset(
+        &mut self,
+        key: &str,
+        pane: u64,
+        offset: usize,
+    ) -> Result<(), ProtocolError> {
+        let session = self
+            .sessions
+            .get_mut(key)
+            .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
+        let live = session
+            .panes
+            .get_mut(&pane)
+            .ok_or_else(|| ProtocolError::not_found(format!("pane {pane}")))?;
+        live.term.set_scroll_offset(offset);
         live.version = live.version.wrapping_add(1);
         Ok(())
     }
@@ -2046,7 +2072,13 @@ fn spawn_pane(
     });
 
     let title = if title_hint.trim().is_empty() {
-        resolved.label()
+        if let Some(explicit) = &resolved.title {
+            // An explicit profile title is user-authored: keep slashes and
+            // other punctuation that friendly_title would treat as a path.
+            sanitize_title(explicit)
+        } else {
+            fact_protocol::friendly_title(&resolved.label())
+        }
     } else {
         sanitize_title(title_hint)
     };

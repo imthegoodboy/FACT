@@ -546,6 +546,51 @@ fn split_tabs_focus_and_search_drive_real_panes() {
         .iter()
         .any(|hit| hit.preview.contains("FACT_LAYOUT_MARKER")));
 
+    // Fill the scrollback without relying on a specific shell language, then
+    // exercise the direct offset command used by scrollbar dragging.
+    client
+        .request(Command::Input {
+            pane: original_pane,
+            data: b"\r\n".repeat(48),
+        })
+        .expect("fill scrollback");
+    wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
+        frame
+            .panes
+            .iter()
+            .any(|pane| pane.id == original_pane && pane.history_lines >= 8)
+    })
+    .expect("scrollback frame");
+    // Let the shell finish draining the queued blank commands; new output
+    // returns the viewport to the live bottom.
+    thread::sleep(Duration::from_millis(750));
+    client
+        .request(Command::SetScrollOffset {
+            pane: original_pane,
+            offset: 5,
+        })
+        .expect("set scroll offset");
+    wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
+        frame
+            .panes
+            .iter()
+            .any(|pane| pane.id == original_pane && pane.scroll_offset == 5)
+    })
+    .expect("scrolled frame");
+    client
+        .request(Command::SetScrollOffset {
+            pane: original_pane,
+            offset: 0,
+        })
+        .expect("reset scroll offset");
+    wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
+        frame
+            .panes
+            .iter()
+            .any(|pane| pane.id == original_pane && pane.scroll_offset == 0)
+    })
+    .expect("live scroll frame");
+
     assert!(matches!(
         client
             .request(Command::CloseTab { tab: new_tab })

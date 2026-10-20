@@ -13,9 +13,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fact_pty::{PtyProcess, SpawnOptions};
+use fact_term::{TerminalEventSink, TerminalModel};
 use serde_json::Value;
 
 const SESSION: &str = "ui-smoke";
+// Stable pane-header chrome: split V/H, minimize, maximize/restore, close.
+const PANE_CHROME: &str = "V H _ ^ X";
+
+fn screen_text(output: &[u8], cols: u16, rows: u16) -> String {
+    let mut term = TerminalModel::new(cols, rows, 0, TerminalEventSink::new());
+    term.feed(output);
+    term.plain_text()
+}
 
 fn fact_exe() -> PathBuf {
     // CI uses the test build. Set FACT_SMOKE_EXE to drive a downloaded release
@@ -170,7 +179,7 @@ fn tui_cold_recovers_and_starts_new_shells() {
         tail(&output)
     );
     assert!(
-        wait_for(&first, &mut output, "pid ", Duration::from_secs(30)),
+        wait_for(&first, &mut output, PANE_CHROME, Duration::from_secs(30)),
         "the first TUI did not render a live pane:\n{}",
         tail(&output)
     );
@@ -275,10 +284,29 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
         tail(&output)
     );
     assert!(
-        wait_for(&process, &mut output, "pid ", Duration::from_secs(30)),
+        wait_for(&process, &mut output, PANE_CHROME, Duration::from_secs(30)),
         "the TUI did not render a live pane:\n{}",
         tail(&output)
     );
+    thread::sleep(Duration::from_millis(700));
+    drain(&process, &mut output);
+    let screen = screen_text(&output, 120, 35);
+    assert!(
+        screen.contains(PANE_CHROME),
+        "pane header controls missing from screen:\n{screen}"
+    );
+    for noisy in [
+        "pid ",
+        "WindowsApps",
+        " panes ",
+        "focused mode",
+        "fact-dark",
+    ] {
+        assert!(
+            !screen.contains(noisy),
+            "unexpected UI text {noisy:?} on screen:\n{screen}"
+        );
+    }
 
     process
         .write(b"echo FACT_TUI_INPUT\r")
@@ -292,6 +320,25 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
         ),
         "keyboard input did not reach the shell:\n{}",
         tail(&output)
+    );
+
+    // Generate a screenful of scrollback and verify that the pane exposes a
+    // scrollbar. The bar stays hidden at an empty prompt so it does not read
+    // as another pane border.
+    process
+        .write(&[b'\r'; 48])
+        .expect("generate scrollback in the focused pane");
+    assert!(
+        wait_for(&process, &mut output, "▐", Duration::from_secs(20)),
+        "the scrollbar did not appear after generating scrollback:\n{}",
+        tail(&output)
+    );
+    thread::sleep(Duration::from_millis(300));
+    drain(&process, &mut output);
+    let scrolled_screen = screen_text(&output, 120, 35);
+    assert!(
+        scrolled_screen.contains('▐'),
+        "the scrollbar thumb is missing from the rendered screen:\n{scrolled_screen}"
     );
 
     process.write(b"\x02k").expect("open the command palette");

@@ -7,7 +7,7 @@ running when the UI detaches or the terminal window closes.
 FACT is not a wrapper around Windows Terminal or tmux. It owns its ConPTY
 processes, terminal models, layout tree and session database.
 
-> **Status:** v0.1.0. Windows 11 is the primary, continuously tested target.
+> **Status:** v0.2.0. Windows 11 is the primary, continuously tested target.
 > Windows 10 1809+ is intended to work but is not yet verified; see
 > [Compatibility](#compatibility). Release artifacts are produced only from
 > version tags after every gate in this repository passes.
@@ -24,8 +24,9 @@ processes, terminal models, layout tree and session database.
   never replays commands.
 - **Tabs, splits and grids.** Binary split tree, focus, zoom, minimize, move and
   swap, plus focused-pane mode on tiny terminals.
-- **Chrome-inspired TUI.** Active-tab styling, compact status bar, command
-  palette, pane search, context menus, five themes and F1 help.
+- **Minimal black TUI.** Clean pane headers, per-pane split/minimize/maximize/
+  close controls, a draggable scrollbar, stable cursor rendering, a new-tab
+  button, command palette, pane search, context menus, five themes and F1 help.
 - **Local-only security.** Authenticated named pipes with a current-user DACL.
   No TCP or UDP listener, no remote access and no privileged service.
 - **Scriptable CLI.** JSON output, offline session management and a `doctor`
@@ -84,6 +85,13 @@ fact doctor                # config, database, ACL, shell and ConPTY checks
 Inside the TUI the default prefix is `Ctrl+Space`. Press `F1` for the full,
 remappable keybinding list. `Ctrl+Space k` opens the command palette and
 `Ctrl+Space /` searches the focused pane's visible screen and scrollback.
+
+Each pane header has clickable `V` (split right), `H` (split down), `_`
+(minimize), `^`/`v` (maximize/restore) and `X` (close) controls. The `+` button
+in the tab strip opens a new tab. Mouse-wheel scrollback works in shells, and the
+scrollbar can be clicked or dragged. `Ctrl+C` copies a selection, `Ctrl+V`
+pastes, and `Ctrl+Shift+C` / `Ctrl+Shift+V` remain available alongside
+`Ctrl+Insert` / `Shift+Insert`.
 
 Session management works offline against SQLite when the daemon is not running:
 
@@ -193,7 +201,7 @@ the scrollback.
   GitHub's current Windows Server image, which is not Windows 11 itself.
 - **Windows 10 1809+:** expected to work because FACT uses ConPTY and Win32 APIs
   available since 1809. It has not been verified on a physical Windows 10
-  machine, so v0.1.0 does not claim Windows 10 support.
+  machine, so v0.2.0 does not claim Windows 10 support.
 - **Windows on ARM:** not tested.
 - **Linux/macOS:** not supported. The IPC and ConPTY layers are Windows-only.
 

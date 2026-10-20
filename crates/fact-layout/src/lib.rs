@@ -609,7 +609,13 @@ impl SessionLayout {
                 .collect();
             let panes = if let Some(focus) = focused {
                 let content = if options.rows > 2 && options.cols > 1 {
-                    Rect::new(0, 1, options.cols, options.rows.saturating_sub(1))
+                    // Keep the rightmost column free for the pane scrollbar.
+                    Rect::new(
+                        0,
+                        1,
+                        options.cols.saturating_sub(1).max(1),
+                        options.rows.saturating_sub(1),
+                    )
                 } else {
                     Rect::new(0, 0, options.cols, options.rows)
                 };
@@ -812,7 +818,9 @@ fn layout_node(
                 content: Rect::new(
                     rect.x,
                     rect.y.saturating_add(1),
-                    rect.width,
+                    // The last column belongs to the scrollbar so terminal
+                    // output is never painted underneath it.
+                    rect.width.saturating_sub(1).max(1),
                     rect.content_height(),
                 ),
                 focused: false,
@@ -1117,6 +1125,18 @@ mod tests {
         // Gutters are not painted, so total slot area is strictly smaller.
         assert!(area < 200 * 50);
         assert!(!result.splits.is_empty());
+    }
+
+    #[test]
+    fn scrollbar_column_is_not_part_of_terminal_content() {
+        let layout = SessionLayout::new(1, &[1]);
+        let result = layout.layout(opts(80, 24));
+        assert_eq!(result.panes.len(), 1);
+        let slot = &result.panes[0];
+        assert_eq!(slot.slot.width, 80);
+        assert_eq!(slot.content.width, 79);
+        assert_eq!(slot.content.x + slot.content.width, 79);
+        assert_eq!(slot.slot.x + slot.slot.width, 80);
     }
 
     #[test]
