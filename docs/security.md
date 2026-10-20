@@ -156,7 +156,7 @@ print the daemon token.
   bypass ACLs.
 - **No encryption at rest.** Use BitLocker or another volume encryption product
   for data-at-rest protection.
-- **No code signing yet.** v0.2.2 release artifacts are accompanied by SHA-256
+- **No code signing yet.** v0.2.3 release artifacts are accompanied by SHA-256
   checksums. Verify them before running. SmartScreen reputation may be absent.
 - **Terminal output can contain secrets.** Commands, environment dumps, tokens
   printed to the terminal and prompts may be saved in snapshots. Clear sensitive
@@ -164,7 +164,7 @@ print the daemon token.
   the visible screen, not unlimited history, but they are still sensitive.
 - **Child processes are not sandboxed.** Shells and programs run with your normal
   user rights.
-- **Windows 10 is not verified for v0.2.2.** See the compatibility section in the
+- **Windows 10 is not verified for v0.2.3.** See the compatibility section in the
   README.
 - **Named-pipe availability.** A denial-of-service by a same-user or administrator
   process is not preventable by FACT.
@@ -179,7 +179,10 @@ fact resume
 ```
 
 A graceful shutdown snapshots live sessions and removes the identity file only if
-it still contains the daemon's token. A new daemon writes a new token. If you
+it still contains the daemon's token. A new daemon writes a new token. On upgrade,
+an unusable identity is cleared only after probing that no process still accepts
+the recorded pipe; a live incompatible daemon is never overwritten and produces a
+stop-and-retry error. If you
 suspect same-user compromise, stopping FACT is not sufficient: rotate any
 credentials that appeared in terminal output and investigate the account.
 

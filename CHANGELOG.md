@@ -3,6 +3,16 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.2.3] - 2026-10-21
+
+### Fixed
+
+- Upgrading over a stale or incompatible `daemon.json` no longer blocks the first
+  launch with a protocol-mismatch error. If no process still owns the old pipe,
+  `fact` removes the dead identity and starts the current daemon; if the old
+  daemon is still alive, it reports a clear stop-and-retry error. The installer
+  also clears a dead daemon identity when replacing an existing install.
+
 ## [0.2.2] - 2026-10-21
 
 ### Fixed
@@ -153,6 +163,7 @@ All notable changes to FACT are documented here. The format follows
 - Terminal snapshots are visual state, not process resurrection; unsaved work in
   a lost process cannot be recovered.
 
+[0.2.3]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.3
 [0.2.2]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.2
 [0.2.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.1
 [0.2.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.0

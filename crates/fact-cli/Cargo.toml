@@ -30,3 +30,4 @@ assert_cmd = "2"
 fact-layout = { path = "../fact-layout" }
 fact-term = { path = "../fact-term" }
 predicates = "3"
+tempfile.workspace = true
