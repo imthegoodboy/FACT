@@ -96,6 +96,13 @@ jobs:
             Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Smoke-test the release TUI against a real ConPTY
+        shell: pwsh
+        run: |
+          $env:FACT_SMOKE_EXE = Join-Path $PWD "target\release\fact.exe"
+          cargo test -p fact-cli --test tui -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Release TUI smoke test failed" }
+
       - name: Package artifact and checksums
         shell: pwsh
         run: |

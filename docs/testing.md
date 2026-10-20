@@ -63,7 +63,8 @@ These are intentionally not mock tests:
   title output before typing (early input can race the first frame), opens the
   palette, searches for an echoed marker, opens help, detaches with the configured
   prefix and verifies through `fact sessions --json` that the session is still
-  live.
+  live with eight panes. Set `FACT_SMOKE_EXE` to run this test against a
+  downloaded release binary instead of the test build.
 - Tests wait for frames and output with deadlines rather than fixed sleeps where
   possible. Cold-recovery assertions search the terminal buffer for restored
   output because a new shell's banner can scroll the restored screen.

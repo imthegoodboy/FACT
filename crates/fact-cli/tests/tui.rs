@@ -18,7 +18,11 @@ use serde_json::Value;
 const SESSION: &str = "ui-smoke";
 
 fn fact_exe() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_fact"))
+    // CI uses the test build. Set FACT_SMOKE_EXE to drive a downloaded release
+    // binary through the same real-ConPTY checks.
+    std::env::var_os("FACT_SMOKE_EXE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_fact")))
 }
 
 struct TestHome {

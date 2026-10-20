@@ -122,7 +122,18 @@ root.
    ```
 
 8. Install the downloaded zip through `scripts/install.ps1` and run
-   `fact doctor`, `fact --grid 2` and a detach/resume check.
+   `fact doctor`. Then drive the downloaded binary through the real-ConPTY TUI
+   smoke test:
+
+   ```powershell
+   $env:FACT_SMOKE_EXE = "$env:LOCALAPPDATA\Programs\FACT\fact.exe"
+   cargo test -p fact-cli --test tui -- --nocapture
+   Remove-Item Env:\FACT_SMOKE_EXE
+   ```
+
+   The test launches eight shells, types into a pane, detaches and verifies that
+   all eight panes remain live. Also perform the manual PID/cold-recovery checks
+   in [testing.md](testing.md#manual-smoke-check).
 
 Do not create a release manually. A release without the gate run is not a FACT
 release.
