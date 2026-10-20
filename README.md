@@ -7,9 +7,9 @@ running when the UI detaches or the terminal window closes.
 FACT is not a wrapper around Windows Terminal or tmux. It owns its ConPTY
 processes, terminal models, layout tree and session database.
 
-> **Status:** v0.1.0 development. Windows 11 is the primary, continuously
-> tested target. Windows 10 1809+ is intended to work but is not yet verified;
-> see [Compatibility](#compatibility). Release artifacts are produced only from
+> **Status:** v0.1.0. Windows 11 is the primary, continuously tested target.
+> Windows 10 1809+ is intended to work but is not yet verified; see
+> [Compatibility](#compatibility). Release artifacts are produced only from
 > version tags after every gate in this repository passes.
 
 ## Highlights
