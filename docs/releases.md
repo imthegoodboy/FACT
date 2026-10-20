@@ -131,9 +131,10 @@ root.
    Remove-Item Env:\FACT_SMOKE_EXE
    ```
 
-   The test launches eight shells, types into a pane, detaches and verifies that
-   all eight panes remain live. Also perform the manual PID/cold-recovery checks
-   in [testing.md](testing.md#manual-smoke-check).
+   The tests launch eight shells, type into a pane, detach, verify that all eight
+   panes remain live, then stop the daemon and cold-resume to check the recovery
+   modal, restored output and a new shell PID. Also perform the manual checks in
+   [testing.md](testing.md#manual-smoke-check) for the final release sign-off.
 
 Do not create a release manually. A release without the gate run is not a FACT
 release.

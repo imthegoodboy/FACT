@@ -41,9 +41,16 @@ impl TestHome {
         ));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("create test home");
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let powershell = format!(
+            "{}/System32/WindowsPowerShell/v1.0/powershell.exe",
+            system_root.replace('\\', "/")
+        );
         fs::write(
             path.join("config.toml"),
-            "config_version = 1\nprefix = \"ctrl+b\"\n",
+            format!(
+                "config_version = 1\nprefix = \"ctrl+b\"\ndefault_profile = \"test-shell\"\n\n[profiles.test-shell]\ncommand = \"{powershell}\"\nargs = [\"-NoLogo\", \"-NoProfile\"]\n"
+            ),
         )
         .expect("write config");
         Self { path }
@@ -106,6 +113,139 @@ fn tail(output: &[u8]) -> String {
     let text = String::from_utf8_lossy(output);
     let reversed: String = text.chars().rev().take(6000).collect();
     reversed.chars().rev().collect()
+}
+
+fn marker_pid(output: &[u8], marker: &str) -> Option<u32> {
+    let text = String::from_utf8_lossy(output);
+    text.split(marker).skip(1).find_map(|rest| {
+        let digits: String = rest.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            None
+        } else {
+            digits.parse().ok()
+        }
+    })
+}
+
+fn wait_for_marker_pid(
+    process: &PtyProcess,
+    output: &mut Vec<u8>,
+    marker: &str,
+    timeout: Duration,
+) -> Option<u32> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        drain(process, output);
+        if let Some(pid) = marker_pid(output, marker) {
+            return Some(pid);
+        }
+        if process.exit().is_some() || Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn tui_cold_recovers_layout_and_output_with_new_shells() {
+    const COLD_SESSION: &str = "cold-smoke";
+    const OLD_MARKER: &str = "FACT_OLD_PID_";
+    const NEW_MARKER: &str = "FACT_NEW_PID_";
+
+    let home = TestHome::new("tui-cold");
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--session".into(),
+        COLD_SESSION.into(),
+        "--grid".into(),
+        "1".into(),
+    ];
+    let first = PtyProcess::spawn(options).expect("start the first FACT TUI in ConPTY");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(&first, &mut output, COLD_SESSION, Duration::from_secs(30)),
+        "the first TUI did not start:\n{}",
+        tail(&output)
+    );
+    assert!(
+        wait_for(&first, &mut output, "pid ", Duration::from_secs(30)),
+        "the first TUI did not render a live pane:\n{}",
+        tail(&output)
+    );
+
+    first
+        .write(format!("echo {OLD_MARKER}$PID\r").as_bytes())
+        .expect("print the first shell PID");
+    let old_pid = wait_for_marker_pid(&first, &mut output, OLD_MARKER, Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("the shell did not print its PID:\n{}", tail(&output)));
+
+    first.write(b"\x02d").expect("detach the first TUI");
+    let exit = first.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the first TUI did not detach cleanly:\n{}",
+        tail(&output)
+    );
+
+    home.shutdown();
+    assert!(
+        !home.path.join("runtime").join("daemon.json").exists(),
+        "the daemon did not stop before cold recovery"
+    );
+
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--session".into(),
+        COLD_SESSION.into(),
+    ];
+    let second = PtyProcess::spawn(options).expect("resume the session in ConPTY");
+    let mut output = Vec::new();
+    assert!(
+        wait_for(
+            &second,
+            &mut output,
+            "Session recovered",
+            Duration::from_secs(30)
+        ),
+        "cold recovery did not report the lost process:\n{}",
+        tail(&output)
+    );
+    assert!(
+        wait_for(&second, &mut output, OLD_MARKER, Duration::from_secs(30)),
+        "the restored visual output is missing:\n{}",
+        tail(&output)
+    );
+
+    // Dismiss the recovery modal, then prove that a new shell is accepting
+    // input. The old process must not have been resurrected.
+    second.write(b"\r").expect("dismiss the recovery modal");
+    thread::sleep(Duration::from_millis(300));
+    second
+        .write(format!("echo {NEW_MARKER}$PID\r").as_bytes())
+        .expect("print the new shell PID");
+    let new_pid = wait_for_marker_pid(&second, &mut output, NEW_MARKER, Duration::from_secs(20))
+        .unwrap_or_else(|| {
+            panic!(
+                "the recovered shell did not accept input:\n{}",
+                tail(&output)
+            )
+        });
+    assert_ne!(new_pid, old_pid, "cold recovery must start a new shell");
+
+    second.write(b"\x02d").expect("detach the recovered TUI");
+    let exit = second.wait_for_exit(Duration::from_secs(15));
+    assert_eq!(
+        exit,
+        Some(0),
+        "the recovered TUI did not detach cleanly:\n{}",
+        tail(&output)
+    );
+    home.shutdown();
 }
 
 #[test]
