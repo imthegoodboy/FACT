@@ -178,10 +178,31 @@ if ($PurgeData) {
         Join-Path $env:LOCALAPPDATA "FACT"
     }
     if (Test-Path -LiteralPath $target) {
+        if (-not (Test-Path -LiteralPath $target -PathType Container)) {
+            throw "Refusing to purge '$target': it is not a directory."
+        }
         $resolved = Resolve-NormalizedPath $target
         $root = [IO.Path]::GetPathRoot($resolved).TrimEnd('\')
-        if ($resolved -eq $root -or $resolved -eq (Resolve-NormalizedPath $env:USERPROFILE)) {
+        $profile = Resolve-NormalizedPath $env:USERPROFILE
+        if ($resolved -eq $root -or $resolved -eq $profile) {
             throw "Refusing to purge unsafe data path: $resolved"
+        }
+        if ($profile.StartsWith("$resolved\", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to purge an ancestor of the user profile: $resolved"
+        }
+        $children = @(Get-ChildItem -LiteralPath $resolved -Force)
+        if ($children.Count -gt 0) {
+            $markers = @("sessions.db", "config.toml", "runtime", "logs", "exports")
+            $looksLikeFact = $false
+            foreach ($marker in $markers) {
+                if (Test-Path -LiteralPath (Join-Path $resolved $marker)) {
+                    $looksLikeFact = $true
+                    break
+                }
+            }
+            if (-not $looksLikeFact) {
+                throw "Refusing to purge '$resolved': it has no FACT data markers. Remove it manually if this is intentional."
+            }
         }
         Remove-Item -LiteralPath $resolved -Recurse -Force
         Write-Host "Purged FACT data: $resolved" -ForegroundColor Yellow
