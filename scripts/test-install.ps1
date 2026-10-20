@@ -20,10 +20,16 @@ if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
     throw "installer not found: $installer"
 }
 $FactExe = (Resolve-Path -LiteralPath $FactExe).Path
+$binaryReport = (& $FactExe --version).Trim()
+if ($binaryReport -notmatch '^fact\s+(\S+)$') {
+    throw "Could not read the test binary version from '$binaryReport'"
+}
+$testVersion = $Matches[1]
+$testTag = "v$testVersion"
 
 $fixtureRoot = Join-Path $env:TEMP ("fact-install-test-" + [Guid]::NewGuid().ToString("N"))
 $fixtureStage = Join-Path $fixtureRoot "stage"
-$fixtureAssetName = "fact-v0.1.0-x86_64-pc-windows-msvc.zip"
+$fixtureAssetName = "fact-$testTag-x86_64-pc-windows-msvc.zip"
 $fixtureZip = Join-Path $fixtureRoot $fixtureAssetName
 $fixtureSums = Join-Path $fixtureRoot "SHA256SUMS.txt"
 $global:FactInstallTestRequests = [System.Collections.Generic.List[string]]::new()
@@ -40,14 +46,14 @@ function Invoke-WebRequest {
     $global:FactInstallTestRequests.Add($Uri)
     if ($Uri -match '/releases/latest$') {
         return [pscustomobject]@{
-            Content = '{"tag_name":"v0.1.0"}'
+            Content = (@{ tag_name = $testTag } | ConvertTo-Json -Compress)
             StatusCode = 200
         }
     }
     if ($Uri -match '/releases/download/([^/]+)/([^/]+)$') {
         $tag = $Matches[1]
         $name = $Matches[2]
-        if ($tag -ne "v0.1.0") {
+        if ($tag -ne $testTag) {
             throw "Installer requested an unexpected release tag '$tag' from $Uri"
         }
         if ($name -eq "SHA256SUMS.txt") {
@@ -82,8 +88,8 @@ function Install-Case {
         throw "Install case '$Label' did not create fact.exe"
     }
     $reported = (& $installedExe --version).Trim()
-    if ($reported -ne "fact 0.1.0") {
-        throw "Install case '$Label' reported '$reported', expected 'fact 0.1.0'"
+    if ($reported -ne "fact $testVersion") {
+        throw "Install case '$Label' reported '$reported', expected 'fact $testVersion'"
     }
 }
 
@@ -94,13 +100,13 @@ try {
     $hash = (Get-FileHash -LiteralPath $fixtureZip -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath $fixtureSums -Value "$hash  $fixtureAssetName"
 
-    Install-Case -Label "pinned" -RequestedVersion "v0.1.0"
-    Install-Case -Label "normalized" -RequestedVersion "0.1.0"
+    Install-Case -Label "pinned" -RequestedVersion $testTag
+    Install-Case -Label "normalized" -RequestedVersion $testVersion
     Install-Case -Label "latest"
 
     $expected = @(
-        "https://github.com/imthegoodboy/FACT/releases/download/v0.1.0/$fixtureAssetName",
-        "https://github.com/imthegoodboy/FACT/releases/download/v0.1.0/SHA256SUMS.txt"
+        "https://github.com/imthegoodboy/FACT/releases/download/$testTag/$fixtureAssetName",
+        "https://github.com/imthegoodboy/FACT/releases/download/$testTag/SHA256SUMS.txt"
     )
     foreach ($uri in $expected) {
         if (-not $global:FactInstallTestRequests.Contains($uri)) {
