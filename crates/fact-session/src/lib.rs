@@ -26,6 +26,8 @@ pub enum SessionError {
     Sql(#[from] rusqlite::Error),
     #[error("session I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("could not compact the session database: {0}")]
+    Compaction(String),
     #[error("session '{0}' was not found")]
     NotFound(String),
     #[error("session '{0}' already exists")]
@@ -310,14 +312,36 @@ impl SessionStore {
                        snapshot_captured_at_ms = NULL,
                        snapshot_truncated = NULL;
                 UPDATE sessions SET cold_recovered_at_ms = NULL;
-                PRAGMA user_version = 2;
                 COMMIT;
                 "#,
             )?;
+            self.conn.execute_batch("VACUUM;")?;
+            // Do not finalize the schema until the old WAL frames are gone. If
+            // compaction fails, the database stays at v1 and the next open
+            // retries the whole cleanup instead of skipping it forever.
+            self.checkpoint_truncate()?;
             self.conn
-                .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+                .pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         Ok(())
+    }
+
+    fn checkpoint_truncate(&self) -> Result<(), SessionError> {
+        const ATTEMPTS: u32 = 10;
+        for attempt in 0..ATTEMPTS {
+            let busy: i64 = self
+                .conn
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+            if busy == 0 {
+                return Ok(());
+            }
+            if attempt + 1 < ATTEMPTS {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        Err(SessionError::Compaction(
+            "WAL checkpoint remained busy; retry the next time the store is opened".to_string(),
+        ))
     }
 
     pub fn save(&mut self, session: &SessionData) -> Result<(), SessionError> {
@@ -839,6 +863,11 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot, None);
         assert_eq!(recovered, None);
+        let freelist: i64 = store
+            .conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(freelist, 0, "VACUUM left free pages behind");
         drop(store);
 
         let needle = b"legacy screen";

@@ -46,7 +46,8 @@ Persist layout and pane metadata, not terminal output.
 - v0.2 databases are still readable. The migration overwrites and clears snapshot
   data, vacuums the database and truncates the WAL. The legacy columns remain in
   the schema but are empty.
-- A client and daemon must both speak protocol 5 or newer.
+- A client and daemon must both speak protocol 5; versions are compared exactly,
+  so there is no forward or backward negotiation.
 
 ## Alternatives considered
 

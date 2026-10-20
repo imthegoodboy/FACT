@@ -30,12 +30,16 @@ fn harness() -> Harness {
     Harness { _dir: dir, paths }
 }
 
-fn start_daemon(harness: &Harness) -> thread::JoinHandle<anyhow::Result<()>> {
+fn start_daemon_with(harness: &Harness, config: Config) -> thread::JoinHandle<anyhow::Result<()>> {
     let paths = harness.paths.clone();
     thread::Builder::new()
         .name("fact-daemon-test".into())
-        .spawn(move || fact_daemon::run_with_config(paths, Config::default()))
+        .spawn(move || fact_daemon::run_with_config(paths, config))
         .expect("spawn daemon thread")
+}
+
+fn start_daemon(harness: &Harness) -> thread::JoinHandle<anyhow::Result<()>> {
+    start_daemon_with(harness, Config::default())
 }
 
 fn wait_for_daemon(harness: &Harness) -> (DaemonIdentity, DaemonClient) {
@@ -795,6 +799,46 @@ fn session_lifecycle_rename_archive_export_import_and_delete() {
         other => panic!("unexpected list response: {other:?}"),
     };
     assert!(remaining.is_empty());
+
+    shutdown(client, handle, &harness);
+}
+
+#[test]
+fn resuming_a_saved_session_respects_max_sessions() {
+    let harness = harness();
+    let config = Config {
+        max_sessions: 1,
+        ..Config::default()
+    };
+    let handle = start_daemon_with(&harness, config);
+    let (_identity, mut client) = wait_for_daemon(&harness);
+
+    resume(&mut client, "saved-cap", 1);
+    assert!(matches!(
+        client
+            .request(Command::TerminateSession {
+                name: "saved-cap".into(),
+            })
+            .expect("terminate saved-cap"),
+        ResponsePayload::Ack
+    ));
+
+    resume(&mut client, "live-cap", 1);
+    let error = client
+        .request(Command::ResumeSession {
+            name: Some("saved-cap".into()),
+            grid: None,
+            profile: None,
+            cwd: None,
+        })
+        .expect_err("resuming a second saved session must respect max_sessions");
+    match error {
+        RuntimeError::Request(error) => {
+            assert_eq!(error.code, ErrorCode::Busy);
+            assert!(error.message.contains("maximum live session"));
+        }
+        other => panic!("expected a request error, got {other:?}"),
+    }
 
     shutdown(client, handle, &harness);
 }

@@ -995,6 +995,10 @@ impl App {
     }
 
     fn paste_text(&mut self, text: String) {
+        if self.scroll_mode.is_some() {
+            self.set_status("Scroll mode: press Esc before pasting.");
+            return;
+        }
         if text.is_empty() {
             return;
         }

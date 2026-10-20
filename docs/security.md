@@ -105,12 +105,14 @@ screen or a command log:
 - SQLite stores pane identity, profile, working directory and layout, not
   terminal output or input history
 - a v0.2 database may still contain legacy snapshot columns; the v2 migration
-  securely clears them, vacuums the database and truncates the WAL before the
-  session is loaded, and the current code never reads or replays them
+  clears the columns with SQLite secure deletion, vacuums the database and
+  truncates the WAL before the session is loaded, and the current code never
+  reads or replays them
 - session load validates pane IDs and layout consistency, and invalid data fails
   closed rather than starting an inconsistent process tree
 - imports are parsed as versioned JSON, validated, and always receive a new
-  session ID, fresh pane identity and reset PIDs/exit codes
+  session ID and reset PIDs/exit codes; pane IDs are remapped when the saved
+  layout starts
 - restarting a layout starts the configured profile command in a fresh shell;
   no saved bytes are submitted as commands
 
@@ -148,7 +150,7 @@ print the daemon token.
 | Unauthenticated command injection over IPC | Random 256-bit token, constant-time comparison, one-time stream grants. |
 | Forged or corrupted layout data | Structured JSON validation, pane/layout consistency checks and transactional SQLite writes. |
 | Imported session overwrites an existing one | Import always creates a fresh identity; name collisions require explicit overwrite. |
-| Legacy v0.2 snapshots exposing old screen content | The v2 migration securely clears the snapshot columns, vacuums the database and truncates the WAL before the session is loaded; they are never replayed. |
+| Legacy v0.2 snapshots exposing old screen content | The v2 migration clears the snapshot columns with SQLite secure deletion, vacuums the database and truncates the WAL before the session is loaded; they are never replayed. |
 | Credential leakage in logs | Token and environment values are not logged. |
 
 ## Out of scope and limitations
@@ -165,7 +167,7 @@ print the daemon token.
   printed to the terminal and prompts remain in daemon memory and scrollback, but
   FACT no longer writes them to SQLite or exports. A v0.2 database backup may
   still contain legacy snapshots until it is opened and migrated; migration
-  securely clears the live database and its WAL.
+  clears the live database and truncates its WAL.
 - **Child processes are not sandboxed.** Shells and programs run with your normal
   user rights.
 - **Windows 10 is not verified for v0.3.0.** See the compatibility section in the
@@ -182,8 +184,8 @@ fact shutdown
 fact resume
 ```
 
-A graceful shutdown saves live layouts and removes the identity file only if it
-still contains the daemon's token. A new daemon writes a new token. On upgrade,
+A graceful shutdown attempts to save live layouts and removes the identity file
+only if it still contains the daemon's token. A new daemon writes a new token. On upgrade,
 an unusable identity is cleared only after probing that no process still accepts
 the recorded pipe; a live incompatible daemon is never overwritten and produces a
 stop-and-retry error. If you

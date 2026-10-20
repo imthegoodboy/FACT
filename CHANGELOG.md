@@ -23,7 +23,7 @@ All notable changes to FACT are documented here. The format follows
 ### Removed
 
 - The cold-recovery modal, recovery notes, recovery timestamps, pane restore
-  markers and all new ANSI snapshot capture, validation, storage and replay.
+  markers and all ANSI snapshot capture, validation, storage and replay.
   The v1-to-v2 migration zeroes legacy snapshot and cold-recovery values,
   vacuums the database and truncates the WAL. The legacy columns remain in the
   schema but no longer contain screen output.
@@ -47,6 +47,12 @@ All notable changes to FACT are documented here. The format follows
 - A fresh terminal model is always created on restart, so old output cannot
   appear above a new shell or be mistaken for live output. No saved bytes are
   ever submitted as input.
+- Resuming saved sessions now respects `max_sessions` instead of bypassing the
+  live-session limit.
+- Relative pane working directories are normalized to absolute paths when the
+  shell starts, so a daemon restart reopens the same directory.
+- Bracketed paste is ignored while scroll mode is active and cannot leak text
+  into the shell behind the scrollback view.
 
 ## [0.2.3] - 2026-10-21
 

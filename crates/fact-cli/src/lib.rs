@@ -188,7 +188,7 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
-    /// Stop the per-user daemon (all live session layouts are saved first).
+    /// Stop the per-user daemon and its shells (FACT attempts to save layouts first).
     Shutdown,
     /// Inspect or create the configuration file.
     Config {

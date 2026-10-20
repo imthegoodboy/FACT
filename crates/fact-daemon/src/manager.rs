@@ -5,6 +5,7 @@
 //! writes serialized without a global lock.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
@@ -647,14 +648,7 @@ impl SessionManager {
         })
     }
 
-    fn create_session(
-        &mut self,
-        name: String,
-        grid: u8,
-        profile: Option<&str>,
-        cwd: Option<&str>,
-    ) -> Result<AttachInfo, ProtocolError> {
-        validate_session_name(&name)?;
+    fn ensure_live_capacity(&self) -> Result<(), ProtocolError> {
         if self.sessions.len() >= self.config.max_sessions.min(MAX_SESSIONS) {
             return Err(ProtocolError::new(
                 ErrorCode::Busy,
@@ -664,6 +658,18 @@ impl SessionManager {
                 ),
             ));
         }
+        Ok(())
+    }
+
+    fn create_session(
+        &mut self,
+        name: String,
+        grid: u8,
+        profile: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<AttachInfo, ProtocolError> {
+        validate_session_name(&name)?;
+        self.ensure_live_capacity()?;
         if self.store.exists(&name).map_err(map_session_error)? {
             return Err(ProtocolError::new(
                 ErrorCode::Conflict,
@@ -719,7 +725,7 @@ impl SessionManager {
                 pid: spawned.pty.pid(),
                 exit_code: None,
                 profile: profile.map(str::to_string),
-                cwd: cwd.map(str::to_string),
+                cwd: spawned.cwd.clone(),
             };
             panes.insert(*id, spawned);
             records.push(record);
@@ -746,6 +752,7 @@ impl SessionManager {
     }
 
     fn restore_saved(&mut self, mut data: SessionData) -> Result<(), ProtocolError> {
+        self.ensure_live_capacity()?;
         let old_ids: Vec<u64> = data.layout.all_panes_including_minimized();
         let mut remap = BTreeMap::new();
         for old in old_ids {
@@ -800,8 +807,10 @@ impl SessionManager {
             panes.insert(record.id, spawned);
         }
         for record in &mut data.panes {
-            record.pid = panes.get(&record.id).map_or(0, |pane| pane.pty.pid());
+            let pane = panes.get(&record.id);
+            record.pid = pane.map_or(0, |pane| pane.pty.pid());
             record.exit_code = None;
+            record.cwd = pane.and_then(|pane| pane.cwd.clone());
         }
         data.updated_at_ms = now_ms();
         let key = key_of(&data.name);
@@ -1122,6 +1131,7 @@ impl SessionManager {
         )?;
         let pid = spawned.pty.pid();
         let title = spawned.display_title.clone();
+        let pane_cwd = spawned.cwd.clone();
         let session = self
             .sessions
             .get_mut(key)
@@ -1145,7 +1155,7 @@ impl SessionManager {
             pid,
             exit_code: None,
             profile,
-            cwd,
+            cwd: pane_cwd,
         });
         session.panes.insert(id, spawned);
         session.layout_epoch = session.layout_epoch.wrapping_add(1);
@@ -1429,6 +1439,7 @@ impl SessionManager {
         )?;
         let title = spawned.display_title.clone();
         let pid = spawned.pty.pid();
+        let pane_cwd = spawned.cwd.clone();
         let session = self
             .sessions
             .get_mut(key)
@@ -1452,7 +1463,7 @@ impl SessionManager {
             pid,
             exit_code: None,
             profile,
-            cwd,
+            cwd: pane_cwd,
         });
         session.panes.insert(id, spawned);
         session.layout_epoch = session.layout_epoch.wrapping_add(1);
@@ -2016,7 +2027,9 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
             workdir = None;
         }
     }
-    let workdir = workdir.or_else(|| resolved.cwd.clone().filter(|dir| dir.is_dir()));
+    let workdir = workdir
+        .or_else(|| resolved.cwd.clone().filter(|dir| dir.is_dir()))
+        .map(absolute_dir);
 
     let title = if title_hint.trim().is_empty() {
         if let Some(explicit) = &resolved.title {
@@ -2058,8 +2071,17 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
         last_bell: 0,
         exit_code: None,
         profile: profile.map(str::to_string),
-        cwd: cwd.map(str::to_string),
+        cwd: workdir.as_ref().map(|path| path.display().to_string()),
     })
+}
+
+fn absolute_dir(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(&path))
+        .unwrap_or(path)
 }
 
 fn first_pane(node: &LayoutNode) -> Option<u64> {
