@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 /// client would render every pane one row too low. Version 4 gives
 /// `ZoomPane { zoomed: false }` restore-to-full-grid semantics; an older daemon
 /// would leave a small viewport stuck in focused-pane mode. Version 5 removes
-/// cold-recovery metadata and pane snapshot fields; saved layouts now always
-/// start fresh shells.
+/// cold-recovery metadata fields; saved layouts now always start fresh shells.
 pub const PROTOCOL_VERSION: u16 = 5;
 pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;

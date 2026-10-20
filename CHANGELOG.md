@@ -23,7 +23,10 @@ All notable changes to FACT are documented here. The format follows
 ### Removed
 
 - The cold-recovery modal, recovery notes, recovery timestamps, pane restore
-  markers and all ANSI snapshot capture, storage, validation and replay.
+  markers and all new ANSI snapshot capture, validation, storage and replay.
+  The v1-to-v2 migration zeroes legacy snapshot and cold-recovery values,
+  vacuums the database and truncates the WAL. The legacy columns remain in the
+  schema but no longer contain screen output.
 - The client no longer has a `Cold` overlay, and the protocol no longer has
   `cold_recovered`, `recovery_notes`, `cold_recovered_at_ms` or `cold_restored`
   fields.

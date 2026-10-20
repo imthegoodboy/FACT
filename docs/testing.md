@@ -28,7 +28,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | Terminal | ANSI colors/styles, wide and zero-width cells, alternate screen, cursor/modes, bounded scrollback, search and frame snapshots. |
 | ConPTY | Independent processes, input/output, resize, exit status, environment block and argument quoting. |
 | IPC | Pipe round-trip, peer PID/current-user check, protected DACL, local name validation, identity file ACL, DACL diagnostics. |
-| Sessions | Schema migration (including v1 snapshot cleanup), save/load, case-insensitive names, layout corruption rejection, export/import copy semantics, archive/delete. |
+| Sessions | Schema migration (including secure v1 snapshot cleanup and WAL truncation), save/load, case-insensitive names, layout corruption rejection, export/import copy semantics, archive/delete. |
 | Daemon | Grid of eight independent shells, live detach/reattach PID preservation, saved-layout restart with fresh shells and discarded output, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. A replacement install also proves a dead daemon identity is cleared. |
@@ -42,7 +42,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 | `fact --grid 8` creates independent shells | `fact-daemon` integration test `grid_launches_independent_shells_and_streams_output` checks eight distinct PIDs and output routing. `fact-cli` test `grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session` proves a prior saved/live session cannot swallow the grid request. |
 | Live detach/reattach preserves processes | `detach_and_reattach_keep_the_same_processes` checks the original pane ID, PID and alive state after reattach. |
 | Restart reopens layout with fresh shells | `saved_layout_starts_fresh_shells_without_replaying_output` checks the saved pane count, new PIDs, an empty search for the old marker and a new shell that accepts input. The TUI test repeats the restart through the real UI and rejects both the old marker and the removed recovery screen. |
-| Layout integrity | `fact-session` tests `rejects_pane_layout_mismatch` and validates pane IDs before a saved layout can start processes. The v1 migration clears legacy snapshots. |
+| Layout integrity | `fact-session` tests `rejects_pane_layout_mismatch` and validates pane IDs before a saved layout can start processes. The v1 migration clears legacy snapshots, vacuums the database and verifies the old snapshot marker is absent from the database and WAL. |
 | Bad token rejection | `wrong_token_is_rejected_without_killing_the_daemon` verifies the daemon rejects authentication and remains available. |
 | Non-owner access | Pipe and identity files use a protected current-user/SYSTEM DACL. Tests assert exactly those grants, peer-user comparison is in the accept path, and local-only pipe names are enforced. |
 | No network listeners | A source-level test scans every crate's `src` tree for TCP/UDP/HTTP listener and stream APIs. |

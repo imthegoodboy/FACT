@@ -143,10 +143,12 @@ markers.
    Remove-Item Env:\FACT_SMOKE_EXE
    ```
 
-   The main smoke test launches eight shells, types into a pane, detaches,
-   verifies that all eight panes remain live, then stops the daemon and resumes
-   to check for a fresh shell PID, no old output and no recovery modal. The suite
-   also covers scroll mode. Also perform the manual checks in
+   The main smoke test launches eight shells, types into a pane and detaches,
+   verifying that all eight panes remain live. The
+   `tui_saved_layout_starts_fresh_shell_without_recovery_screen` test then stops
+   the daemon and resumes to check for a fresh shell PID, no old output and no
+   recovery modal; `scroll_mode_reads_history_without_sending_keys_to_the_shell`
+   covers keyboard scrolling. Also perform the manual checks in
    [testing.md](testing.md#manual-smoke-check) for the final release sign-off.
 
 Do not create a release manually. A release without the gate run is not a FACT

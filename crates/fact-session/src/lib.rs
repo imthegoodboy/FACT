@@ -293,8 +293,11 @@ impl SessionStore {
             )?;
         } else if version == 1 {
             // v1 stored ANSI screen snapshots and a cold-recovery timestamp.
-            // Layout persistence no longer needs either; clear the stale data
-            // and leave the legacy columns in place for a frictionless upgrade.
+            // Layout persistence no longer needs either. Nulling the columns is
+            // not enough on its own: old screen text can survive in free pages
+            // or the WAL. Overwrite freed content, rebuild the database and
+            // truncate the WAL before the store is exposed to callers.
+            self.conn.pragma_update(None, "secure_delete", true)?;
             self.conn.execute_batch(
                 r#"
                 BEGIN IMMEDIATE;
@@ -311,6 +314,8 @@ impl SessionStore {
                 COMMIT;
                 "#,
             )?;
+            self.conn
+                .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
         }
         Ok(())
     }
@@ -834,6 +839,25 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot, None);
         assert_eq!(recovered, None);
+        drop(store);
+
+        let needle = b"legacy screen";
+        let database = std::fs::read(&path).unwrap();
+        assert!(
+            !database
+                .windows(needle.len())
+                .any(|window| window == needle),
+            "legacy snapshot text remained in the database"
+        );
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = PathBuf::from(format!("{}{suffix}", path.to_string_lossy()));
+            if let Ok(bytes) = std::fs::read(sidecar) {
+                assert!(
+                    !bytes.windows(needle.len()).any(|window| window == needle),
+                    "legacy snapshot text remained in a SQLite sidecar"
+                );
+            }
+        }
     }
 
     #[test]

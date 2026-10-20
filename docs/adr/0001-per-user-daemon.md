@@ -1,6 +1,6 @@
 # 0001: Per-user daemon owns all shells
 
-- **Status:** Accepted
+- **Status:** Amended by [0007](0007-fresh-shells-no-replay.md)
 - **Date:** 2026-10-19
 
 ## Context

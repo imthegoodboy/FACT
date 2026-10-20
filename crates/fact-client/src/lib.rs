@@ -434,14 +434,6 @@ struct ScrollbarGeometry {
     scroll_offset: usize,
 }
 
-fn scrolled_offset(offset: usize, history: usize, delta: i64) -> usize {
-    if delta >= 0 {
-        offset.saturating_add(delta as usize).min(history)
-    } else {
-        offset.saturating_sub((-delta) as usize)
-    }
-}
-
 fn scrollbar_geometry(pane: &PaneView) -> Option<ScrollbarGeometry> {
     let height = pane.slot.height.min(pane.content_rows);
     // Only show the bar once scrollback is meaningful. One or two prompt lines
@@ -800,7 +792,7 @@ impl App {
         let pane_id = pane.id;
         let history = pane.history_lines;
         if history == 0 {
-            self.set_status("No FACT scrollback here. Shift+wheel bypasses app mouse capture.");
+            self.set_status("No scrollback above this pane yet.");
             return;
         }
         self.selection = None;
@@ -814,13 +806,14 @@ impl App {
         let Some(pane_id) = self.scroll_mode else {
             return;
         };
-        let Some((history, offset, rows)) = self
-            .focused_pane()
-            .filter(|pane| pane.id == pane_id)
-            .map(|pane| (pane.history_lines, pane.scroll_offset, pane.content_rows))
+        let Some((history, rows)) = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.panes.iter().find(|pane| pane.id == pane_id))
+            .map(|pane| (pane.history_lines, pane.content_rows))
         else {
             self.scroll_mode = None;
-            self.set_status("Focused pane changed; scroll mode closed.");
+            self.set_status("The scrolled pane closed; scroll mode ended.");
             return;
         };
         let page = i64::from(rows.max(1));
@@ -833,10 +826,10 @@ impl App {
                 self.scroll_mode = None;
                 self.set_status("Scroll mode closed.");
             }
-            CKeyCode::Up => self.scroll_relative(pane_id, offset, history, 1),
-            CKeyCode::Down => self.scroll_relative(pane_id, offset, history, -1),
-            CKeyCode::PageUp => self.scroll_relative(pane_id, offset, history, page),
-            CKeyCode::PageDown => self.scroll_relative(pane_id, offset, history, -page),
+            CKeyCode::Up => self.scroll_relative(pane_id, 1),
+            CKeyCode::Down => self.scroll_relative(pane_id, -1),
+            CKeyCode::PageUp => self.scroll_relative(pane_id, page),
+            CKeyCode::PageDown => self.scroll_relative(pane_id, -page),
             CKeyCode::Home | CKeyCode::Char('g') => {
                 self.scroll_to(pane_id, history, history);
             }
@@ -847,8 +840,9 @@ impl App {
         }
     }
 
-    fn scroll_relative(&mut self, pane: u64, offset: usize, history: usize, delta: i64) {
-        self.scroll_to(pane, scrolled_offset(offset, history, delta), history);
+    fn scroll_relative(&mut self, pane: u64, delta: i64) {
+        let delta = delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        let _ = self.send(Command::ScrollPane { pane, delta });
     }
 
     fn scroll_to(&mut self, pane: u64, offset: usize, history: usize) {
@@ -1760,27 +1754,29 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
-                    let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
-                        3
-                    } else {
-                        -3
-                    };
-                    let _ = self.send(Command::ScrollPane {
-                        pane: geometry.pane,
-                        delta,
-                    });
-                    return;
-                }
                 let delta = if matches!(mouse.kind, MouseEventKind::ScrollUp) {
                     3
                 } else {
                     -3
                 };
-                if self.scroll_mode.is_some() {
-                    if let Some(pane) = self.focused_id() {
+                if let Some(pane) = self.scroll_mode {
+                    let exists = self
+                        .frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.panes.iter().any(|view| view.id == pane));
+                    if exists {
                         let _ = self.send(Command::ScrollPane { pane, delta });
+                    } else {
+                        self.scroll_mode = None;
+                        self.set_status("The scrolled pane closed; scroll mode ended.");
                     }
+                    return;
+                }
+                if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
+                    let _ = self.send(Command::ScrollPane {
+                        pane: geometry.pane,
+                        delta,
+                    });
                     return;
                 }
                 let Some((pane, x, y)) = self.pane_at(mouse.column, content_y) else {
@@ -2283,16 +2279,6 @@ mod tests {
         assert!(tray.contains(9, 3));
         assert!(!tray.contains(5, 3));
         assert!(!tray.contains(9, 2));
-    }
-
-    #[test]
-    fn scroll_offsets_are_clamped() {
-        assert_eq!(scrolled_offset(0, 100, 3), 3);
-        assert_eq!(scrolled_offset(99, 100, 3), 100);
-        assert_eq!(scrolled_offset(100, 100, 3), 100);
-        assert_eq!(scrolled_offset(2, 100, -3), 0);
-        assert_eq!(scrolled_offset(50, 100, -10), 40);
-        assert_eq!(scrolled_offset(50, 100, 10), 60);
     }
 
     #[test]

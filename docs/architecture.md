@@ -153,7 +153,8 @@ Saved-layout restart:
 
 1. The session exists in SQLite but no live session exists in this daemon.
 2. The store validates identity, layout and pane records. v1 databases have
-   their legacy snapshot columns cleared during migration.
+   their legacy snapshot columns securely cleared, the database vacuumed and the
+   WAL truncated during migration.
 3. The daemon remaps pane IDs and spawns a fresh shell in every saved pane,
    using the saved profile and working directory.
 4. PIDs and exit codes in the new pane records are reset.

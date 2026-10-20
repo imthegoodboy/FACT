@@ -43,8 +43,9 @@ Persist layout and pane metadata, not terminal output.
 - Restart loses previous scrollback and on-screen context. This is intentional;
   use live detach/reattach when that context matters.
 - Exports are smaller and no longer contain terminal output.
-- v0.2 databases are still readable. The migration clears snapshot data, and the
-  legacy columns may remain until a future schema vacuum.
+- v0.2 databases are still readable. The migration overwrites and clears snapshot
+  data, vacuums the database and truncates the WAL. The legacy columns remain in
+  the schema but are empty.
 - A client and daemon must both speak protocol 5 or newer.
 
 ## Alternatives considered

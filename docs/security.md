@@ -105,8 +105,8 @@ screen or a command log:
 - SQLite stores pane identity, profile, working directory and layout, not
   terminal output or input history
 - a v0.2 database may still contain legacy snapshot columns; the v2 migration
-  clears them before the session is loaded, and the current code never reads or
-  replays them
+  securely clears them, vacuums the database and truncates the WAL before the
+  session is loaded, and the current code never reads or replays them
 - session load validates pane IDs and layout consistency, and invalid data fails
   closed rather than starting an inconsistent process tree
 - imports are parsed as versioned JSON, validated, and always receive a new
@@ -148,7 +148,7 @@ print the daemon token.
 | Unauthenticated command injection over IPC | Random 256-bit token, constant-time comparison, one-time stream grants. |
 | Forged or corrupted layout data | Structured JSON validation, pane/layout consistency checks and transactional SQLite writes. |
 | Imported session overwrites an existing one | Import always creates a fresh identity; name collisions require explicit overwrite. |
-| Legacy v0.2 snapshots exposing old screen content | The v2 migration clears snapshot columns before the session is loaded; they are never replayed. |
+| Legacy v0.2 snapshots exposing old screen content | The v2 migration securely clears the snapshot columns, vacuums the database and truncates the WAL before the session is loaded; they are never replayed. |
 | Credential leakage in logs | Token and environment values are not logged. |
 
 ## Out of scope and limitations
@@ -164,7 +164,8 @@ print the daemon token.
 - **Terminal output can contain secrets.** Commands, environment dumps, tokens
   printed to the terminal and prompts remain in daemon memory and scrollback, but
   FACT no longer writes them to SQLite or exports. A v0.2 database backup may
-  still contain legacy snapshots until it is opened and migrated.
+  still contain legacy snapshots until it is opened and migrated; migration
+  securely clears the live database and its WAL.
 - **Child processes are not sandboxed.** Shells and programs run with your normal
   user rights.
 - **Windows 10 is not verified for v0.3.0.** See the compatibility section in the

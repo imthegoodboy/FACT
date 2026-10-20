@@ -246,12 +246,6 @@ impl Config {
         if !(1..=600).contains(&self.persist_interval_secs) {
             issues.push("persist_interval_secs must be in 1..=600".to_string());
         }
-        if !(1..=3600).contains(&self.snapshot_interval_secs) {
-            issues.push("snapshot_interval_secs must be in 1..=3600".to_string());
-        }
-        if !(16 * 1024..=4 * 1024 * 1024).contains(&self.snapshot_max_bytes) {
-            issues.push("snapshot_max_bytes must be in 16384..=4194304".to_string());
-        }
         if !(1..=128).contains(&self.max_sessions) {
             issues.push("max_sessions must be in 1..=128".to_string());
         }
@@ -632,11 +626,12 @@ mod tests {
     #[test]
     fn legacy_snapshot_settings_are_accepted_but_unused() {
         let parsed: Config = toml::from_str(
-            "config_version = 1\nsnapshot_interval_secs = 60\nsnapshot_max_bytes = 524288\n",
+            "config_version = 1\nsnapshot_interval_secs = 0\nsnapshot_max_bytes = 1\n",
         )
         .unwrap();
         parsed.validate().unwrap();
-        assert_eq!(parsed.snapshot_interval_secs, 60);
+        assert_eq!(parsed.snapshot_interval_secs, 0);
+        assert_eq!(parsed.snapshot_max_bytes, 1);
     }
 
     #[test]
