@@ -461,7 +461,14 @@ fn context_menu_actions_respond_to_clicks() {
         Duration::from_secs(10)
     ));
     assert!(
-        screen_text(&output, 120, 35).contains("Ctrl+b then Shift+r"),
+        wait_for_screen(
+            &process,
+            &mut output,
+            "Ctrl+b then Shift+r",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
         "menu cut off a configured shortcut despite sufficient terminal width"
     );
     process
@@ -1480,7 +1487,11 @@ fn capture_readme_screens() {
         );
         thread::sleep(Duration::from_millis(50));
     }
-    let capture = |output: &[u8], name: &str| {
+    let capture = |output: &mut Vec<u8>, name: &str| {
+        // A matching label can arrive before the rest of a multi-write frame.
+        // Let the stationary scene finish painting before recording its cells.
+        thread::sleep(Duration::from_millis(350));
+        drain(&process, output);
         let mut terminal = TerminalModel::new(120, 35, 0, TerminalEventSink::new());
         terminal.feed(output);
         let snapshot = terminal.snapshot();
@@ -1493,7 +1504,7 @@ fn capture_readme_screens() {
         )
         .unwrap();
     };
-    capture(&output, "grid");
+    capture(&mut output, "grid");
     process.write(b"\x02k").unwrap();
     assert!(wait_for_screen(
         &process,
@@ -1503,7 +1514,7 @@ fn capture_readme_screens() {
         35,
         Duration::from_secs(10)
     ));
-    capture(&output, "commands");
+    capture(&mut output, "commands");
     process.write(b"\x1b").unwrap();
     thread::sleep(Duration::from_millis(200));
     process.write(b"\x1b[<2;40;8M\x1b[<2;40;8m").unwrap();
@@ -1515,7 +1526,7 @@ fn capture_readme_screens() {
         35,
         Duration::from_secs(10)
     ));
-    capture(&output, "pane-menu");
+    capture(&mut output, "pane-menu");
     process.write(b"\x1b").unwrap();
     thread::sleep(Duration::from_millis(200));
     process.write(b"\x02z").unwrap();
@@ -1538,7 +1549,7 @@ fn capture_readme_screens() {
         35,
         Duration::from_secs(10)
     ));
-    capture(&output, "history-hover");
+    capture(&mut output, "history-hover");
     process.write(b"\x02d").unwrap();
     assert_eq!(process.wait_for_exit(Duration::from_secs(15)), Some(0));
 }
