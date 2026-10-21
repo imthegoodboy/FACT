@@ -11,8 +11,8 @@ use ratatui::layout::Position;
 
 use crate::{
     action_label, filtered_palette, fit_text as fit, help_lines, minimized_tray_rect, new_tab_rect,
-    palette_items, pane_scroll_mode, tab_ranges, utc_clock, App, ContextState, HelpState, Overlay,
-    PaletteState, PromptKind, PromptState, ScrollMode, SearchState, SessionsState,
+    palette_items, pane_scroll_mode, tab_ranges, App, ContextState, HelpState, Overlay,
+    PaletteState, PromptKind, PromptState, ScrollMode, SearchState,
 };
 
 impl App {
@@ -222,7 +222,7 @@ impl App {
     /// Draw the cursor into the cell grid instead of leaving it to the host
     /// terminal. A hardware cursor is repositioned every frame and can blink or
     /// flicker while a fast TUI (an AI agent, for example) repaints. An explicit,
-    /// steady cursor follows the daemon snapshot exactly and is visually stable.
+    /// steady cursor follows the engine snapshot exactly and is visually stable.
     fn render_cursor(&self, frame: &mut Frame, pane: &PaneView, content: Rect) {
         if !pane.focused || self.overlay.is_some() || pane.scroll_offset > 0 {
             return;
@@ -465,7 +465,6 @@ impl App {
             Overlay::Prompt(prompt) => self.render_prompt(frame, area, prompt),
             Overlay::Confirm(confirm) => self.render_confirm(frame, area, confirm),
             Overlay::Context(context) => self.render_context(frame, area, context),
-            Overlay::Sessions(sessions) => self.render_sessions(frame, area, sessions),
         }
     }
 
@@ -870,83 +869,6 @@ impl App {
         frame.render_widget(
             Paragraph::new(lines).style(Style::default().bg(self.theme.bg)),
             inner,
-        );
-    }
-
-    fn render_sessions(&self, frame: &mut Frame, area: Rect, sessions: &SessionsState) {
-        let inner = panel(
-            frame,
-            area,
-            " Sessions ",
-            72,
-            area.height.saturating_sub(4).max(9),
-            self.theme.accent,
-            &self.theme,
-        );
-        if inner.height < 2 {
-            return;
-        }
-        let visible = usize::from(inner.height.saturating_sub(2));
-        let selected = sessions
-            .selected
-            .min(sessions.sessions.len().saturating_sub(1));
-        let start = selected.saturating_sub(visible.saturating_sub(1));
-        let mut lines = Vec::new();
-        for (index, session) in sessions
-            .sessions
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(visible)
-        {
-            let is_selected = index == selected;
-            let current = session.name == self.info.session.name;
-            let state = if session.live {
-                "live"
-            } else if session.archived {
-                "archived"
-            } else {
-                "saved"
-            };
-            let marker = if current { "▸" } else { " " };
-            let text = format!(
-                " {marker} {:<20} {:<8} {:>3} panes  {}",
-                session.name,
-                state,
-                session.pane_count,
-                utc_clock(session.updated_at_ms)
-            );
-            let style = if is_selected {
-                Style::default()
-                    .bg(self.theme.selection)
-                    .fg(self.theme.fg)
-                    .add_modifier(Modifier::BOLD)
-            } else if current {
-                Style::default().fg(self.theme.accent)
-            } else {
-                Style::default().fg(self.theme.fg)
-            };
-            lines.push(Line::from(Span::styled(
-                fit(&text, usize::from(inner.width)),
-                style,
-            )));
-        }
-        frame.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(self.theme.bg).fg(self.theme.fg)),
-            Rect::new(
-                inner.x,
-                inner.y,
-                inner.width,
-                inner.height.saturating_sub(1),
-            ),
-        );
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "Enter attach · Esc close",
-                Style::default().fg(self.theme.muted),
-            )))
-            .style(Style::default().bg(self.theme.bg)),
-            Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
         );
     }
 }

@@ -2,7 +2,7 @@
 
 FACT reads an optional TOML file. Without one, built-in defaults are used. The
 default path is `%LOCALAPPDATA%\FACT\config.toml`; `fact config path` prints the
-path actually in use.
+path actually in use. A normal FACT launch never writes this file.
 
 ```powershell
 fact config validate          # parse, validate and compile all bindings
@@ -12,33 +12,32 @@ fact config init --force     # replace an existing file
 ```
 
 Unknown fields, an unknown `config_version`, duplicate keybindings and invalid
-values are errors. `fact doctor` also validates the config.
+values are errors. A launch with an invalid configuration fails before any
+shell starts.
 
 ## Paths and environment
 
-Resolution order for the data directory:
+Resolution order for the base directory:
 
-1. `--data-dir DIR`
-2. `FACT_HOME`
-3. `%LOCALAPPDATA%\FACT`
-4. `.fact` in the current directory if `LOCALAPPDATA` is unavailable
+1. `FACT_HOME`
+2. `%LOCALAPPDATA%\FACT`
+3. `.fact` in the current directory if `LOCALAPPDATA` is unavailable
 
-`--config FILE` overrides only the config file. Relative paths are resolved
+`--config FILE` overrides the configuration file. Relative paths are resolved
 against the process working directory.
 
 | Path | Contents |
 | --- | --- |
 | `config.toml` | This configuration. |
-| `sessions.db` | SQLite database. |
-| `runtime\daemon.json` | Protected daemon identity and authentication token. |
-| `logs\daemon.log` | Daemon log. |
-| `logs\client.log` | Client log. |
-| `exports\` | Default export destination. |
+| No other paths | FACT creates no database, log, runtime identity, saved layout or exports. |
+
+FACT does not accept a `--data-dir` option. The base directory only locates the
+optional configuration file; the rest of the process is in memory.
 
 ## Top-level settings
 
 ```toml
-config_version = 1
+config_version = 2
 prefix = "ctrl+space"
 theme = "fact-dark"
 
@@ -49,38 +48,29 @@ mouse = true
 confirm_close = true
 copy_on_select = false
 
-persist_interval_secs = 10
-max_sessions = 32
-max_frame_cells = 2000000
-daemon_log_level = "info"
-
 default_profile = "auto"
 ```
 
 | Key | Default | Valid values / meaning |
 | --- | --- | --- |
-| `config_version` | `1` | Must be exactly `1`. |
-| `prefix` | `ctrl+space` | Chord that arms FACT commands. May not use the literal word `prefix`. |
+| `config_version` | `2` | Must be exactly `2`. Version 1 files and removed daemon settings are rejected. |
+| `prefix` | `ctrl+space` | Chord that arms FACT commands. May not include the literal word `prefix`. |
 | `theme` | `fact-dark` | `fact-dark`, `fact-light`, `dracula`, `nord`, `gruvbox`. |
 | `scrollback_lines` | `8000` | 100-100000 retained lines per pane. |
 | `min_pane_width` | `16` | At least 12 columns per pane before focused-pane mode. The default fits a 4x2 grid in an 80-column window. |
 | `min_pane_height` | `5` | At least 3 rows per pane before focused-pane mode. |
-| `mouse` | `true` | Enable mouse capture, clicks and split dragging. |
-| `confirm_close` | `true` | Ask before closing a pane, tab or the UI with live shells. |
+| `mouse` | `true` | Enable mouse capture, clicks, selection and split dragging. |
+| `confirm_close` | `true` | Ask before closing a pane or tab. Quitting FACT never prompts and closes every shell. |
 | `copy_on_select` | `false` | Copy a completed mouse selection automatically. |
-| `persist_interval_secs` | `10` | 1-600 seconds between metadata/layout saves. |
-| `max_sessions` | `32` | 1-128. |
-| `max_frame_cells` | `2000000` | 10000-50000000; upper bound for one frame. |
-| `daemon_log_level` | `info` | `trace`, `debug`, `info`, `warn`, `error`. |
 | `default_profile` | `auto` | `auto` or a key from `[profiles]`. |
 
-The v0.2 keys `snapshot_interval_secs` and `snapshot_max_bytes` are still accepted
-so existing configuration files continue to load, but they are ignored. FACT no
-longer captures or persists terminal output.
+`F2` cycles themes for the current UI run without writing the config. The next
+launch uses the `theme` value again. The command palette also has a "Cycle color
+theme" action.
 
-`F2` cycles themes for the current UI session without writing the config. The
-next launch uses the `theme` value again. The command palette also has a
-"Cycle color theme" action.
+There are no persistence, session-limit or daemon-log settings. Old v0.3 keys
+such as `max_sessions`, `persist_interval_secs` and `daemon_log_level` are
+unknown fields and are rejected.
 
 ## Profiles
 
@@ -119,11 +109,12 @@ enabled = false
 
 Profile names are 1-64 ASCII letters, digits, `-`, `_` or `.`. Select one with
 `--profile NAME` or by setting `default_profile`. An unknown or disabled profile
-is an error.
+is an error. `--profile` applies to the initial shells in a `--grid`; new tabs
+use `default_profile`.
 
 FACT also sets `TERM=xterm-256color`, `COLORTERM=truecolor`,
-`TERM_PROGRAM=FACT`, `TERM_PROGRAM_VERSION` and `FACT=1` unless your profile or
-environment already defines them.
+`TERM_PROGRAM=FACT`, `TERM_PROGRAM_VERSION`, `FACT=1` and an informational
+`FACT_PANE` unless your profile or environment already defines them.
 
 ## Environment
 
@@ -134,9 +125,10 @@ MY_PROJECT_ROOT = "C:\\src"
 ```
 
 Global values apply to every pane. Profile values override them. Environment
-values are applied to the child process and are never written to logs or the
-session database. Do not put secrets in the config file: it is ordinary user-readable
-state, not a credential store.
+values are applied to child processes; FACT writes no runtime state. Do not put
+secrets in the config file: it is ordinary user-readable configuration, not a
+credential store. Values are present in the FACT process and its child
+environment while FACT runs.
 
 ## Keybindings
 
@@ -162,7 +154,8 @@ help = "f1"
 
 Every action must have exactly one binding after overrides are applied. Direct
 bindings cannot collide with each other or with prefix bindings. A direct key
-that is not a FACT binding is sent to the focused shell.
+that is not a FACT binding is sent to the focused shell. F1 help and the palette
+show the bindings currently compiled from this file.
 
 ### Default bindings
 
@@ -188,29 +181,29 @@ that is not a FACT binding is sent to the focused shell.
 | Command palette | `palette` | Prefix then `K` |
 | Search focused pane | `search` | Prefix then `/` |
 | Browse scrollback | `scroll_mode` | Prefix then `[` |
-| Switch session | `sessions` | Prefix then `S` |
-| Detach, keep shells | `detach` | Prefix then `D` |
 | Help | `help` | `F1` |
-| Copy selection | `copy` | `Ctrl+Shift+C` or `Ctrl+C` with a selection |
-| Paste | `paste` | `Ctrl+Shift+V` or `Ctrl+V` |
-| Quit UI | `quit` | Prefix then `Shift+Q` |
+| Copy selection | `copy` | `Ctrl+Shift+C` |
+| Paste | `paste` | `Ctrl+Shift+V` |
+| Quit FACT, close shells | `quit` | Prefix then `Shift+Q` |
 | Swap with next pane | `swap_pane` | Prefix then `W` |
 | Move pane to next tab | `move_pane` | Prefix then `Shift+O` |
 
-Additional interaction that is not a configurable chord:
+Additional interaction that is not a remappable action:
 
-- `F2` cycles themes unless you bind `F2` to another action.
 - `Alt+M` maximizes the focused pane and `Alt+N` shows the full grid without
-  using the prefix. `Alt+T` terminates the active grid and all of its panes after
-  confirmation. `Ctrl+M` is Enter in terminal input, so it cannot be used as a
-  direct shortcut.
+  using the prefix. `Alt+T` closes the active tab and all of its panes after
+  confirmation. A configured direct binding takes precedence over these aliases.
+- `F2` cycles themes unless you bind `F2` to another action.
+- `Ctrl+C` copies a selection; with no selection it is sent to the shell as
+  normal terminal input. `Ctrl+V` pastes. `Ctrl+Insert` and `Shift+Insert` are
+  accepted as clipboard aliases.
 - Prefix then `[` enters scroll mode without sending normal keys to the
   application. Up/Down scroll one line, PgUp/PgDn scroll one page, Home/End jump
   to the top or bottom, and Esc or `q` exits. In a shell this browses FACT's
   scrollback. In an alternate-screen app it becomes app scroll: PgUp/PgDn,
   Up/Down and Home/End are forwarded to the app so its own transcript moves.
-- Full-screen applications, including agent CLIs configured for that mode, own the
-  alternate screen, which has no terminal scrollback. FACT adds no scrollbar
+- Full-screen applications, including agent CLIs configured for that mode, own
+  the alternate screen, which has no terminal scrollback. FACT adds no scrollbar
   to alternate-screen or mouse-controlled panes. Wheel and Shift+wheel still
   page full-screen apps: mouse-aware apps receive wheel reports at the original
   cell, and keyboard-only apps receive PageUp/PageDown, avoiding prompt-history
@@ -224,37 +217,33 @@ Additional interaction that is not a configurable chord:
   keeps the whole grid visible even below those limits; `Alt+M` maximizes again.
 - Drag a split gutter with the mouse to resize.
 - Drag in pane content to select text; `Shift`+drag selects even when the
-  application has requested mouse reporting.
-  The selected pane's display pauses while its process continues running; copied
-  text comes from that snapshot. Esc, typing or scrolling resumes live output.
-- Click a pane body to focus it. A single-tab session has no tab strip; with two
-  or more tabs, click a tab to select it and click the trailing `+` to add one.
-- Right-click a pane for split, zoom, minimize, new tab, rename, search, restart,
-  close and copy actions. Applications that request mouse reporting receive the
-  click instead; Shift+right-click opens FACT's menu in that case.
+  application has requested mouse reporting. Double-click selects a word and
+  triple-click selects a visual line. The selected pane's display pauses while
+  its process continues running; copied text comes from that snapshot. Esc,
+  typing or scrolling resumes live output.
+- Right-click copies a current selection. With no selection it pastes into a
+  shell, or is forwarded as a right-click to an application that requested mouse
+  reporting. `Shift`+right-click always opens FACT's pane menu.
+- Click a pane body to focus it. A single-tab workspace has no tab strip; with
+  two or more tabs, click a tab to select it and click the trailing `+` to add
+  one.
 - Hover near a shell pane's right edge to reveal its history scrollbar, then
   click or drag it. Moving away hides it after any active drag ends; losing
-  terminal focus clears the hover. FACT adds no scrollbar to
-  alternate-screen or mouse-controlled apps. Their wheel events still reach
-  the application, with page-key fallback for keyboard-only full-screen apps.
+  terminal focus clears the hover. FACT adds no scrollbar to alternate-screen or
+  mouse-controlled apps. Their wheel events still reach the application, with
+  page-key fallback for keyboard-only full-screen apps.
 - When panes are minimized, a small `▾ N` tray appears at the bottom-right; the
   same tray is clickable to restore them.
-- `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Insert` /
-  `Shift+Insert` are accepted aliases outside the remappable action table.
-
-`F1` help and the palette show the bindings currently compiled from this file,
-including your overrides.
 
 ## Examples
 
-A three-profile setup with a custom prefix and a longer autosave interval:
+A three-profile setup with a custom prefix:
 
 ```toml
-config_version = 1
+config_version = 2
 prefix = "ctrl+b"
 theme = "nord"
 default_profile = "pwsh"
-persist_interval_secs = 15
 
 [profiles.pwsh]
 command = "pwsh.exe"
@@ -282,6 +271,5 @@ Validate before launching:
 
 ```powershell
 fact config validate --json
-fact doctor
 fact --profile ubuntu --grid 4
 ```

@@ -1,16 +1,16 @@
 # FACT per-user uninstaller.
 #
-# By default this removes the program and its user PATH entry. Sessions,
-# configuration and logs in %LOCALAPPDATA%\FACT are kept.
+# By default this removes the program and its user PATH entry. The optional
+# configuration in %LOCALAPPDATA%\FACT is kept.
 #
-# Remove data as well (irreversible):
-#   .\scripts\uninstall.ps1 -PurgeData
+# Remove configuration as well (irreversible):
+#   .\scripts\uninstall.ps1 -PurgeConfig
 
 [CmdletBinding()]
 param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\FACT"),
-    [string]$DataDir,
-    [switch]$PurgeData
+    [Alias("PurgeData")]
+    [switch]$PurgeConfig
 )
 
 $ErrorActionPreference = "Stop"
@@ -139,15 +139,6 @@ $InstallDir = Resolve-NormalizedPath $InstallDir
 $exe = Join-Path $InstallDir "fact.exe"
 
 if (Test-Path -LiteralPath $exe) {
-    Write-Host "Stopping FACT daemon..."
-    try {
-        & $exe shutdown 2>$null | Out-Null
-    } catch {
-    }
-    Start-Sleep -Milliseconds 500
-}
-
-if (Test-Path -LiteralPath $exe) {
     try {
         Remove-Item -LiteralPath $exe -Force
         Write-Host "Removed $exe"
@@ -169,10 +160,8 @@ if (Test-Path -LiteralPath $InstallDir) {
     }
 }
 
-if ($PurgeData) {
-    $target = if ($DataDir) {
-        $DataDir
-    } elseif ($env:FACT_HOME) {
+if ($PurgeConfig) {
+    $target = if ($env:FACT_HOME) {
         $env:FACT_HOME
     } else {
         Join-Path $env:LOCALAPPDATA "FACT"
@@ -185,14 +174,14 @@ if ($PurgeData) {
         $root = [IO.Path]::GetPathRoot($resolved).TrimEnd('\')
         $profile = Resolve-NormalizedPath $env:USERPROFILE
         if ($resolved -eq $root -or $resolved -eq $profile) {
-            throw "Refusing to purge unsafe data path: $resolved"
+            throw "Refusing to purge unsafe configuration path: $resolved"
         }
         if ($profile.StartsWith("$resolved\", [StringComparison]::OrdinalIgnoreCase)) {
             throw "Refusing to purge an ancestor of the user profile: $resolved"
         }
         $children = @(Get-ChildItem -LiteralPath $resolved -Force)
         if ($children.Count -gt 0) {
-            $markers = @("sessions.db", "config.toml", "runtime", "logs", "exports")
+            $markers = @("config.toml")
             $looksLikeFact = $false
             foreach ($marker in $markers) {
                 if (Test-Path -LiteralPath (Join-Path $resolved $marker)) {
@@ -201,19 +190,19 @@ if ($PurgeData) {
                 }
             }
             if (-not $looksLikeFact) {
-                throw "Refusing to purge '$resolved': it has no FACT data markers. Remove it manually if this is intentional."
+                throw "Refusing to purge '$resolved': it has no FACT configuration markers. Remove it manually if this is intentional."
             }
         }
         Remove-Item -LiteralPath $resolved -Recurse -Force
-        Write-Host "Purged FACT data: $resolved" -ForegroundColor Yellow
+        Write-Host "Purged FACT configuration: $resolved" -ForegroundColor Yellow
     } else {
-        Write-Host "No FACT data found at $target"
+        Write-Host "No FACT configuration found at $target"
     }
 } else {
-    $data = if ($DataDir) { $DataDir } elseif ($env:FACT_HOME) { $env:FACT_HOME } else {
+    $configRoot = if ($env:FACT_HOME) { $env:FACT_HOME } else {
         Join-Path $env:LOCALAPPDATA "FACT"
     }
-    Write-Host "Sessions and configuration kept at $data (use -PurgeData to remove)."
+    Write-Host "Configuration kept at $configRoot (use -PurgeConfig to remove)."
 }
 
 Write-Host "Uninstall complete."

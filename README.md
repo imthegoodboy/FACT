@@ -1,7 +1,7 @@
 # FACT
 
 <p align="center">
-  <img src="docs/screenshots/banner.svg" alt="FACT — Windows-native terminal multiplexer. Real shells. Your workspace." width="100%">
+  <img src="docs/screenshots/banner.svg" alt="FACT — Windows-native terminal workspace. Real shells. Your workspace." width="100%">
 </p>
 
 <p align="center">
@@ -12,21 +12,23 @@
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#everyday-use">Get started</a> ·
+  <a href="#keyboard-shortcuts">Shortcuts</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="docs/configuration.md">Configure</a> ·
   <a href="docs/architecture.md">Architecture</a>
 </p>
 
-FACT is a Windows-native terminal multiplexer written in Rust. Real ConPTY
-shells live under a per-user background daemon, so tabs, splits and grids keep
-running when the UI detaches or the terminal window closes.
+FACT is a Windows-native terminal workspace written in Rust. It runs real
+ConPTY shells with tabs, nested splits and grids in one ordinary terminal
+window. Everything lives in the `fact.exe` process: close FACT and every shell
+it owns closes with it. There is no background daemon and nothing is saved.
 
 ![Eight live PowerShell panes in FACT, each showing its own process ID, with no permanent scrollbar or title row.](docs/screenshots/grid.png)
 
 *One `fact --grid 8` workspace. Eight independent ConPTY shells. Each pane above
 shows its actual process ID. [Explore the controls ↓](#screenshots)*
 
-> **Status:** v0.3.3. Windows 11 is the primary, continuously tested target.
+> **Status:** pre-1.0. Windows 11 is the primary, continuously tested target.
 > Windows 10 1809+ is intended to work but is not yet verified; see
 > [Compatibility](#compatibility). Release artifacts are produced only from
 > version tags after every gate in this repository passes.
@@ -36,23 +38,23 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
 - **Real shells, not fake panes.** `fact --grid 8` starts eight independent
   ConPTY processes. Each pane has its own PID, terminal state, exit code and
   scrollback.
-- **Survives detach.** The UI can exit while the daemon keeps shells running.
-  `fact resume` reattaches to the same processes.
-- **Survives a daemon restart.** The saved layout reopens with a fresh shell in
-  every pane. Old screen output is discarded, never replayed, and there is no
-  recovery dialog.
+- **One process, no hidden state.** There is no daemon, named pipe, SQLite
+  database or saved layout. Shells are children of the FACT process. Closing the
+  UI, quitting with the prefix shortcut or closing the last tab ends them all.
 - **Tabs, splits and grids.** Binary split tree, focus, zoom, minimize, move and
   swap. Tiny terminals temporarily focus one pane, with `Alt+M`/`Alt+N` to
   maximize or restore the full grid at any size.
 - **Minimal black TUI.** Plain terminal panes with no title rows, buttons or
-  permanent status bar. A one-line tab strip appears only when a session has
-  more than one tab. Panes have a scrollbar on hover in shells, a steady cursor,
-  keyboard/context-menu actions, command palette, pane search, five themes and
-  F1 help.
-- **Local-only security.** Authenticated named pipes with a current-user DACL.
-  No TCP or UDP listener, no remote access and no privileged service.
-- **Scriptable CLI.** JSON output, offline session management and a `doctor`
-  command that checks the installation end to end.
+  permanent status bar. A one-line tab strip appears only when the workspace
+  has more than one tab. Panes have a scrollbar on hover in shells, a steady
+  cursor, keyboard/context-menu actions, a command palette, pane search, five
+  themes and F1 help.
+- **PowerShell-style mouse and clipboard behavior.** Drag selects, double-click
+  selects a word, triple-click selects a line, right-click copies a selection or
+  pastes when there is none, and `Shift`+right-click opens FACT's pane menu.
+- **Local-only by construction.** No network listener, no service, no elevation
+  requirement and no control channel outside the process. Configuration is
+  ordinary local TOML.
 
 ## Install
 
@@ -63,11 +65,11 @@ scripts:
 # Downloads the latest release, verifies SHA256SUMS.txt, installs per user.
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
 
-# Remove the program but keep sessions and configuration.
+# Remove the program but keep your configuration.
 powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1
 
-# Remove the program and %LOCALAPPDATA%\FACT.
-powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1 -PurgeData
+# Remove the program and %LOCALAPPDATA%\FACT (configuration).
+powershell -ExecutionPolicy Bypass -File .\scripts\uninstall.ps1 -PurgeConfig
 ```
 
 The installer does not require administrator rights. From a checkout, install a
@@ -77,6 +79,9 @@ locally built binary with:
 cargo build --release --bin fact
 .\scripts\install.ps1 -BinaryPath .\target\release\fact.exe -Force
 ```
+
+Close every running FACT window before replacing the executable. Because there
+is no background process, a new window always starts with fresh shells.
 
 ## Build from source
 
@@ -94,46 +99,53 @@ cargo run --bin fact -- --grid 4
 ## Everyday use
 
 ```powershell
-fact                       # create or resume the default session
-fact --grid 8              # start or reattach the dedicated grid-8 session
-fact --session dev         # warm reattach, or reopen the saved layout after a restart
-fact sessions              # saved, live and archived sessions
-fact attach dev            # attach the TUI to a running session
-fact detach                # detach every attached UI, keep shells running
-fact save dev              # persist the layout immediately
-fact doctor                # config, database, ACL, shell and ConPTY checks
+fact                              # one shell
+fact --grid 8                     # eight shells in a grid
+fact --profile pwsh --grid 4      # use a configured shell profile
+fact --cwd . --grid 1             # start the initial shells in this directory
+fact config path                  # print the configuration file in use
+fact config validate              # parse and validate configuration
+fact config init                  # write a documented default config.toml
 ```
+
+`--grid N` accepts 1-32 and always starts a fresh workspace. There is no
+resume, attach, detach, saved layout or session name to remember. If you want
+the same arrangement again, launch FACT with the same options.
 
 Inside the TUI the default prefix is `Ctrl+Space`. Press `F1` for the full,
 remappable keybinding list. `Ctrl+Space k` opens the command palette and
 `Ctrl+Space /` searches the focused pane's visible screen and scrollback.
 
 There are no per-pane buttons. Use `Ctrl+Space` then the action from F1 help, or
-right-click a pane for split, maximize/show-all, minimize, restart, close and
-copy. `Alt+M` maximizes the focused pane, `Alt+N` restores the full grid, and
-`Alt+T` terminates the active grid after confirmation. `Ctrl+Space` then `[`
-enters scroll mode for the focused pane; use arrows, PgUp/PgDn or Home/End and
-press Esc to return. In a shell this browses FACT's searchable history. A
-full-screen app owns its viewport, so the same gestures page the app's own
-transcript. Use `Alt+N` when a narrow window would otherwise leave you in
-focused-pane mode. `Ctrl+M` is Enter in terminal input, so it is not available as
-a direct shortcut.
-Mouse wheel scrollback works in shells. Hover near a pane's right edge to reveal
-its scrollbar, then click or drag it. Moving away hides it after any active drag ends. `Ctrl+C` copies a
-selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
+`Shift`+right-click a pane for split, maximize/show-all, minimize, restart,
+close, search and copy. `Alt+M` maximizes the focused pane, `Alt+N` restores the
+full grid, and `Alt+T` closes the active tab after confirmation.
+
+`Ctrl+Space` then `[` enters scroll mode for the focused pane; use arrows,
+PgUp/PgDn or Home/End and press Esc to return. In a shell this browses FACT's
+searchable history. A full-screen app owns its viewport, so the same gestures
+page the app's own transcript.
+
+`Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` remain available alongside `Ctrl+Insert` / `Shift+Insert`.
-Use `Shift`+drag to select text when an app captures the mouse. Selection holds
-that pane's visible output steady while the process keeps running. `Esc`, typing,
-or scrolling resumes its live view. `Shift`+right-click opens FACT's menu inside
-mouse-enabled apps.
+Right-click also copies a current selection; with no selection it pastes into a
+shell. When an application captures the mouse, right-click is forwarded to the
+application unless you hold Shift, which always opens FACT's menu.
+
+Mouse wheel scrollback works in shells. Hover near a pane's right edge to reveal
+its scrollbar, then click or drag it. Moving away hides it after any active drag
+ends. Use `Shift`+drag to select text when an app captures the mouse. Selection
+holds that pane's visible output steady while the process keeps running. `Esc`,
+typing, or scrolling resumes the live view.
 
 ### Full-screen apps and agent CLIs
 
 FACT adds no scrollbar to alternate-screen or mouse-controlled applications.
 Agent-owned scrollbars remain under the agent's control. Terminal content uses
 the full pane width; the shell history scrollbar overlays the last column only
-while hovered or dragged. The wheel, Shift+wheel and `Ctrl+Space` then `[` still
-browse full-screen apps, forwarding mouse reports or page keys as appropriate.
+while hovered or dragged. The wheel, Shift+wheel in a main-screen app, and
+`Ctrl+Space` then `[` still browse full-screen apps, forwarding mouse reports or
+page keys as appropriate.
 
 Agent CLIs can use a private alternate screen. For terminal history with FACT
 search, choose an inline/main-screen mode supported by your agent:
@@ -147,48 +159,85 @@ search, choose an inline/main-screen mode supported by your agent:
 Their output then flows into FACT's scrollback instead of a private alternate
 screen.
 
-Running `fact` inside a FACT pane is rejected with a clear message instead of
-nesting a second UI into the same terminal. Use a separate terminal window for a
-second FACT UI; other commands such as `fact sessions` and `fact doctor` still
-work inside a pane.
+## Keyboard shortcuts
 
-`--grid N` is deterministic for every explicit value, including `--grid 1`: it
-starts or reattaches `grid-N` and never silently resumes an unrelated saved
-session. If `grid-N` exists with a different pane count, FACT uses the next free
-`grid-N-2` name. An explicit `--session NAME --grid N` is accepted when the
-session is new or already has that shape; otherwise FACT asks for a new name
-instead of ignoring the grid request. Running `fact` without `--grid` retains the
-normal resume-latest behavior.
+The prefix is armed for one command. With the default `Ctrl+Space`, press and
+release it, then press the command key. The prefix itself is never sent to the
+shell. All bindings in the first table are configurable in `[keybinds]`; F1
+help and the palette always show the compiled values.
 
-Session management works offline against SQLite when the daemon is not running:
+| Action | Default shortcut |
+| --- | --- |
+| Split right | `Ctrl+Space` then `\|` |
+| Split down | `Ctrl+Space` then `-` |
+| Close pane | `Ctrl+Space` then `X` |
+| Close tab / grid | `Ctrl+Space` then `Shift+X`, or `Alt+T` |
+| Restart pane | `Ctrl+Space` then `Shift+R` |
+| Toggle maximize / full grid | `Ctrl+Space` then `Z` |
+| Maximize focused pane | `Ctrl+Space` then `M`, or `Alt+M` |
+| Show all panes | `Ctrl+Space` then `N`, or `Alt+N` |
+| Minimize pane | `Ctrl+Space` then `Shift+M` |
+| Restore minimized panes | `Ctrl+Space` then `Shift+U` |
+| Focus left / right / up / down | `Ctrl+Space` then the arrow key |
+| Next pane / previous pane | `Ctrl+Space` then `O` / `I` |
+| New tab | `Ctrl+Space` then `C`, or click `+` in the tab strip |
+| Next tab / previous tab | `Ctrl+Space` then `Shift+N` / `P` |
+| Rename tab | `Ctrl+Space` then `Shift+T` |
+| Command palette | `Ctrl+Space` then `K` |
+| Search focused pane | `Ctrl+Space` then `/` |
+| Browse scrollback | `Ctrl+Space` then `[` |
+| Copy selection | `Ctrl+Shift+C`, or `Ctrl+C` with a selection |
+| Paste clipboard | `Ctrl+Shift+V`, or `Ctrl+V` |
+| Swap with next pane | `Ctrl+Space` then `W` |
+| Move pane to next tab | `Ctrl+Space` then `Shift+O` |
+| Help | `F1` |
+| Quit FACT and close every shell | `Ctrl+Space` then `Shift+Q` |
 
-```powershell
-fact export dev --output .\exports
-fact import .\exports\fact-dev-20261020.json --name dev-copy
-fact rename dev work
-fact archive old-project
-fact unarchive old-project
-fact delete old-project
-```
+Direct keys and mouse gestures:
 
-`fact terminate` stops live shells while keeping the saved layout. `fact shutdown`
-stops the daemon after saving every live layout. Deleting a session removes its
-saved layout.
+| Input | What it does |
+| --- | --- |
+| `Alt+M` / `Alt+N` | Maximize the focused pane / show the full grid. |
+| `Alt+T` | Close the active tab and stop its shells; prompts when `confirm_close` is on. |
+| `F2` | Cycle the color theme for this run. |
+| `Ctrl+C` | Copy the visible selection. With no selection it is sent to the shell as normal Ctrl+C. |
+| `Ctrl+V`, `Ctrl+Insert`, `Shift+Insert` | Paste clipboard text into the focused pane. |
+| `Ctrl+Shift+C` / `Ctrl+Shift+V` | Remappable copy / paste bindings. |
+| `Esc` | Clear a selection overlay, close FACT overlays, or leave scroll mode and return to live output. |
+| Drag in a pane | Select text. |
+| Double-click / triple-click | Select the word / visual line under the pointer. |
+| `Shift`+drag | Select text even when the application requested mouse reporting. |
+| Right-click | Copy the current selection, otherwise paste. In mouse-aware apps the click is forwarded instead. |
+| `Shift`+right-click | Open FACT's pane menu, even in mouse-aware apps. |
+| Wheel | Scroll shell history or forward the wheel to a mouse-aware app. |
+| `Shift`+wheel | Browse FACT history in a main-screen app that captures the mouse. Alternate-screen apps still receive the wheel. |
+| Drag a split gutter | Resize adjacent panes. |
+| Click a tab / `+` | Select a tab / open a new tab when the strip is visible. |
+| Click the `▾ N` tray | Restore minimized panes. |
+
+`Ctrl+Space` then `[` scroll mode: Up/Down scroll one line, PgUp/PgDn scroll one
+page, Home/End jump to the top or bottom, and `g`/`G` do the same. Esc or `q`
+exits. In an alternate-screen app, PgUp/PgDn, Up/Down and Home/End are forwarded
+to the app.
+
+`Ctrl+M` is Enter in terminal input, so it is not available as a direct FACT
+shortcut. `F1`, the direct `Alt` shortcuts and the clipboard aliases are not part
+of the remappable action table.
 
 ## Screenshots
 
 These captures come from FACT running in real Windows ConPTY sessions. Click an
 image to inspect it at full size. The demo uses a configured `Ctrl+B` prefix;
-the default is `Ctrl+Space`. [Capture details and regeneration](docs/screenshots/README.md).
+the default is `Ctrl+Space`.
 
 <table>
   <tr>
     <td width="50%"><strong>Find a command</strong><br>Open the palette with prefix then <code>k</code>. Type to filter, press Enter to run.</td>
-    <td width="50%"><strong>Act on a pane</strong><br>Right-click for split, maximize, minimize, search and more. Click an action to run it.</td>
+    <td width="50%"><strong>Act on a pane</strong><br>Shift+right-click for split, maximize, minimize, search and more. Click an action to run it.</td>
   </tr>
   <tr>
     <td><a href="docs/screenshots/commands.png"><img src="docs/screenshots/commands.png" alt="FACT command palette over a live eight-pane grid, showing actions and configured shortcuts."></a></td>
-    <td><a href="docs/screenshots/pane-menu.png"><img src="docs/screenshots/pane-menu.png" alt="FACT right-click pane menu with clickable split, maximize, minimize, search and copy actions."></a></td>
+    <td><a href="docs/screenshots/pane-menu.png"><img src="docs/screenshots/pane-menu.png" alt="FACT pane menu with clickable split, maximize, minimize, search and copy actions."></a></td>
   </tr>
 </table>
 
@@ -200,92 +249,92 @@ FACT adds no scrollbar to alternate-screen or mouse-controlled agent UIs.
 
 | Try it | What happens |
 | --- | --- |
-| `fact --grid 8` | Start or reattach an eight-pane workspace. |
+| `fact --grid 8` | Start an eight-pane workspace with eight new shells. |
 | `Alt+M`, then `Alt+N` | Focus one pane, then restore the full grid. |
-| Prefix then `d`, then `fact resume` | Detach and return to the same running shells. |
+| Prefix then `[` | Browse the focused pane's history without sending keys to the shell. |
 | Hold Shift while dragging text | Select a stable snapshot, even while an app keeps streaming. |
+| Right-click with no selection | Paste into the shell, like Windows Terminal. |
 
 ## Command reference
 
 | Command | Purpose |
 | --- | --- |
-| `fact [--session NAME] [--grid N] [--profile NAME] [--cwd DIR]` | Create, warm-resume or reopen a saved layout and open the TUI. `--grid N` targets `grid-N`. |
-| `fact resume [same options]` | Explicit form of the default command. |
-| `fact attach NAME` | Attach to a session that is already live. |
-| `fact sessions [--all] [--json]` | List saved and live sessions; `--all` includes archived. |
-| `fact detach` | Increment the detach generation so attached UIs exit. |
-| `fact doctor [--json]` | Check data directory, config, shell, database, ACLs, logs and ConPTY. |
-| `fact rename OLD NEW` | Rename a live or saved session. |
-| `fact save [NAME]` | Persist a live session's layout now; defaults to the most recently used live session. |
-| `fact export [NAME] [--output PATH] [--stdout]` | Write versioned `fact-session` JSON. |
-| `fact import FILE [--name NAME] [--overwrite]` | Import as a new saved session (fresh identity and PIDs). |
-| `fact archive NAME` / `fact unarchive NAME` | Hide/restore a session; archive stops live shells. |
-| `fact delete NAME [--force]` | Delete saved state; `--force` skips the live-shell confirmation. |
-| `fact terminate NAME` | Stop live shells, keep the saved layout. |
-| `fact stats [--json]` | Daemon uptime, panes and memory statistics. |
-| `fact shutdown` | Stop the daemon after saving live layouts. |
-| `fact config validate [--json]` | Parse and validate the configuration. |
+| `fact [--grid N] [--profile NAME] [--cwd DIR] [--config FILE]` | Start a fresh workspace and open the TUI. |
+| `fact config path` | Print the configuration file path in use. |
+| `fact config validate [--json]` | Parse, validate and compile the configuration. |
 | `fact config init [--force]` | Write a documented default `config.toml`. |
-| `fact config path` | Print the configuration path in use. |
 
-Global options:
+Options:
 
-- `--data-dir DIR` overrides `%LOCALAPPDATA%\FACT` (also `FACT_HOME`).
-- `--config FILE` overrides `<data-dir>\config.toml`.
-- `--session NAME`, `--grid N`, `--profile NAME` and `--cwd DIR` configure the
-  TUI launch. Grid size is 1-32.
+- `--grid N` starts `N` shells, from 1 to 32. The default is 1.
+- `--profile NAME` selects a shell profile for the initial shells. New tabs use
+  `default_profile`.
+- `--cwd DIR` sets the working directory for the initial shells. New tabs and
+  splits inherit the focused pane's directory.
+- `--config FILE` overrides the default `config.toml`.
+- `FACT_HOME` changes the base directory used to find `config.toml`. There is no
+  `--data-dir` or runtime data directory.
 
-See [docs/configuration.md](docs/configuration.md) for every config key,
-profile option, theme and default keybinding.
+See [docs/configuration.md](docs/configuration.md) for every config key, profile
+option, theme and default keybinding.
 
 ## How it works
 
 ```mermaid
-flowchart TD
-    UI["fact.exe · CLI and terminal UI"] <-->|Authenticated local named pipes| DAEMON["Per-user daemon"]
-    DAEMON -->|Owns independent processes| SHELLS["ConPTY · PowerShell, cmd or your profile"]
-    SHELLS -->|Output and terminal state| DAEMON
-    DAEMON <-->|Save and load layouts| DB[(SQLite)]
+flowchart LR
+    UI["TUI thread<br/>render · keyboard · mouse · clipboard"]
+    ENGINE["Engine owner thread<br/>ConPTY · terminal models · layout"]
+    SHELLS["Real shells<br/>PowerShell · cmd · WSL · profiles"]
+    UI -->|"commands over a channel"| ENGINE
+    ENGINE -->|"ordered frames over a channel"| UI
+    ENGINE --> SHELLS
+    SHELLS -->|"output"| ENGINE
 ```
 
+`fact.exe` starts one engine owner thread and enters the TUI. The engine owns
+every shell, terminal model, tab and split; the UI sends commands and renders
+the frames it receives. A separate small reader thread moves ordered frames
+from the engine channel into the UI without blocking terminal input. Frames are
+built at a 33 ms tick and include only pane cells that changed.
 
-The daemon is a single-owner-thread event loop. PTY output, SQLite writes,
-layout changes and frame fan-out never race each other. Frames are built at a
-33 ms tick and only include changed pane cells. Full details and crate
+There is no persistence layer, no IPC server and no second process. All state is
+in memory and is discarded when the process exits. Full details and crate
 boundaries are in [docs/architecture.md](docs/architecture.md).
 
-## Security model
+## Data and privacy
 
-- Named pipes are local (`\\.\pipe\...`) and reject remote clients.
-- The listening pipe uses a protected DACL granting only the current user and
-  SYSTEM, plus `FILE_FLAG_FIRST_PIPE_INSTANCE` to prevent name squatting.
-- The server verifies that the connecting process belongs to the same user.
-- Clients open the pipe with identification-only impersonation.
-- A random 256-bit token in an ACL-protected `daemon.json` must be presented in
-  the `Hello` handshake. Event-stream subscriptions use one-time tokens.
-- There is no network listener and no elevation requirement.
-
-This is a same-user boundary: any process already running as your Windows user
-can read your data and act as you. See [docs/security.md](docs/security.md) for
-the full threat model, protected assets and limitations.
-
-## Data and saved layouts
-
-The default data root is `%LOCALAPPDATA%\FACT`:
+FACT reads an optional configuration file and writes nothing on a normal
+launch. The default location is `%LOCALAPPDATA%\FACT\config.toml`, or the file
+chosen with `--config`. `FACT_HOME` can relocate the default base directory.
 
 | Path | Contents |
 | --- | --- |
-| `config.toml` | Optional configuration. |
-| `sessions.db` | SQLite sessions, pane identities and layouts. |
-| `runtime\daemon.json` | Daemon identity, PID, pipe name and token. |
-| `logs\daemon.log` | Append-only daemon log; `fact doctor` warns when it grows large. |
-| `exports\` | Default destination for `fact export`. |
+| `config.toml` | Optional configuration: theme, profiles, keybindings and environment values. |
+| No other paths | FACT creates no database, log, runtime identity, saved layout or export directory. |
 
-A clean shutdown saves the session layout, not the screen. On the next launch,
-the saved tabs, splits and pane working directories reopen with a fresh shell in
-every pane. Old output is never restored, commands are never replayed, and no
-recovery modal appears. Live detach and reattach are different: they keep the
-original shell processes and their scrollback untouched.
+Terminal output, scrollback and process state exist only in memory for the life
+of the FACT process. `fact config init` is the only command that writes a file.
+Closing FACT, closing the last tab, or pressing `Ctrl+Space` then `Shift+Q`
+terminates every shell; the next launch starts fresh shells.
+
+## Security model
+
+- FACT is a single local process. It installs no service, requires no elevation
+  and opens no TCP, UDP, HTTP or named-pipe listener.
+- Shells and programs run with your normal Windows user rights. FACT does not
+  sandbox them or intercept their network access.
+- Scrollback and shell control live in process memory. Any process running as
+  your user can inspect that memory or act as you; this is a same-user boundary,
+  not a security boundary against malware.
+- Configuration is trusted local input. A profile names an executable and
+  arguments that run with your rights. Do not launch FACT with a configuration
+  file from an untrusted source.
+- Clipboard copy and paste use the normal Windows user clipboard. Selected text
+  leaves FACT when you copy it, and pasted clipboard contents are sent to the
+  focused shell.
+
+See [docs/security.md](docs/security.md) for the full threat model, assets and
+limitations.
 
 ## Compatibility
 
@@ -293,9 +342,9 @@ original shell processes and their scrollback untouched.
   GitHub's current Windows Server image, which is not Windows 11 itself.
 - **Windows 10 1809+:** expected to work because FACT uses ConPTY and Win32 APIs
   available since 1809. It has not been verified on a physical Windows 10
-  machine, so v0.3.3 does not claim Windows 10 support.
+  machine, so this build does not claim Windows 10 support.
 - **Windows on ARM:** not tested.
-- **Linux/macOS:** not supported. The IPC and ConPTY layers are Windows-only.
+- **Linux/macOS:** not supported. The ConPTY layer is Windows-only.
 
 ## Development
 
@@ -305,11 +354,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
 ```
 
-The suite includes unit tests for every crate plus real-ConPTY integration
-tests: eight independent shells, live detach/reattach with PID preservation,
-fresh shells and discarded output across a daemon restart, session lifecycle,
-security rejection, split/tab/search flows, the CLI command surface and a
-driven TUI session. See
+The suite includes unit tests for every crate plus a real-ConPTY engine
+integration test and CLI/config integration tests. See
 [docs/testing.md](docs/testing.md).
 
 ## Documentation

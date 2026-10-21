@@ -1,124 +1,63 @@
 # Security model
 
 FACT runs shells with your Windows user's full privileges. It does not sandbox
-programs, intercept their network access, or provide a multi-user server. Its
-security goal is narrower: expose control of those shells only to the same
-Windows user through local, authenticated IPC, and avoid creating a remotely
-reachable service.
+programs, intercept their network access or provide a multi-user server. Its
+security goal is narrow: keep terminal control and scrollback inside the local
+FACT process, avoid creating a remotely reachable service, and be clear about
+the boundary that remains.
 
 ## Assets
 
 - control of live ConPTY processes, including keyboard input and process exit
-- terminal output and scrollback held in daemon memory, which may contain secrets
-- the session database, layout and export files
-- the daemon identity file and authentication token
+- terminal output and scrollback held in process memory, which may contain secrets
 - configuration, including profile commands and environment values
+- clipboard contents read for paste and written by copy
+
+There is no session database, saved layout, export file, daemon identity or
+authentication token to protect.
 
 ## Trust boundaries
 
 ```text
 other Windows users / remote machines
-        |  no pipe access, no network listener
+        |
+        | no listener, no IPC endpoint, no shared FACT state
         v
 your Windows user  <-- security boundary
         |
-        +-- any process running as you can read your data and control FACT
+        +-- any process running as you can inspect process memory and act as you
 ```
 
 The same-user boundary is deliberate. FACT cannot defend against malware already
-running as your account: such a process can read `%LOCALAPPDATA%\FACT`, attach to
-the daemon, inject keystrokes and read saved terminal output. Windows
-administrators and SYSTEM can also bypass file and pipe ACLs. FACT is not a
-security boundary against those principals.
+running as your account: such a process can read the FACT process's memory,
+inject input into its console window or read the clipboard. Windows
+administrators and SYSTEM can also inspect processes and bypass file ACLs. FACT
+is not a security boundary against those principals.
 
-## Local-only IPC
+## No local or remote service
 
-FACT uses Windows named pipes under `\\.\pipe\fact-...`. It creates no TCP or UDP
-sockets and listens on no network interface. Pipe names are validated to be a
-single local pipe component; remote forms such as `\\server\pipe\...` are
-rejected.
+FACT creates no TCP or UDP socket, HTTP server or named-pipe listener. It does
+not install a service, request elevation or leave a process behind when the UI
+closes. The only executable is `fact.exe`, and it exits with its shells.
 
-The listening pipe uses:
-
-- `PIPE_REJECT_REMOTE_CLIENTS`
-- `FILE_FLAG_FIRST_PIPE_INSTANCE` for the first instance, preventing a squatter
-  from owning the name before the daemon binds it
-- byte mode with 64 KiB buffers
-- a protected DACL generated for the current user SID and SYSTEM
-
-The effective DACL is:
-
-```text
-D:P(A;;GA;;;<current-user-SID>)(A;;GA;;;SY)
-```
-
-SYSTEM is included so backup and security software can inspect the object. It is
-not a second interactive user. The DACL is protected (`P`), so it does not
-inherit broader access from a parent directory.
-
-## Peer verification and handshake
-
-After accepting a connection, the daemon calls
-`GetNamedPipeClientProcessId`, opens that process with limited query rights, reads
-its token user SID and compares it with the daemon's own user SID. A mismatch is
-closed with `PermissionDenied` before the protocol starts.
-
-Clients open named pipes with identification-only impersonation
-(`SECURITY_IDENTIFICATION`). This ensures a malicious server cannot use the
-client's token to impersonate it at a higher level merely because the client
-connected.
-
-Application authentication is still required:
-
-1. The daemon generates a 256-bit token from the operating system CSPRNG.
-2. It writes the token into `runtime\daemon.json`. The runtime directory, base
-   directory and file are ACL-protected before token content is written. The file
-   is published by writing a protected temporary file and renaming it.
-3. The client reads and validates the identity document: protocol version, PID,
-   pipe name shape and exactly 64 hex token characters.
-4. Client and server exchange `Hello` messages. The daemon compares the token in
-   constant time and rejects a mismatch as `Unauthorized`.
-5. A successful attach returns a short-lived, single-use event-stream token.
-   The event connection authenticates with that token, and the grant is consumed
-   on subscription.
-
-Request and response IDs are correlated, messages are length-prefixed and
-bounded, and malformed bincode is rejected. A client cannot send commands on an
-unauthenticated connection.
+This removes the authentication, ACL, pipe-squatting and stale-identity surface
+that a client/server design would need. It also means there is no control
+endpoint outside the process for another client to secure.
 
 ## Files and permissions
 
-The data root is `%LOCALAPPDATA%\FACT` by default, which Windows already scopes to
-the user profile. FACT additionally protects the base and runtime directories
-with a DACL for the current user and SYSTEM. Database and log files live under
-that root.
+The only file FACT reads is an optional `config.toml`. The default location is
+`%LOCALAPPDATA%\FACT\config.toml`, which Windows already scopes to the user
+profile. `FACT_HOME` or `--config` can point elsewhere.
 
-The daemon identity file is not encrypted; its protection is the file ACL. On a
-machine where another principal can take ownership or read raw disk content,
-BitLocker or other volume encryption is the appropriate control.
+- A normal launch never writes a file.
+- `fact config init` writes the configuration file requested by the user.
+- No terminal output, input history, scrollback or layout is persisted.
+- No log file is created. Errors are printed to the console.
 
-## Saved layouts, imports and execution
-
-A daemon restart reopens the saved layout with new shells; it does not replay a
-screen or a command log:
-
-- SQLite stores pane identity, profile, working directory and layout, not
-  terminal output or input history
-- a v0.2 database may still contain legacy snapshot columns; the v2 migration
-  clears the columns with SQLite secure deletion, vacuums the database and
-  truncates the WAL before the session is loaded, and the current code never
-  reads or replays them
-- session load validates pane IDs and layout consistency, and invalid data fails
-  closed rather than starting an inconsistent process tree
-- imports are parsed as versioned JSON, validated, and always receive a new
-  session ID and reset PIDs/exit codes; pane IDs are remapped when the saved
-  layout starts
-- restarting a layout starts the configured profile command in a fresh shell;
-  no saved bytes are submitted as commands
-
-Session exports contain layout and metadata, not terminal output. Importing a
-session does not execute saved content, but the new shells still inherit your
-profile command and environment.
+Configuration is user-readable. Do not put secrets in `[env]` or in profile
+arguments; values remain in the process environment and are visible to child
+processes and same-user inspection.
 
 ## Profiles and child processes
 
@@ -132,65 +71,64 @@ install a service or create a kernel driver. A per-pane job object ensures child
 processes are cleaned up when FACT closes the PTY, subject to normal Windows
 process semantics.
 
-## Logging and error output
+## Clipboard
 
-FACT logs lifecycle, errors, PIDs, sizes and restart decisions. It does not log
-the authentication token or configured environment values. Terminal content is
-not copied into logs. Error messages can include file paths. The client does not
-print the daemon token.
+Copy and paste use the normal Windows user clipboard:
+
+- Selecting text only keeps a snapshot in FACT's process memory.
+- A copy writes selected text to the clipboard, where other same-user processes
+  can read it.
+- A paste reads the current clipboard and sends it to the focused shell, which
+  may execute it or forward it to a remote system.
+- FACT does not inspect clipboard history or persist clipboard contents.
+
+Use the standard Windows clipboard controls if you need to clear it after
+handling sensitive data.
+
+## Terminal output and memory
+
+Commands, environment dumps, tokens printed to the terminal and prompts remain
+in process memory and scrollback until overwritten or FACT exits. They are not
+written to a database, log or export. Crash dumps or debugger memory captures may
+still contain them; use BitLocker or another volume encryption product for
+data-at-rest protection.
 
 ## Threats considered
 
 | Threat | Control |
 | --- | --- |
-| Remote connection to the daemon | Local-only pipe name, `PIPE_REJECT_REMOTE_CLIENTS`, no network listener. |
-| Another local user connects | Protected current-user/SYSTEM DACL and server-side peer SID check. |
-| Another process squats the pipe name before daemon start | `FILE_FLAG_FIRST_PIPE_INSTANCE` on the first instance. |
-| Client impersonation by a malicious server | Identification-only impersonation. |
-| Unauthenticated command injection over IPC | Random 256-bit token, constant-time comparison, one-time stream grants. |
-| Forged or corrupted layout data | Structured JSON validation, pane/layout consistency checks and transactional SQLite writes. |
-| Imported session overwrites an existing one | Import always creates a fresh identity; name collisions require explicit overwrite. |
-| Legacy v0.2 snapshots exposing old screen content | The v2 migration clears the snapshot columns with SQLite secure deletion, vacuums the database and truncates the WAL before the session is loaded; they are never replayed. |
-| Credential leakage in logs | Token and environment values are not logged. |
+| Remote connection to FACT | No listener; FACT is a local console process. |
+| Another local user controls FACT | No shared endpoint; Windows process and console boundaries apply. |
+| Persisted terminal output leaks later | FACT writes no terminal output, history or layout. |
+| Malicious profile command | Configuration is trusted input; review profiles before launching. |
+| Clipboard leakage | Copy only when requested; clipboard is user-wide and not encrypted by FACT. |
+| Orphaned shells after UI exit | Engine shutdown kills every PTY and its job object. |
+| A full-screen app captures the mouse | Shift+drag selects; Shift+right-click opens FACT's menu. |
 
 ## Out of scope and limitations
 
 - **Same-user compromise.** Malware, a debugger or any process running as your
-  user can attach to FACT, read terminal output and control shells.
-- **Administrators and SYSTEM.** They can take ownership, read process memory or
-  bypass ACLs.
+  user can inspect FACT memory, read terminal output and control shells.
+- **Administrators and SYSTEM.** They can inspect processes and bypass ACLs.
 - **No encryption at rest.** Use BitLocker or another volume encryption product
   for data-at-rest protection.
-- **No code signing yet.** v0.3.1 release artifacts are accompanied by SHA-256
+- **No code signing yet.** Release artifacts are accompanied by SHA-256
   checksums. Verify them before running. SmartScreen reputation may be absent.
-- **Terminal output can contain secrets.** Commands, environment dumps, tokens
-  printed to the terminal and prompts remain in daemon memory and scrollback, but
-  FACT no longer writes them to SQLite or exports. A v0.2 database backup may
-  still contain legacy snapshots until it is opened and migrated; migration
-  clears the live database and truncates its WAL.
+- **Terminal output can contain secrets.** It remains in process memory and
+  scrollback until FACT exits.
 - **Child processes are not sandboxed.** Shells and programs run with your normal
   user rights.
-- **Windows 10 is not verified for v0.3.1.** See the compatibility section in the
-  README.
-- **Named-pipe availability.** A denial-of-service by a same-user or administrator
-  process is not preventable by FACT.
+- **Windows 10 is not verified.** See the compatibility section in the README.
+- **Window-level denial of service.** A same-user or administrator process can
+  still close the console or exhaust resources.
 
-## Token rotation and incident response
+## Incident response
 
-Restart the daemon to rotate the token:
-
-```powershell
-fact shutdown
-fact resume
-```
-
-A graceful shutdown attempts to save live layouts and removes the identity file
-only if it still contains the daemon's token. A new daemon writes a new token. On upgrade,
-an unusable identity is cleared only after probing that no process still accepts
-the recorded pipe; a live incompatible daemon is never overwritten and produces a
-stop-and-retry error. If you
-suspect same-user compromise, stopping FACT is not sufficient: rotate any
-credentials that appeared in terminal output and investigate the account.
+If you suspect that terminal output exposed a credential, close FACT and rotate
+that credential. Closing FACT terminates its shells; it does not alter files
+outside the process. If you suspect a malicious configuration, review
+`config.toml` before launching FACT again or start with `--config` pointing at a
+known-good file.
 
 To report a vulnerability, use GitHub's private security advisory flow for
 `imthegoodboy/FACT` rather than a public issue with exploit details.

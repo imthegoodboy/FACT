@@ -86,22 +86,17 @@ jobs:
           $reported = (& $exe --version).Trim()
           if (-not $reported.StartsWith("fact ")) { throw "Unexpected version: $reported" }
           $temp = Join-Path $env:RUNNER_TEMP ("fact-release-" + [Guid]::NewGuid().ToString("N"))
+          $previousHome = $env:FACT_HOME
           try {
-            $config = & $exe --data-dir $temp config validate --json | ConvertFrom-Json
+            $env:FACT_HOME = $temp
+            $config = & $exe config validate --json | ConvertFrom-Json
             if (-not $config.valid) { throw "Release config validation failed" }
-            $report = & $exe --data-dir $temp doctor --json | ConvertFrom-Json
-            if (-not $report.healthy) { throw "Release doctor reported an unhealthy install" }
+            if ($config.version -ne 2) { throw "Unexpected config version: $($config.version)" }
             Write-Host "Release binary smoke test passed ($reported)"
           } finally {
+            $env:FACT_HOME = $previousHome
             Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
           }
-
-      - name: Smoke-test the release TUI against a real ConPTY
-        shell: pwsh
-        run: |
-          $env:FACT_SMOKE_EXE = Join-Path $PWD "target\release\fact.exe"
-          cargo test -p fact-cli --test tui -- --nocapture
-          if ($LASTEXITCODE -ne 0) { throw "Release TUI smoke test failed" }
 
       - name: Test installer download path offline
         shell: pwsh

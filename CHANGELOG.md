@@ -3,6 +3,37 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.4.0] - 2026-10-21
+
+### Changed
+
+- FACT is now a single process. The per-user daemon, named pipe, authentication
+  token, SQLite session database, saved layouts, runtime identity and
+  export/import commands are removed. Shells are children of `fact.exe` and close
+  when it exits.
+- Configuration schema is version 2. Daemon, persistence, snapshot and
+  session-limit keys are rejected as unknown fields.
+- The CLI is now `fact [--grid N] [--profile NAME] [--cwd DIR] [--config FILE]`
+  plus `config path`, `config validate` and `config init`. The `resume`,
+  `sessions`, `attach`, `detach`, `doctor`, `save`, `export`, `import`, `archive`,
+  `unarchive`, `delete`, `terminate`, `stats` and `shutdown` commands are gone.
+- Right-click copies the current selection, or pastes when there is none.
+  `Shift`+right-click always opens FACT's pane menu. Applications that requested
+  mouse reporting receive a plain right-click as before.
+- The installer and uninstaller no longer stop a daemon or remove runtime
+  identity files. The uninstaller's `-PurgeConfig` switch removes the optional
+  configuration directory; `-PurgeData` remains an alias.
+
+### Added
+
+- Double-click selects the word under the pointer and triple-click selects the
+  visual line, matching PowerShell and Windows Terminal conventions.
+
+### Removed
+
+- The `fact-daemon`, `fact-ipc`, `fact-runtime`, `fact-session` and `fact-testkit`
+  crates, along with `rusqlite`, `bincode`, `uuid`, `getrandom` and `sha2`.
+
 ## [0.3.3] - 2026-10-21
 
 ### Changed
@@ -281,6 +312,8 @@ All notable changes to FACT are documented here. The format follows
   restart reopens the saved layout with fresh shells and no replay of old output.
   Unsaved work in a lost process cannot be recovered.
 
+[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.4.0
 [0.3.3]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.3
 [0.3.2]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.2
 [0.3.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.1

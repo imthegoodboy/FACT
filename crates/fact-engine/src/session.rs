@@ -1,37 +1,37 @@
-//! Daemon-owned session state: real panes, layouts and frame fan-out.
+//! In-process session state: real panes, layouts and frame generation.
 //!
-//! All mutation happens on one owner thread. Control connections submit
-//! commands through a channel, which keeps PTY/output handling and SQLite
-//! writes serialized without a global lock.
+//! All mutation happens on one owner thread. The UI submits commands through a
+//! channel, which keeps PTY output, layout changes and frame building serialized
+//! without a global lock. No state is written to disk.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use fact_config::{Config, Paths};
+use fact_config::Config;
 use fact_layout::{
     LayoutNode, LayoutOptions, SessionLayout, SplitDirection as LayoutSplitDirection,
 };
 use fact_protocol::{
-    sanitize_title, validate_session_name, AttachInfo, Command, CursorDto, DaemonStats, ErrorCode,
-    FocusDirection, Frame, PaneSummary, PaneView, ProtocolError, ResponsePayload, SearchHit,
-    SearchResult, SessionSummary, SplitHandle, SplitOrientation, TabView, Viewport,
-    BRACKETED_PASTE_END, BRACKETED_PASTE_START, MAX_GRID_PANES, MAX_INPUT_CHUNK, MAX_PASTE_BYTES,
-    MAX_SESSIONS,
+    sanitize_title, Command, CursorDto, EngineStats, ErrorCode, FocusDirection, Frame, PaneSummary,
+    PaneView, ProtocolError, ResponsePayload, SearchHit, SearchResult, SplitHandle,
+    SplitOrientation, TabView, Viewport, BRACKETED_PASTE_END, BRACKETED_PASTE_START,
+    MAX_GRID_PANES, MAX_INPUT_CHUNK, MAX_PASTE_BYTES,
 };
 use fact_pty::{PtyProcess, SpawnOptions};
-use fact_session::{now_ms, PaneRecord, SessionData, SessionError, SessionMeta, SessionStore};
 use fact_term::{TerminalEventSink, TerminalModel};
+
+use crate::model::{PaneRecord, SessionData};
 
 const DEFAULT_VIEWPORT_COLS: u16 = 120;
 const DEFAULT_VIEWPORT_ROWS: u16 = 35;
-const STREAM_TOKEN_TTL: Duration = Duration::from_secs(120);
 const OUTPUT_CHUNKS_PER_TICK: usize = 64;
 const MAX_PANES_PER_SESSION: usize = 256;
+/// The engine hosts one workspace. Tabs and splits live inside it.
+pub(crate) const SESSION_NAME: &str = "FACT";
 
 struct PaneSpec<'a> {
-    session_name: &'a str,
     pane: u64,
     profile: Option<&'a str>,
     cwd: Option<&'a str>,
@@ -41,12 +41,9 @@ struct PaneSpec<'a> {
 }
 
 pub(crate) struct SessionManager {
-    paths: Paths,
     config: Config,
-    store: SessionStore,
     sessions: HashMap<String, LiveSession>,
     subscribers: Vec<Subscriber>,
-    stream_grants: HashMap<String, StreamGrant>,
     next_pane_id: u64,
     next_frame_seq: u64,
     shutdown: bool,
@@ -60,9 +57,6 @@ struct LiveSession {
     viewport_rows: u16,
     layout_epoch: u64,
     metadata_epoch: u64,
-    detach_seq: u64,
-    last_persist: Instant,
-    last_active_ms: i64,
 }
 
 /// The tab strip is the only persistent chrome. It appears only when a session
@@ -87,22 +81,15 @@ struct LivePane {
     display_title: String,
     last_bell: u64,
     exit_code: Option<i32>,
-    profile: Option<String>,
     cwd: Option<String>,
 }
 
 struct Subscriber {
-    id: u64,
     tx: SyncSender<fact_protocol::ServerMessage>,
     session_key: String,
     sent_versions: HashMap<u64, u64>,
     layout_epoch: u64,
     metadata_epoch: u64,
-}
-
-struct StreamGrant {
-    session_key: String,
-    created: Instant,
 }
 
 struct BuiltFrame {
@@ -113,20 +100,34 @@ struct BuiltFrame {
 }
 
 impl SessionManager {
-    pub(crate) fn new(paths: Paths, config: Config) -> Result<Self, SessionError> {
-        let store = SessionStore::open(&paths.db_file)?;
-        Ok(Self {
-            paths,
+    pub(crate) fn new(
+        config: Config,
+        grid: u8,
+        profile: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Result<Self, ProtocolError> {
+        let mut manager = Self {
             config,
-            store,
             sessions: HashMap::new(),
             subscribers: Vec::new(),
-            stream_grants: HashMap::new(),
             next_pane_id: 1,
-            next_frame_seq: 0,
+            next_frame_seq: 1,
             shutdown: false,
             started: Instant::now(),
-        })
+        };
+        manager.create_session(SESSION_NAME.to_string(), grid, profile, cwd)?;
+        Ok(manager)
+    }
+
+    pub(crate) fn add_subscriber(&mut self, tx: SyncSender<fact_protocol::ServerMessage>) {
+        self.subscribers.push(Subscriber {
+            tx,
+            session_key: key_of(SESSION_NAME),
+            sent_versions: HashMap::new(),
+            layout_epoch: 0,
+            metadata_epoch: 0,
+        });
+        self.pump_frames();
     }
 
     pub(crate) fn handle(
@@ -136,84 +137,11 @@ impl SessionManager {
     ) -> Result<ResponsePayload, ProtocolError> {
         match command {
             Command::Ping => Ok(ResponsePayload::Pong {
-                daemon_pid: std::process::id(),
+                pid: std::process::id(),
                 uptime_ms: self.started.elapsed().as_millis() as u64,
-                live_sessions: self.sessions.len(),
             }),
             Command::Stats => Ok(ResponsePayload::Stats(self.stats())),
-            Command::ListSessions { include_archived } => self
-                .list_sessions(include_archived)
-                .map(ResponsePayload::Sessions),
-            Command::ResumeSession {
-                name,
-                grid,
-                profile,
-                cwd,
-            } => self
-                .resume_session(name, grid, profile, cwd)
-                .map(|info| ResponsePayload::Attached(Box::new(info))),
-            Command::Attach { name } => self
-                .attach_session(&name)
-                .map(|info| ResponsePayload::Attached(Box::new(info))),
-            Command::RenameSession { name, new_name } => self
-                .rename_session(&name, &new_name)
-                .map(ResponsePayload::Session),
-            Command::SaveSession { name } => {
-                let key = self.session_key(&name)?;
-                self.persist_session(&key)?;
-                Ok(ResponsePayload::Ack)
-            }
-            Command::ArchiveSession { name } => self
-                .archive_session(&name, true)
-                .map(ResponsePayload::Session),
-            Command::UnarchiveSession { name } => self
-                .archive_session(&name, false)
-                .map(ResponsePayload::Session),
-            Command::DeleteSession { name, force } => {
-                self.delete_session(&name, force)?;
-                Ok(ResponsePayload::Ack)
-            }
-            Command::TerminateSession { name } => {
-                self.terminate_session(&name)?;
-                Ok(ResponsePayload::Ack)
-            }
-            Command::ExportSession { name } => {
-                if let Some(key) = self.session_key_opt(&name) {
-                    self.persist_session(&key)?;
-                } else if !self.store.exists(&name).map_err(map_session_error)? {
-                    return Err(ProtocolError::not_found(format!("session '{name}'")));
-                }
-                let (filename, json) = self.store.export_json(&name).map_err(map_session_error)?;
-                Ok(ResponsePayload::Export { filename, json })
-            }
-            Command::ImportSession {
-                json,
-                name,
-                overwrite,
-            } => {
-                if json.len() > fact_session::MAX_EXPORT_BYTES {
-                    return Err(ProtocolError::invalid("session export is too large"));
-                }
-                if let Some(name) = name.as_deref() {
-                    validate_session_name(name)?;
-                    if self.session_key_opt(name).is_some() {
-                        return Err(ProtocolError::new(
-                            ErrorCode::Conflict,
-                            "cannot import over a live session",
-                        ));
-                    }
-                }
-                let imported = self
-                    .store
-                    .import_json(&json, name.as_deref(), overwrite)
-                    .map_err(map_session_error)?;
-                Ok(ResponsePayload::Imported(imported.summary(false)))
-            }
-            Command::DetachClients { name } => {
-                self.detach_clients(name.as_deref())?;
-                Ok(ResponsePayload::Ack)
-            }
-            Command::ShutdownDaemon => {
+            Command::Shutdown => {
                 self.shutdown = true;
                 Ok(ResponsePayload::Ack)
             }
@@ -443,56 +371,8 @@ impl SessionManager {
                         session.metadata_epoch.wrapping_add(title_changes.min(1));
                 }
             }
-            let persist_due = self.sessions.get(&key).is_some_and(|session| {
-                session.last_persist.elapsed()
-                    >= Duration::from_secs(self.config.persist_interval_secs.max(1))
-            });
-            if persist_due {
-                let _ = self.persist_session(&key);
-            }
         }
-        self.stream_grants
-            .retain(|_, grant| grant.created.elapsed() < STREAM_TOKEN_TTL);
         self.pump_frames();
-    }
-
-    pub(crate) fn subscribe(
-        &mut self,
-        id: u64,
-        token: &str,
-        tx: SyncSender<fact_protocol::ServerMessage>,
-    ) -> Result<(), ProtocolError> {
-        let grant = self.stream_grants.remove(token).ok_or_else(|| {
-            ProtocolError::new(
-                ErrorCode::Unauthorized,
-                "event stream token is invalid, expired or already used",
-            )
-        })?;
-        if grant.created.elapsed() >= STREAM_TOKEN_TTL {
-            return Err(ProtocolError::new(
-                ErrorCode::Unauthorized,
-                "event stream token has expired; reattach to the session",
-            ));
-        }
-        if !self.sessions.contains_key(&grant.session_key) {
-            return Err(ProtocolError::not_found(
-                "the subscribed session is no longer running",
-            ));
-        }
-        self.subscribers.push(Subscriber {
-            id,
-            tx,
-            session_key: grant.session_key,
-            sent_versions: HashMap::new(),
-            layout_epoch: 0,
-            metadata_epoch: 0,
-        });
-        self.pump_frames();
-        Ok(())
-    }
-
-    pub(crate) fn unsubscribe(&mut self, id: u64) {
-        self.subscribers.retain(|subscriber| subscriber.id != id);
     }
 
     pub(crate) fn shutdown_requested(&self) -> bool {
@@ -500,10 +380,6 @@ impl SessionManager {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        let keys: Vec<String> = self.sessions.keys().cloned().collect();
-        for key in keys {
-            let _ = self.persist_session(&key);
-        }
         for (_, session) in self.sessions.drain() {
             for (_, pane) in session.panes {
                 pane.pty.kill();
@@ -514,159 +390,20 @@ impl SessionManager {
             let _ = subscriber
                 .tx
                 .try_send(fact_protocol::ServerMessage::SessionEnded {
-                    reason: "daemon is shutting down".into(),
+                    reason: "FACT closed".into(),
                 });
         }
-        self.stream_grants.clear();
     }
 
-    pub(crate) fn database_path(&self) -> String {
-        self.paths.db_file.display().to_string()
-    }
-
-    fn stats(&self) -> DaemonStats {
-        DaemonStats {
-            daemon_pid: std::process::id(),
+    fn stats(&self) -> EngineStats {
+        EngineStats {
+            pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol: fact_protocol::PROTOCOL_VERSION,
             uptime_ms: self.started.elapsed().as_millis() as u64,
-            live_sessions: self.sessions.len(),
             live_panes: self.sessions.values().map(|s| s.panes.len()).sum(),
             client_count: self.subscribers.len(),
-            database_path: self.database_path(),
-            memory_bytes: None,
-            cpu_time_ms: None,
         }
-    }
-
-    fn resume_session(
-        &mut self,
-        name: Option<String>,
-        grid: Option<u8>,
-        profile: Option<String>,
-        cwd: Option<String>,
-    ) -> Result<AttachInfo, ProtocolError> {
-        let name = match name {
-            Some(name) => {
-                validate_session_name(&name)?;
-                name
-            }
-            None => self.pick_resume_name()?,
-        };
-        let key = key_of(&name);
-        if self.sessions.contains_key(&key) {
-            if let Some(grid) = grid {
-                let data = &self
-                    .sessions
-                    .get(&key)
-                    .ok_or_else(|| ProtocolError::not_found("session is not running"))?
-                    .data;
-                Self::ensure_grid_shape(data, &name, grid)?;
-            }
-            return self.attach_live(&key);
-        }
-
-        if self.store.exists(&name).map_err(map_session_error)? {
-            let data = self.store.load(&name).map_err(map_session_error)?;
-            if data.archived {
-                return Err(ProtocolError::new(
-                    ErrorCode::Conflict,
-                    format!("session '{name}' is archived; unarchive it before resuming"),
-                ));
-            }
-            if let Some(grid) = grid {
-                Self::ensure_grid_shape(&data, &name, grid)?;
-            }
-            self.restore_saved(data)?;
-            let key = key_of(&name);
-            return self.attach_live(&key);
-        }
-
-        self.create_session(name, grid.unwrap_or(1), profile.as_deref(), cwd.as_deref())
-    }
-
-    fn ensure_grid_shape(data: &SessionData, name: &str, grid: u8) -> Result<(), ProtocolError> {
-        let tabs = data.layout.tabs.len();
-        let panes = data.panes.len();
-        if tabs == 1 && panes == usize::from(grid) {
-            return Ok(());
-        }
-        Err(ProtocolError::new(
-            ErrorCode::Conflict,
-            format!(
-                "session '{name}' has {panes} pane(s) in {tabs} tab(s); \
-                 a {grid}-pane grid needs one tab with {grid} panes. Re-run the \
-                 command to pick a different session."
-            ),
-        ))
-    }
-
-    fn pick_resume_name(&self) -> Result<String, ProtocolError> {
-        if let Some((_, session)) = self
-            .sessions
-            .iter()
-            .max_by_key(|(_, session)| session.last_active_ms)
-        {
-            return Ok(session.data.name.clone());
-        }
-        match self.store.latest(false) {
-            Ok(Some(session)) => Ok(session.name),
-            Ok(None) => Ok("default".to_string()),
-            Err(error) => Err(map_session_error(error)),
-        }
-    }
-
-    fn attach_session(&mut self, name: &str) -> Result<AttachInfo, ProtocolError> {
-        validate_session_name(name)?;
-        let key = key_of(name);
-        if self.sessions.contains_key(&key) {
-            self.attach_live(&key)
-        } else if self.store.exists(name).map_err(map_session_error)? {
-            Err(ProtocolError::new(
-                ErrorCode::Conflict,
-                format!("session '{name}' is not running; use `fact resume --session {name}`"),
-            ))
-        } else {
-            Err(ProtocolError::not_found(format!(
-                "session '{name}' does not exist"
-            )))
-        }
-    }
-
-    fn attach_live(&mut self, key: &str) -> Result<AttachInfo, ProtocolError> {
-        let token = fact_runtime::generate_token()
-            .map_err(|error| ProtocolError::internal(error.to_string()))?;
-        let session = self
-            .sessions
-            .get_mut(key)
-            .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
-        session.last_active_ms = now_ms();
-        let summary = session.data.summary(true);
-        let session_key = key.to_string();
-        self.stream_grants.insert(
-            token.clone(),
-            StreamGrant {
-                session_key,
-                created: Instant::now(),
-            },
-        );
-        Ok(AttachInfo {
-            session: summary,
-            stream_token: token,
-        })
-    }
-
-    fn ensure_live_capacity(&self) -> Result<(), ProtocolError> {
-        if self.sessions.len() >= self.config.max_sessions.min(MAX_SESSIONS) {
-            return Err(ProtocolError::new(
-                ErrorCode::Busy,
-                format!(
-                    "maximum live session count reached ({})",
-                    self.config.max_sessions
-                ),
-            ));
-        }
-        Ok(())
     }
 
     fn create_session(
@@ -675,15 +412,7 @@ impl SessionManager {
         grid: u8,
         profile: Option<&str>,
         cwd: Option<&str>,
-    ) -> Result<AttachInfo, ProtocolError> {
-        validate_session_name(&name)?;
-        self.ensure_live_capacity()?;
-        if self.store.exists(&name).map_err(map_session_error)? {
-            return Err(ProtocolError::new(
-                ErrorCode::Conflict,
-                format!("session '{name}' already exists"),
-            ));
-        }
+    ) -> Result<(), ProtocolError> {
         let resolved = self
             .config
             .resolve_profile(profile)
@@ -718,7 +447,6 @@ impl SessionManager {
             let spawned = spawn_pane(
                 &self.config,
                 PaneSpec {
-                    session_name: &name,
                     pane: *id,
                     profile,
                     cwd,
@@ -729,7 +457,6 @@ impl SessionManager {
             )?;
             let record = PaneRecord {
                 id: *id,
-                title: spawned.display_title.clone(),
                 pid: spawned.pty.pid(),
                 exit_code: None,
                 profile: profile.map(str::to_string),
@@ -738,11 +465,7 @@ impl SessionManager {
             panes.insert(*id, spawned);
             records.push(record);
         }
-        let mut data = SessionData::new(name.clone(), layout, records);
-        data.updated_at_ms = now_ms();
-        if let Err(error) = self.store.save(&data) {
-            return Err(map_session_error(error));
-        }
+        let data = SessionData::new(name.clone(), layout, records);
         let session = LiveSession {
             data,
             panes,
@@ -750,240 +473,8 @@ impl SessionManager {
             viewport_rows: DEFAULT_VIEWPORT_ROWS,
             layout_epoch: 1,
             metadata_epoch: 1,
-            detach_seq: 0,
-            last_persist: Instant::now(),
-            last_active_ms: now_ms(),
         };
-        let key = key_of(&name);
-        self.sessions.insert(key.clone(), session);
-        self.attach_live(&key)
-    }
-
-    fn restore_saved(&mut self, mut data: SessionData) -> Result<(), ProtocolError> {
-        self.ensure_live_capacity()?;
-        let old_ids: Vec<u64> = data.layout.all_panes_including_minimized();
-        let mut remap = BTreeMap::new();
-        for old in old_ids {
-            remap.insert(old, self.alloc_pane_id());
-        }
-        data.layout.remap_panes(&remap).map_err(map_layout_error)?;
-        for record in &mut data.panes {
-            let new = remap.get(&record.id).copied().ok_or_else(|| {
-                ProtocolError::new(
-                    ErrorCode::Internal,
-                    "saved layout and pane records are inconsistent",
-                )
-            })?;
-            record.id = new;
-        }
-
-        let options = LayoutOptions {
-            cols: DEFAULT_VIEWPORT_COLS,
-            rows: DEFAULT_VIEWPORT_ROWS
-                .saturating_sub(chrome_rows(&data.layout))
-                .max(1),
-            min_content_cols: self.config.min_pane_width,
-            min_content_rows: self.config.min_pane_height,
-        };
-        let layout_result = data.layout.layout(options);
-        let dims: HashMap<u64, (u16, u16)> = layout_result
-            .panes
-            .iter()
-            .map(|slot| {
-                (
-                    slot.pane,
-                    (slot.content.width.max(1), slot.content.height.max(1)),
-                )
-            })
-            .collect();
-
-        let mut panes = HashMap::new();
-        for record in &data.panes {
-            let (cols, rows) = dims.get(&record.id).copied().unwrap_or((80, 24));
-            let spawned = spawn_pane(
-                &self.config,
-                PaneSpec {
-                    session_name: &data.name,
-                    pane: record.id,
-                    profile: record.profile.as_deref(),
-                    cwd: record.cwd.as_deref(),
-                    cols,
-                    rows,
-                    title_hint: &record.title,
-                },
-            )?;
-            panes.insert(record.id, spawned);
-        }
-        for record in &mut data.panes {
-            let pane = panes.get(&record.id);
-            record.pid = pane.map_or(0, |pane| pane.pty.pid());
-            record.exit_code = None;
-            record.cwd = pane.and_then(|pane| pane.cwd.clone());
-        }
-        data.updated_at_ms = now_ms();
-        let key = key_of(&data.name);
-        let session = LiveSession {
-            data,
-            panes,
-            viewport_cols: DEFAULT_VIEWPORT_COLS,
-            viewport_rows: DEFAULT_VIEWPORT_ROWS,
-            layout_epoch: 1,
-            metadata_epoch: 1,
-            detach_seq: 0,
-            last_persist: Instant::now(),
-            last_active_ms: now_ms(),
-        };
-        self.sessions.insert(key.clone(), session);
-        if let Err(error) = self.persist_session(&key) {
-            if let Some(session) = self.sessions.remove(&key) {
-                for (_, pane) in session.panes {
-                    pane.pty.kill();
-                }
-            }
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn list_sessions(&self, include_archived: bool) -> Result<Vec<SessionSummary>, ProtocolError> {
-        let metas = self
-            .store
-            .list(include_archived)
-            .map_err(map_session_error)?;
-        let mut list: Vec<SessionSummary> = metas
-            .iter()
-            .map(|meta: &SessionMeta| meta.to_summary(false))
-            .collect();
-        for (key, session) in &self.sessions {
-            let summary = session.data.summary(true);
-            if let Some(existing) = list.iter_mut().find(|item| key_of(&item.name) == *key) {
-                *existing = summary;
-            } else if include_archived || !summary.archived {
-                list.push(summary);
-            }
-        }
-        list.sort_by(|a, b| {
-            a.archived
-                .cmp(&b.archived)
-                .then_with(|| b.updated_at_ms.cmp(&a.updated_at_ms))
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        Ok(list)
-    }
-
-    fn rename_session(
-        &mut self,
-        name: &str,
-        new_name: &str,
-    ) -> Result<SessionSummary, ProtocolError> {
-        validate_session_name(new_name)?;
-        let key = key_of(name);
-        let new_key = key_of(new_name);
-        if key != new_key && self.sessions.contains_key(&new_key) {
-            return Err(ProtocolError::new(
-                ErrorCode::Conflict,
-                format!("session '{new_name}' is live"),
-            ));
-        }
-        if key != new_key && self.store.exists(new_name).map_err(map_session_error)? {
-            return Err(ProtocolError::new(
-                ErrorCode::Conflict,
-                format!("session '{new_name}' already exists"),
-            ));
-        }
-        self.store
-            .rename(name, new_name)
-            .map_err(map_session_error)?;
-        if let Some(mut session) = self.sessions.remove(&key) {
-            session.data.name = new_name.to_string();
-            session.data.updated_at_ms = now_ms();
-            for subscriber in &mut self.subscribers {
-                if subscriber.session_key == key {
-                    subscriber.session_key = new_key.clone();
-                    subscriber.metadata_epoch = 0;
-                }
-            }
-            for grant in self.stream_grants.values_mut() {
-                if grant.session_key == key {
-                    grant.session_key = new_key.clone();
-                }
-            }
-            let summary = session.data.summary(true);
-            self.sessions.insert(new_key, session);
-            Ok(summary)
-        } else {
-            let saved = self.store.load(new_name).map_err(map_session_error)?;
-            Ok(saved.summary(false))
-        }
-    }
-
-    fn archive_session(
-        &mut self,
-        name: &str,
-        archived: bool,
-    ) -> Result<SessionSummary, ProtocolError> {
-        let key = self.session_key_opt(name);
-        if archived {
-            if let Some(key) = &key {
-                self.terminate_live(key, true)?;
-            }
-        }
-        self.store
-            .set_archived(name, archived)
-            .map_err(map_session_error)?;
-        let saved = self.store.load(name).map_err(map_session_error)?;
-        Ok(saved.summary(false))
-    }
-
-    fn delete_session(&mut self, name: &str, force: bool) -> Result<(), ProtocolError> {
-        if let Some(key) = self.session_key_opt(name) {
-            if !force {
-                return Err(ProtocolError::new(
-                    ErrorCode::Conflict,
-                    "session is live; terminate it first or use force",
-                ));
-            }
-            self.terminate_live(&key, false)?;
-        }
-        self.store.delete(name).map_err(map_session_error)
-    }
-
-    fn terminate_session(&mut self, name: &str) -> Result<(), ProtocolError> {
-        let key = self.session_key(name)?;
-        self.terminate_live(&key, true).map(|_| ())
-    }
-
-    fn terminate_live(&mut self, key: &str, save: bool) -> Result<SessionData, ProtocolError> {
-        if save {
-            self.persist_session(key)?;
-        }
-        let Some(session) = self.sessions.remove(key) else {
-            return Err(ProtocolError::not_found("session is not running"));
-        };
-        self.remove_stream_grants(key);
-        self.end_subscribers(key, "session terminated");
-        for (_, pane) in session.panes {
-            pane.pty.kill();
-            drop(pane);
-        }
-        Ok(session.data)
-    }
-
-    fn detach_clients(&mut self, name: Option<&str>) -> Result<(), ProtocolError> {
-        if let Some(name) = name {
-            let key = self.session_key(name)?;
-            let session = self
-                .sessions
-                .get_mut(&key)
-                .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
-            session.detach_seq = session.detach_seq.wrapping_add(1);
-            session.metadata_epoch = session.metadata_epoch.wrapping_add(1);
-            return Ok(());
-        }
-        for session in self.sessions.values_mut() {
-            session.detach_seq = session.detach_seq.wrapping_add(1);
-            session.metadata_epoch = session.metadata_epoch.wrapping_add(1);
-        }
+        self.sessions.insert(key_of(&name), session);
         Ok(())
     }
 
@@ -1094,7 +585,7 @@ impl SessionManager {
             .get(key)
             .map(|session| self.layout_options(session))
             .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
-        let (session_name, profile, cwd, cols, rows) = {
+        let (profile, cwd, cols, rows) = {
             let session = self
                 .sessions
                 .get(key)
@@ -1118,7 +609,6 @@ impl SessionManager {
                 }
             };
             (
-                session.data.name.clone(),
                 record.profile.clone(),
                 record.cwd.clone(),
                 cols.max(1),
@@ -1129,7 +619,6 @@ impl SessionManager {
         let spawned = spawn_pane(
             &self.config,
             PaneSpec {
-                session_name: &session_name,
                 pane: id,
                 profile: profile.as_deref(),
                 cwd: cwd.as_deref(),
@@ -1139,7 +628,6 @@ impl SessionManager {
             },
         )?;
         let pid = spawned.pty.pid();
-        let title = spawned.display_title.clone();
         let pane_cwd = spawned.cwd.clone();
         let session = self
             .sessions
@@ -1160,7 +648,6 @@ impl SessionManager {
         session.data.layout.active_tab = tab;
         session.data.panes.push(PaneRecord {
             id,
-            title: title.clone(),
             pid,
             exit_code: None,
             profile,
@@ -1243,7 +730,7 @@ impl SessionManager {
     }
 
     fn restart_pane(&mut self, key: &str, pane: u64) -> Result<(), ProtocolError> {
-        let (session_name, profile, cwd, cols, rows, title) = {
+        let (profile, cwd, cols, rows, title) = {
             let session = self
                 .sessions
                 .get(key)
@@ -1254,7 +741,6 @@ impl SessionManager {
                 .ok_or_else(|| ProtocolError::not_found(format!("pane {pane}")))?;
             let record = session.data.pane(pane);
             (
-                session.data.name.clone(),
                 record.and_then(|r| r.profile.clone()),
                 record.and_then(|r| r.cwd.clone()),
                 live.term.cols(),
@@ -1265,7 +751,6 @@ impl SessionManager {
         let mut spawned = spawn_pane(
             &self.config,
             PaneSpec {
-                session_name: &session_name,
                 pane,
                 profile: profile.as_deref(),
                 cwd: cwd.as_deref(),
@@ -1418,26 +903,24 @@ impl SessionManager {
         profile: Option<String>,
         cwd: Option<String>,
     ) -> Result<(), ProtocolError> {
-        let (session_name, cols, rows) = {
+        let (cols, rows) = {
             let session = self
                 .sessions
                 .get(key)
                 .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
             let options = self.layout_options(session);
             let layout = session.data.layout.layout(options);
-            let (cols, rows) = layout
+            layout
                 .panes
                 .iter()
                 .find(|slot| Some(slot.pane) == layout.focused)
                 .map(|slot| (slot.content.width.max(1), slot.content.height.max(1)))
-                .unwrap_or((80, 24));
-            (session.data.name.clone(), cols, rows)
+                .unwrap_or((80, 24))
         };
         let id = self.alloc_pane_id();
         let spawned = spawn_pane(
             &self.config,
             PaneSpec {
-                session_name: &session_name,
                 pane: id,
                 profile: profile.as_deref(),
                 cwd: cwd.as_deref(),
@@ -1468,7 +951,6 @@ impl SessionManager {
         session.data.layout.add_tab(tab_id, &[id], title);
         session.data.panes.push(PaneRecord {
             id,
-            title: spawned.display_title.clone(),
             pid,
             exit_code: None,
             profile,
@@ -1699,41 +1181,13 @@ impl SessionManager {
         Ok(())
     }
 
-    fn persist_session(&mut self, key: &str) -> Result<(), ProtocolError> {
-        let now = now_ms();
-        let SessionManager {
-            sessions, store, ..
-        } = self;
-        let session = sessions
-            .get_mut(key)
-            .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
-        for (id, pane) in &session.panes {
-            if let Some(record) = session.data.pane_mut(*id) {
-                record.title = pane.display_title.clone();
-                record.pid = pane.pty.pid();
-                record.exit_code = pane
-                    .exit_code
-                    .or_else(|| pane.pty.exit().map(|exit| exit.code));
-                record.profile = pane.profile.clone();
-                record.cwd = pane.cwd.clone();
-            }
-        }
-        session.data.updated_at_ms = now;
-        store.save(&session.data).map_err(map_session_error)?;
-        session.last_persist = Instant::now();
-        Ok(())
-    }
-
     fn end_live_empty(&mut self, key: &str) {
         if let Some(session) = self.sessions.remove(key) {
-            let name = session.data.name.clone();
             for (_, pane) in session.panes {
                 pane.pty.kill();
                 drop(pane);
             }
-            self.remove_stream_grants(key);
-            self.end_subscribers(key, "session closed");
-            let _ = self.store.delete(&name);
+            self.end_subscribers(key, "all panes closed");
         }
     }
 
@@ -1751,11 +1205,6 @@ impl SessionManager {
             }
         }
         self.subscribers = retained;
-    }
-
-    fn remove_stream_grants(&mut self, key: &str) {
-        self.stream_grants
-            .retain(|_, grant| grant.session_key != key);
     }
 
     fn pump_frames(&mut self) {
@@ -1920,9 +1369,8 @@ impl SessionManager {
             .collect();
 
         let frame = Frame {
-            protocol: fact_protocol::PROTOCOL_VERSION,
             seq: 0,
-            session: session.data.summary(true),
+            session: session.data.summary(),
             tabs,
             active_tab,
             focus: layout.focused,
@@ -1936,8 +1384,6 @@ impl SessionManager {
                 slot_cols: session.viewport_cols,
             },
             tiny_mode: layout.tiny_mode,
-            detach_seq: session.detach_seq,
-            server_time_ms: now_ms(),
         };
         Some(BuiltFrame {
             frame,
@@ -1962,31 +1408,17 @@ impl SessionManager {
         id
     }
 
-    fn session_key(&self, name: &str) -> Result<String, ProtocolError> {
-        validate_session_name(name)?;
-        let key = key_of(name);
+    fn session_key(&self, _name: &str) -> Result<String, ProtocolError> {
+        let key = key_of(SESSION_NAME);
         if self.sessions.contains_key(&key) {
             Ok(key)
-        } else if self.store.exists(name).map_err(map_session_error)? {
-            Err(ProtocolError::new(
-                ErrorCode::Conflict,
-                format!("session '{name}' is not running"),
-            ))
         } else {
-            Err(ProtocolError::not_found(format!("session '{name}'")))
+            Err(ProtocolError::not_found("FACT workspace is closed"))
         }
     }
 
-    fn session_key_opt(&self, name: &str) -> Option<String> {
-        let key = key_of(name);
-        self.sessions.contains_key(&key).then_some(key)
-    }
-
     fn require_bound(&self, bound: Option<&str>) -> Result<String, ProtocolError> {
-        let name = bound.ok_or_else(|| {
-            ProtocolError::invalid("attach to a session before sending layout commands")
-        })?;
-        self.session_key(name)
+        self.session_key(bound.unwrap_or(SESSION_NAME))
     }
 
     fn pane_owner(&self, pane: u64, bound: Option<&str>) -> Result<String, ProtocolError> {
@@ -2013,7 +1445,6 @@ impl SessionManager {
 
 fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolError> {
     let PaneSpec {
-        session_name,
         pane,
         profile,
         cwd,
@@ -2061,10 +1492,6 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
     options.args = resolved.args.clone();
     options.cwd = workdir.clone();
     options.env = resolved.env.clone();
-    options.env.insert(
-        fact_protocol::ENV_SESSION.to_string(),
-        session_name.to_string(),
-    );
     options
         .env
         .insert(fact_protocol::ENV_PANE.to_string(), pane.to_string());
@@ -2083,7 +1510,6 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
         display_title: title,
         last_bell: 0,
         exit_code: None,
-        profile: profile.map(str::to_string),
         cwd: record_cwd.as_ref().map(|path| path.display().to_string()),
     })
 }
@@ -2118,24 +1544,6 @@ fn key_of(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
-fn map_session_error(error: SessionError) -> ProtocolError {
-    match error {
-        SessionError::NotFound(message) => ProtocolError::not_found(message),
-        SessionError::AlreadyExists(message) => ProtocolError::new(ErrorCode::Conflict, message),
-        SessionError::Invalid(message) | SessionError::Corrupt(message) => {
-            ProtocolError::invalid(message)
-        }
-        SessionError::TooLarge { size } => {
-            ProtocolError::invalid(format!("session data is too large ({size} bytes)"))
-        }
-        SessionError::Schema(version) => ProtocolError::new(
-            ErrorCode::Unsupported,
-            format!("unsupported database schema version {version}"),
-        ),
-        other => ProtocolError::internal(other.to_string()),
-    }
-}
-
 fn map_layout_error(error: fact_layout::LayoutError) -> ProtocolError {
     ProtocolError::invalid(error.to_string())
 }
@@ -2152,12 +1560,10 @@ fn map_config_error(error: fact_config::ConfigError) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn exit_notice_follows_all_queued_process_output() {
-        let directory = tempfile::tempdir().unwrap();
-        let base = directory.path().to_path_buf();
-        let paths = Paths::from_parts(base.clone(), base.join("config.toml"));
         let mut config = Config {
             default_profile: "tail-output".into(),
             ..Config::default()
@@ -2170,23 +1576,21 @@ mod tests {
                 "1..90 | ForEach-Object { [Console]::Write(\"OUTPUT_$_`r`n\"); Start-Sleep -Milliseconds 20 }; [Console]::Write('FACT_FINAL_OUTPUT')".into()],
             ..fact_config::Profile::default()
         });
-        let mut manager = SessionManager::new(paths, config).unwrap();
-        manager
-            .create_session("tail".into(), 1, None, None)
-            .unwrap();
-        let pane_id = *manager.sessions["tail"].panes.keys().next().unwrap();
+        let mut manager = SessionManager::new(config, 1, Some("tail-output"), None).unwrap();
+        let key = key_of(SESSION_NAME);
+        let pane_id = *manager.sessions[&key].panes.keys().next().unwrap();
         // Delay the owner tick until the process has exited and its output is
-        // queued, reproducing a busy daemon with more than one tick of output.
-        let pty = &manager.sessions["tail"].panes[&pane_id].pty;
+        // queued, reproducing a busy pane with more than one tick of output.
+        let pty = &manager.sessions[&key].panes[&pane_id].pty;
         assert_eq!(pty.wait_for_exit(Duration::from_secs(15)), Some(0));
         std::thread::sleep(Duration::from_millis(300));
         let deadline = Instant::now() + Duration::from_secs(10);
-        while manager.sessions["tail"].panes[&pane_id].exit_code.is_none() {
+        while manager.sessions[&key].panes[&pane_id].exit_code.is_none() {
             manager.tick();
             assert!(Instant::now() < deadline, "output did not finish draining");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let pane = &manager.sessions["tail"].panes[&pane_id];
+        let pane = &manager.sessions[&key].panes[&pane_id];
         let text = pane.term.plain_text();
         let tail = text
             .find("FACT_FINAL_OUTPUT")

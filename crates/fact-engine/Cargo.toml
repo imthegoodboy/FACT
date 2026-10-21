@@ -1,0 +1,16 @@
+[package]
+name = "fact-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-process ConPTY workspace engine for FACT"
+
+[dependencies]
+anyhow.workspace = true
+fact-config = { path = "../fact-config" }
+fact-layout = { path = "../fact-layout" }
+fact-protocol = { path = "../fact-protocol" }
+fact-pty = { path = "../fact-pty" }
+fact-term = { path = "../fact-term" }

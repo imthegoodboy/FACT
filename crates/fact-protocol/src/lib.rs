@@ -1,36 +1,25 @@
-//! Versioned wire protocol shared by the FACT client, CLI and daemon.
+//! Message types shared by the FACT engine and terminal UI.
 //!
-//! Frames are serialized with `bincode` and length-prefixed by `fact-ipc`.
-//! The protocol is intentionally transport-independent so it can be fuzzed and
-//! exercised without spawning a daemon.
+//! Everything stays inside one process: commands travel over a channel and
+//! frames are handed back as plain values. The types keep serde derives so they
+//! remain easy to snapshot and test, but nothing is written to disk or sent over
+//! a network.
 
 use serde::{Deserialize, Serialize};
 
-/// Bumped when command/frame semantics change in a way a previous peer cannot
-/// interpret safely, even if bincode can still decode the message shape.
-/// Version 2 added the direct scroll-offset command. Version 3 removed the pane
-/// title row from slot geometry and made chrome rows conditional; an older
-/// client would render every pane one row too low. Version 4 gives
-/// `ZoomPane { zoomed: false }` restore-to-full-grid semantics; an older daemon
-/// would leave a small viewport stuck in focused-pane mode. Version 5 removes
-/// cold-recovery metadata fields; saved layouts now always start fresh shells.
-/// Version 6 gives the terminal the full pane width; scrollbars overlay on hover.
-pub const PROTOCOL_VERSION: u16 = 6;
-pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
+/// Bumped when command or frame semantics change. It identifies the message
+/// shape used inside this build and in tests.
+pub const PROTOCOL_VERSION: u16 = 7;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
 pub const BRACKETED_PASTE_START: &str = "\x1b[200~";
 pub const BRACKETED_PASTE_END: &str = "\x1b[201~";
-pub const MAX_SESSIONS: usize = 128;
 pub const MAX_GRID_PANES: u8 = 32;
 pub const MAX_SEARCH_QUERY: usize = 256;
 
-/// Environment variables injected into every shell started by FACT. They let a
-/// nested `fact` invocation fail with a useful message instead of attaching to
-/// the session that owns the pane it is running inside.
-pub const ENV_SESSION: &str = "FACT_SESSION";
+/// Environment value injected into every shell so scripts can identify their
+/// FACT pane. It is informational; FACT itself never reads it back.
 pub const ENV_PANE: &str = "FACT_PANE";
-pub const ENV_ALLOW_NESTED: &str = "FACT_ALLOW_NESTED";
 
 /// Cell drawing flags. Kept as a plain bitfield for protocol stability.
 pub mod cell_flags {
@@ -59,100 +48,25 @@ pub mod pane_modes {
     pub const SGR_MOUSE: u32 = 1 << 8;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Hello {
-    pub protocol: u16,
-    pub client_version: String,
-    /// Random per-daemon authentication token read from the user-only runtime file.
-    pub token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ClientMessage {
-    Hello(Hello),
-    Request { id: u64, command: Command },
-    Subscribe { token: String },
-}
-
+/// Events pushed from the engine to the terminal UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ServerMessage {
-    HelloOk {
-        protocol: u16,
-        daemon_version: String,
-        daemon_pid: u32,
-    },
-    RequestOk {
-        id: u64,
-        payload: ResponsePayload,
-    },
-    RequestErr {
-        id: u64,
-        error: ProtocolError,
-    },
     Frame(Box<Frame>),
-    SessionEnded {
-        reason: String,
-    },
-    Fatal(ProtocolError),
+    SessionEnded { reason: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Command {
     Ping,
     Stats,
-    ListSessions {
-        include_archived: bool,
-    },
-    /// Create, warm-restore or attach to a session. With `name: None`, resumes the
-    /// most recent live session, otherwise the most recent saved session, otherwise
-    /// creates `default`.
-    ResumeSession {
-        name: Option<String>,
-        grid: Option<u8>,
-        profile: Option<String>,
-        cwd: Option<String>,
-    },
-    Attach {
-        name: String,
-    },
-    RenameSession {
-        name: String,
-        new_name: String,
-    },
-    SaveSession {
-        name: String,
-    },
-    ArchiveSession {
-        name: String,
-    },
-    UnarchiveSession {
-        name: String,
-    },
-    DeleteSession {
-        name: String,
-        force: bool,
-    },
-    TerminateSession {
-        name: String,
-    },
-    ExportSession {
-        name: String,
-    },
-    ImportSession {
-        json: String,
-        name: Option<String>,
-        overwrite: bool,
-    },
-    /// Ask attached FACT UIs on a session to detach cleanly.
-    DetachClients {
-        name: Option<String>,
-    },
-    ShutdownDaemon,
+    /// Stop the engine and every shell it owns.
+    Shutdown,
     Input {
         pane: u64,
         data: Vec<u8>,
     },
-    /// Clipboard paste. The daemon decides whether to wrap in bracketed paste.
+    /// Clipboard paste. The engine wraps it in bracketed paste when the pane
+    /// has enabled that mode.
     Paste {
         pane: u64,
         text: String,
@@ -228,8 +142,7 @@ pub enum Command {
         path: Vec<u8>,
         ratio: f32,
     },
-    /// Set the scrollback offset directly (0 = live output). Appended last to
-    /// keep the existing variant indices stable.
+    /// Set the scrollback offset directly (0 = live output).
     SetScrollOffset {
         pane: u64,
         offset: usize,
@@ -252,60 +165,32 @@ pub enum FocusDirection {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ResponsePayload {
-    Pong {
-        daemon_pid: u32,
-        uptime_ms: u64,
-        live_sessions: usize,
-    },
-    Stats(DaemonStats),
-    Sessions(Vec<SessionSummary>),
-    Attached(Box<AttachInfo>),
-    Session(SessionSummary),
+    Pong { pid: u32, uptime_ms: u64 },
+    Stats(EngineStats),
     Ack,
-    Export {
-        filename: String,
-        json: String,
-    },
-    Imported(SessionSummary),
     Search(SearchResult),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AttachInfo {
-    pub session: SessionSummary,
-    /// One-time token used by the separate events pipe.
-    pub stream_token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DaemonStats {
-    pub daemon_pid: u32,
+pub struct EngineStats {
+    pub pid: u32,
     pub version: String,
     pub protocol: u16,
     pub uptime_ms: u64,
-    pub live_sessions: usize,
     pub live_panes: usize,
     pub client_count: usize,
-    pub database_path: String,
-    pub memory_bytes: Option<u64>,
-    pub cpu_time_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: String,
     pub name: String,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-    pub archived: bool,
-    pub live: bool,
     pub pane_count: usize,
     pub tab_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
-    pub protocol: u16,
     pub seq: u64,
     pub session: SessionSummary,
     pub tabs: Vec<TabView>,
@@ -316,8 +201,6 @@ pub struct Frame {
     pub splits: Vec<SplitHandle>,
     pub viewport: Viewport,
     pub tiny_mode: bool,
-    pub detach_seq: u64,
-    pub server_time_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -551,33 +434,6 @@ pub enum ErrorCode {
     Unsupported,
 }
 
-/// Validated session names are useful at every boundary.
-pub fn validate_session_name(name: &str) -> Result<(), ProtocolError> {
-    let trimmed = name.trim();
-    if trimmed != name {
-        return Err(ProtocolError::invalid(
-            "session name may not begin or end with whitespace",
-        ));
-    }
-    if trimmed.is_empty() || trimmed.len() > 64 {
-        return Err(ProtocolError::invalid(
-            "session name must contain 1..=64 characters",
-        ));
-    }
-    if !trimmed
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-    {
-        return Err(ProtocolError::invalid(
-            "session name may only contain ASCII letters, digits, '-', '_' and '.'",
-        ));
-    }
-    if trimmed == "." || trimmed == ".." {
-        return Err(ProtocolError::invalid("session name is reserved"));
-    }
-    Ok(())
-}
-
 /// Remove control characters from terminal-provided titles before displaying or
 /// broadcasting them.
 pub fn sanitize_title(input: &str) -> String {
@@ -628,31 +484,9 @@ pub fn friendly_title(input: &str) -> String {
     sanitize_title(&label)
 }
 
-pub fn truncate_text(text: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (i, c) in text.chars().enumerate() {
-        if i >= max_chars {
-            out.push('…');
-            break;
-        }
-        out.push(c);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn session_names_are_strict() {
-        assert!(validate_session_name("dev").is_ok());
-        assert!(validate_session_name("dev-2.alpha_1").is_ok());
-        assert!(validate_session_name("").is_err());
-        assert!(validate_session_name("../escape").is_err());
-        assert!(validate_session_name("a b").is_err());
-        assert!(validate_session_name(&"x".repeat(65)).is_err());
-    }
 
     #[test]
     fn titles_are_sanitized() {

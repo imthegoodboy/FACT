@@ -11,13 +11,13 @@ use thiserror::Error;
 
 pub use keys::{compile, CompiledKeybinds, KeyChord, KeyParseError, KeybindError};
 
-pub const CONFIG_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 pub const DEFAULT_CONFIG_FILE: &str = "config.toml";
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("could not determine a usable FACT data directory")]
-    NoDataDirectory,
+    #[error("could not determine a usable FACT configuration directory")]
+    NoBaseDirectory,
     #[error("could not read config '{path}': {source}")]
     Read {
         path: PathBuf,
@@ -50,59 +50,28 @@ pub enum ConfigError {
 
 #[derive(Debug, Clone)]
 pub struct Paths {
+    /// Directory that holds the optional configuration file. FACT never writes
+    /// runtime state here.
     pub base: PathBuf,
     pub config_file: PathBuf,
-    pub db_file: PathBuf,
-    pub runtime_dir: PathBuf,
-    pub log_dir: PathBuf,
-    pub daemon_json: PathBuf,
-    pub daemon_log: PathBuf,
-    pub client_log: PathBuf,
-    pub exports_dir: PathBuf,
 }
 
 impl Paths {
-    pub fn resolve(
-        config_override: Option<PathBuf>,
-        data_override: Option<PathBuf>,
-    ) -> Result<Self, ConfigError> {
-        let base = data_override
-            .or_else(|| std::env::var_os("FACT_HOME").map(PathBuf::from))
-            .or_else(default_data_dir)
-            .ok_or(ConfigError::NoDataDirectory)?;
+    pub fn resolve(config_override: Option<PathBuf>) -> Result<Self, ConfigError> {
+        let base = std::env::var_os("FACT_HOME")
+            .map(PathBuf::from)
+            .or_else(default_base_dir)
+            .ok_or(ConfigError::NoBaseDirectory)?;
         let config_file = config_override.unwrap_or_else(|| base.join(DEFAULT_CONFIG_FILE));
         Ok(Self::from_parts(base, config_file))
     }
 
     pub fn from_parts(base: PathBuf, config_file: PathBuf) -> Self {
-        let runtime_dir = base.join("runtime");
-        let log_dir = base.join("logs");
-        Self {
-            db_file: base.join("sessions.db"),
-            daemon_json: runtime_dir.join("daemon.json"),
-            daemon_log: log_dir.join("daemon.log"),
-            client_log: log_dir.join("client.log"),
-            exports_dir: base.join("exports"),
-            base,
-            config_file,
-            runtime_dir,
-            log_dir,
-        }
-    }
-
-    pub fn ensure(&self) -> std::io::Result<()> {
-        fs::create_dir_all(&self.base)?;
-        fs::create_dir_all(&self.runtime_dir)?;
-        fs::create_dir_all(&self.log_dir)?;
-        Ok(())
-    }
-
-    pub fn ensure_exports(&self) -> std::io::Result<()> {
-        fs::create_dir_all(&self.exports_dir)
+        Self { base, config_file }
     }
 }
 
-fn default_data_dir() -> Option<PathBuf> {
+fn default_base_dir() -> Option<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     if let Some(local) = local {
         return Some(local.join("FACT"));
@@ -124,18 +93,11 @@ pub struct Config {
     pub mouse: bool,
     pub confirm_close: bool,
     pub copy_on_select: bool,
-    pub persist_interval_secs: u64,
-    /// Legacy v0.2 snapshot settings. Accepted so existing config files keep
-    /// working, but terminal output is no longer captured or persisted.
-    pub snapshot_interval_secs: u64,
-    pub snapshot_max_bytes: usize,
-    pub max_sessions: usize,
-    pub max_frame_cells: usize,
-    pub daemon_log_level: String,
     pub default_profile: String,
     pub keybinds: BTreeMap<String, String>,
     pub profiles: BTreeMap<String, Profile>,
-    /// Extra environment values applied to every pane. Values never appear in logs.
+    /// Extra environment values applied to every pane. Values are visible to
+    /// child processes; do not put secrets here.
     pub env: BTreeMap<String, String>,
 }
 
@@ -151,12 +113,6 @@ impl Default for Config {
             mouse: true,
             confirm_close: true,
             copy_on_select: false,
-            persist_interval_secs: 10,
-            snapshot_interval_secs: 20,
-            snapshot_max_bytes: 256 * 1024,
-            max_sessions: 32,
-            max_frame_cells: 2_000_000,
-            daemon_log_level: "info".to_string(),
             default_profile: "auto".to_string(),
             keybinds: BTreeMap::new(),
             profiles: BTreeMap::new(),
@@ -242,18 +198,6 @@ impl Config {
         }
         if self.min_pane_height < 3 {
             issues.push("min_pane_height must be at least 3".to_string());
-        }
-        if !(1..=600).contains(&self.persist_interval_secs) {
-            issues.push("persist_interval_secs must be in 1..=600".to_string());
-        }
-        if !(1..=128).contains(&self.max_sessions) {
-            issues.push("max_sessions must be in 1..=128".to_string());
-        }
-        if !(10_000..=50_000_000).contains(&self.max_frame_cells) {
-            issues.push("max_frame_cells must be in 10000..=50000000".to_string());
-        }
-        if !["trace", "debug", "info", "warn", "error"].contains(&self.daemon_log_level.as_str()) {
-            issues.push("daemon_log_level must be trace, debug, info, warn or error".to_string());
         }
         if !["fact-dark", "fact-light", "dracula", "nord", "gruvbox"].contains(&self.theme.as_str())
         {
@@ -495,7 +439,7 @@ pub fn expand_path(input: &str) -> Result<PathBuf, String> {
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# FACT — Fast, Advanced, Reliable Terminal Workspace
 # Configuration reference: https://github.com/imthegoodboy/FACT/blob/main/docs/configuration.md
-config_version = 1
+config_version = 2
 
 # Prefix chord arms FACT commands. Press it, then a command key (prefix+k = palette).
 prefix = "ctrl+space"
@@ -507,11 +451,6 @@ min_pane_height = 5
 mouse = true
 confirm_close = true
 copy_on_select = false
-
-persist_interval_secs = 10
-max_sessions = 32
-max_frame_cells = 2000000
-daemon_log_level = "info"
 
 # "auto" chooses pwsh.exe, then powershell.exe, then cmd.exe.
 default_profile = "auto"
@@ -624,21 +563,16 @@ mod tests {
     }
 
     #[test]
-    fn legacy_snapshot_settings_are_accepted_but_unused() {
-        let parsed: Config = toml::from_str(
-            "config_version = 1\nsnapshot_interval_secs = 0\nsnapshot_max_bytes = 1\n",
-        )
-        .unwrap();
-        parsed.validate().unwrap();
-        assert_eq!(parsed.snapshot_interval_secs, 0);
-        assert_eq!(parsed.snapshot_max_bytes, 1);
+    fn obsolete_daemon_settings_are_rejected() {
+        let parsed: Result<Config, _> = toml::from_str("config_version = 2\nmax_sessions = 4\n");
+        assert!(parsed.is_err());
     }
 
     #[test]
     fn unknown_fields_are_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        fs::write(&path, "config_version = 1\nnot_a_setting = true\n").unwrap();
+        fs::write(&path, "config_version = 2\nnot_a_setting = true\n").unwrap();
         assert!(Config::load_file(&path).is_err());
     }
 

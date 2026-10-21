@@ -33,9 +33,6 @@ $fixtureAssetName = "fact-$testTag-x86_64-pc-windows-msvc.zip"
 $fixtureZip = Join-Path $fixtureRoot $fixtureAssetName
 $fixtureSums = Join-Path $fixtureRoot "SHA256SUMS.txt"
 $global:FactInstallTestRequests = [System.Collections.Generic.List[string]]::new()
-$originalFactHome = $env:FACT_HOME
-$testFactHome = Join-Path $fixtureRoot "fact-home"
-$env:FACT_HOME = $testFactHome
 
 function Invoke-WebRequest {
     [CmdletBinding()]
@@ -104,29 +101,6 @@ try {
     Set-Content -LiteralPath $fixtureSums -Value "$hash  $fixtureAssetName"
 
     Install-Case -Label "pinned" -RequestedVersion $testTag
-
-    # Replacing an install must clear a stale identity left by a crashed or
-    # incompatible daemon. A PID that cannot be running stands in for the old
-    # process; the installer must remove the file rather than leave the new
-    # client blocked by a protocol mismatch. Reinstall into the same directory
-    # so the replacement path runs.
-    $staleRuntime = Join-Path $testFactHome "runtime"
-    New-Item -ItemType Directory -Path $staleRuntime -Force | Out-Null
-    $staleIdentity = Join-Path $staleRuntime "daemon.json"
-    $staleJson = @{
-        protocol = 3
-        daemon_version = "0.2.1"
-        pid = 999999
-        token = ("a" * 64)
-        pipe = "\\.\pipe\fact-stale-installer-test"
-        started_at_ms = 0
-    } | ConvertTo-Json
-    [IO.File]::WriteAllText($staleIdentity, $staleJson, (New-Object Text.UTF8Encoding($false)))
-
-    & $installer -InstallDir (Join-Path $fixtureRoot "install-pinned") -NoPath -Force -Version $testTag
-    if (Test-Path -LiteralPath $staleIdentity) {
-        throw "Installer left a stale daemon identity behind"
-    }
     Install-Case -Label "normalized" -RequestedVersion $testVersion
     Install-Case -Label "latest"
 
@@ -145,7 +119,6 @@ try {
 
     Write-Output "INSTALLER_OFFLINE_TEST_OK"
 } finally {
-    $env:FACT_HOME = $originalFactHome
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 

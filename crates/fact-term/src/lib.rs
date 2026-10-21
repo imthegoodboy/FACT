@@ -19,7 +19,7 @@ use fact_protocol::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Shared state filled by parser callbacks and consumed by the daemon.
+/// Shared state filled by parser callbacks and consumed by the engine.
 #[derive(Default)]
 struct EventState {
     title: String,
@@ -141,7 +141,7 @@ impl EventListener for Listener {
             Event::ClipboardStore(_, _) | Event::ClipboardLoad(_, _) => {
                 // OSC 52 is disabled in the terminal config, but if a future
                 // alacritty version still emits these events we must never touch
-                // the host clipboard from the daemon.
+                // the host clipboard from the terminal model.
             }
             Event::Wakeup | Event::MouseCursorDirty | Event::CursorBlinkingChange => {
                 self.sink.wakeup.fetch_add(1, Ordering::Relaxed);
@@ -222,7 +222,7 @@ impl TerminalModel {
     }
 
     /// Feed bytes from the ConPTY. Parser panics are contained so a malformed
-    /// escape sequence can never take down the daemon.
+    /// escape sequence can never take down the engine.
     pub fn feed(&mut self, bytes: &[u8]) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.parser.advance(&mut self.term, bytes);

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Versioned client/daemon wire protocol for FACT"
+description = "In-process command, frame and cell types for FACT"
 
 [dependencies]
 serde.workspace = true

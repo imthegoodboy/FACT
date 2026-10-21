@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1480" height="240" viewBox="0 0 1480 240" role="img" aria-labelledby="title description">
-  <title id="title">FACT — Windows-native terminal multiplexer</title>
+  <title id="title">FACT — Windows-native terminal workspace</title>
   <desc id="description">FACT wordmark and a split-pane terminal icon on a dark background.</desc>
   <rect width="1480" height="240" rx="12" fill="#08090b"/>
   <g transform="translate(48 54)" fill="none" stroke="#e7e9ed" stroke-width="3">
@@ -8,8 +8,8 @@
     <path d="m18 27 12 12-12 12M36 51h14"/>
   </g>
   <text x="220" y="112" fill="#f8f9fb" font-family="Segoe UI,Arial,sans-serif" font-size="76" font-weight="700" letter-spacing="7">FACT</text>
-  <text x="224" y="160" fill="#a7afbc" font-family="Segoe UI,Arial,sans-serif" font-size="25">Windows-native terminal multiplexer</text>
+  <text x="224" y="160" fill="#a7afbc" font-family="Segoe UI,Arial,sans-serif" font-size="25">Windows-native terminal workspace</text>
   <text x="1424" y="85" text-anchor="end" fill="#a7afbc" font-family="Consolas,monospace" font-size="17" letter-spacing="2">RUST / CONPTY</text>
   <text x="1424" y="126" text-anchor="end" fill="#e7e9ed" font-family="Segoe UI,Arial,sans-serif" font-size="23">Real shells. Your workspace.</text>
-  <text x="1424" y="163" text-anchor="end" fill="#747d8c" font-family="Segoe UI,Arial,sans-serif" font-size="20">Split · focus · detach · resume</text>
+  <text x="1424" y="163" text-anchor="end" fill="#747d8c" font-family="Segoe UI,Arial,sans-serif" font-size="20">Split · tab · focus · grid</text>
 </svg>

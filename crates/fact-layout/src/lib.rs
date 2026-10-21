@@ -501,8 +501,8 @@ impl SessionLayout {
         panes
     }
 
-    /// Rewrite every pane identity, e.g. when a saved layout is reopened in a
-    /// daemon that already owns other panes with the same old IDs.
+    /// Rewrite every pane identity using `map`, for callers that need to
+    /// transfer a layout into a workspace whose IDs are already in use.
     pub fn remap_panes(&mut self, map: &BTreeMap<u64, u64>) -> Result<(), LayoutError> {
         for tab in &mut self.tabs {
             if let Some(root) = &mut tab.root {
@@ -698,7 +698,7 @@ impl SessionLayout {
     }
 
     /// Repair benign inconsistencies (unknown focus, ratios out of range) while
-    /// keeping the persisted pane tree.
+    /// keeping the existing pane tree.
     pub fn sanitize(&mut self) {
         self.tabs
             .retain(|t| t.root.is_some() || !t.minimized.is_empty());
@@ -825,7 +825,7 @@ fn layout_node(
             if rect.width < 3 || rect.height < 3 {
                 // Let the caller detect the invalid slot as tiny by emitting a
                 // zero-sized leaf; this should only be reachable with pathological
-                // persisted ratios.
+                // split ratios.
                 slots.push(PaneSlot {
                     pane: match **first {
                         LayoutNode::Leaf { pane } => pane,
@@ -1244,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_validation_rejects_bad_ratios() {
+    fn serialization_validation_rejects_bad_ratios() {
         let mut layout = SessionLayout::new(1, &[1, 2]);
         if let Some(tab) = layout.active_mut() {
             if let Some(LayoutNode::Split { ratio, .. }) = &mut tab.root {
@@ -1271,7 +1271,7 @@ mod tests {
     }
 
     #[test]
-    fn persistence_round_trip() {
+    fn serialization_round_trip() {
         let layout = SessionLayout::new(7, &[10, 11, 12]);
         let json = serde_json::to_string(&layout).unwrap();
         let back: SessionLayout = serde_json::from_str(&json).unwrap();

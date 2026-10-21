@@ -4,7 +4,9 @@
 #   .\scripts\install.ps1 -BinaryPath .\target\release\fact.exe -Force
 #
 # No administrator rights are required. The installer never changes machine-wide
-# PATH or installs a service.
+# PATH, installs a service or starts a background process. FACT runs entirely
+# inside the terminal window you launch, so close any running FACT window before
+# replacing an existing install.
 
 [CmdletBinding()]
 param(
@@ -161,39 +163,6 @@ function Add-UserPath([string]$Directory) {
     }
 }
 
-function Stop-InstalledDaemon([string]$Executable) {
-    if (-not (Test-Path -LiteralPath $Executable)) {
-        return
-    }
-    try {
-        & $Executable shutdown 2>$null | Out-Null
-    } catch {
-        # No daemon is running, or the old binary cannot be launched.
-    }
-    Start-Sleep -Milliseconds 500
-}
-
-function Remove-StaleDaemonIdentity {
-    $dataRoot = if ($env:FACT_HOME) { $env:FACT_HOME } else { Join-Path $env:LOCALAPPDATA "FACT" }
-    $identityPath = Join-Path $dataRoot "runtime\daemon.json"
-    if (-not (Test-Path -LiteralPath $identityPath)) {
-        return
-    }
-    $daemonId = $null
-    try {
-        $daemonId = (Get-Content -LiteralPath $identityPath -Raw | ConvertFrom-Json).pid
-    } catch {
-        # A malformed identity is stale by definition; remove it below.
-    }
-    if ($daemonId) {
-        $live = Get-Process -Id $daemonId -ErrorAction SilentlyContinue
-        if ($live) {
-            return
-        }
-    }
-    Remove-Item -LiteralPath $identityPath -Force -ErrorAction SilentlyContinue
-}
-
 function Copy-WithRetry([string]$Source, [string]$Destination) {
     for ($attempt = 0; $attempt -lt 30; $attempt++) {
         try {
@@ -314,9 +283,8 @@ try {
 
     $replacingExisting = Test-Path -LiteralPath $installedExe
     if ($replacingExisting) {
-        Write-Step "Stopping the existing FACT daemon"
-        Stop-InstalledDaemon $installedExe
-        Remove-StaleDaemonIdentity
+        Write-Step "Replacing the existing FACT install"
+        Write-Host "Close every running FACT window before the copy; FACT has no background process to stop."
     }
 
     Write-Step "Installing to $InstallDir"
@@ -346,9 +314,9 @@ try {
     } else {
         Write-Host "  PATH: user PATH updated. Open a new terminal to use 'fact' from Explorer."
     }
-    Write-Host "  Next: fact doctor; fact --grid 4"
+    Write-Host "  Next: fact --grid 4"
     if ($replacingExisting) {
-        Write-Host "  Replaced an existing install; its daemon was asked to stop and saved layouts reopen with fresh shells on next launch."
+        Write-Host "  Replaced an existing install. Every launch starts fresh shells; no workspace is restored."
     }
 } finally {
     Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

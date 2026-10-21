@@ -1,8 +1,8 @@
 //! FACT terminal user interface.
 //!
-//! The daemon owns the shells and terminal state. This crate only renders the
-//! frames it receives and forwards keyboard, mouse and clipboard input. It never
-//! parses terminal output itself.
+//! The in-process engine owns the shells and terminal state. This crate only
+//! renders the frames it receives and forwards keyboard, mouse and clipboard
+//! input. It never parses terminal output itself.
 
 mod keymap;
 mod render;
@@ -28,12 +28,12 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use fact_config::{CompiledKeybinds, Config};
+use fact_engine::{EngineClient, EventStream};
 use fact_protocol::{
-    cell_flags, friendly_title, pane_modes, AttachInfo, CellDto, Command, Frame, PaneView, RectDto,
-    ResponsePayload, SearchResult, SessionSummary, SplitDirection, SplitOrientation, TabView,
-    MAX_PASTE_BYTES, MAX_SEARCH_QUERY,
+    cell_flags, friendly_title, pane_modes, CellDto, Command, Frame, PaneView, RectDto,
+    ResponsePayload, SearchResult, SplitDirection, SplitOrientation, TabView, MAX_PASTE_BYTES,
+    MAX_SEARCH_QUERY,
 };
-use fact_runtime::{DaemonClient, EventStream};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use theme::Theme;
@@ -72,12 +72,10 @@ pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("palette", "Command palette"),
     ("search", "Search pane"),
     ("scroll_mode", "Browse scrollback"),
-    ("sessions", "Switch session"),
-    ("detach", "Detach and keep shells"),
     ("help", "Help"),
     ("copy", "Copy selection"),
     ("paste", "Paste clipboard"),
-    ("quit", "Close FACT UI"),
+    ("quit", "Exit FACT (closes shells)"),
     ("swap_pane", "Swap with next pane"),
     ("move_pane", "Move pane to next tab"),
 ];
@@ -92,18 +90,15 @@ pub(crate) fn action_label(action: &str) -> &'static str {
 
 /// Run the interactive terminal UI. Terminal state is always restored before
 /// returning, including on errors.
-pub fn run(client: DaemonClient, info: AttachInfo, config: Config) -> Result<()> {
+pub fn run(client: EngineClient, events: EventStream, config: Config) -> Result<()> {
     let keys = config
         .compiled_keybinds()
         .context("could not compile keyboard bindings")?;
     let mut terminal = TerminalGuard::enter(config.mouse)?;
     let size = terminal.size().context("could not read terminal size")?;
-    let stream = client
-        .subscribe(&info.stream_token)
-        .context("could not subscribe to the session event stream")?;
-    let events = spawn_reader(stream);
+    let events = spawn_reader(events);
 
-    let mut app = App::new(client, info, config, keys, events, size.width, size.height);
+    let mut app = App::new(client, config, keys, events, size.width, size.height);
     app.resize_session();
     let result = app.event_loop(&mut terminal);
     app.stop_events();
@@ -259,6 +254,53 @@ impl PaneBuffer {
         }
         self.cells.get(y as usize * self.cols as usize + x as usize)
     }
+
+    /// Bounds of the word under the cursor. A double-click uses this to select
+    /// the same way Windows Terminal and PowerShell do.
+    fn word_bounds(&self, x: u16, y: u16) -> (u16, u16) {
+        let Some(cell) = self.cell(x, y) else {
+            return (x, x);
+        };
+        if !is_word_cell(cell) {
+            return (x, x);
+        }
+        let mut start = x;
+        while start > 0 && self.cell(start - 1, y).is_some_and(is_word_cell) {
+            start -= 1;
+        }
+        let mut end = x;
+        while end + 1 < self.cols && self.cell(end + 1, y).is_some_and(is_word_cell) {
+            end += 1;
+        }
+        (start, end)
+    }
+
+    /// Bounds of a full visual line for a triple-click.
+    fn line_bounds(&self) -> (u16, u16) {
+        (0, self.cols.saturating_sub(1))
+    }
+}
+
+fn is_word_cell(cell: &CellDto) -> bool {
+    cell.flags & cell_flags::WIDE_SPACER == 0
+        && !cell.ch.is_whitespace()
+        && !matches!(
+            cell.ch,
+            '(' | ')'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | '"'
+                | '\''
+                | '`'
+                | ','
+                | ';'
+                | '|'
+                | '&'
+        )
 }
 
 #[derive(Debug, Clone)]
@@ -337,6 +379,15 @@ fn selection_text(buffers: &HashMap<u64, PaneBuffer>, selection: &Selection) -> 
     } else {
         Some(output)
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClickTracker {
+    at: Instant,
+    pane: u64,
+    x: u16,
+    y: u16,
+    count: u8,
 }
 
 impl Selection {
@@ -609,7 +660,6 @@ enum Overlay {
     Prompt(PromptState),
     Confirm(ConfirmState),
     Context(ContextState),
-    Sessions(SessionsState),
 }
 
 #[derive(Debug, Default)]
@@ -696,12 +746,6 @@ impl ContextState {
     }
 }
 
-#[derive(Debug)]
-struct SessionsState {
-    sessions: Vec<SessionSummary>,
-    selected: usize,
-}
-
 pub(crate) struct PaletteItem {
     pub action: &'static str,
     pub label: &'static str,
@@ -709,8 +753,7 @@ pub(crate) struct PaletteItem {
 }
 
 struct App {
-    client: DaemonClient,
-    info: AttachInfo,
+    client: EngineClient,
     config: Config,
     keys: CompiledKeybinds,
     theme: Theme,
@@ -718,7 +761,6 @@ struct App {
     frame: Option<Frame>,
     buffers: HashMap<u64, PaneBuffer>,
     last_seq: u64,
-    detach_base: Option<u64>,
     last_bells: HashMap<u64, u64>,
     bells: HashSet<u64>,
     width: u16,
@@ -726,6 +768,7 @@ struct App {
     overlay: Option<Overlay>,
     prefix_armed: bool,
     selection: Option<Selection>,
+    last_click: Option<ClickTracker>,
     drag_split: Option<DragSplit>,
     scroll_drag: Option<ScrollDrag>,
     mouse_position: Option<(u16, u16)>,
@@ -738,8 +781,7 @@ struct App {
 
 impl App {
     fn new(
-        client: DaemonClient,
-        info: AttachInfo,
+        client: EngineClient,
         config: Config,
         keys: CompiledKeybinds,
         events: UiEvents,
@@ -749,7 +791,6 @@ impl App {
         let theme = Theme::by_name(&config.theme);
         Self {
             client,
-            info,
             config,
             keys,
             theme,
@@ -757,7 +798,6 @@ impl App {
             frame: None,
             buffers: HashMap::new(),
             last_seq: 0,
-            detach_base: None,
             last_bells: HashMap::new(),
             bells: HashSet::new(),
             width,
@@ -765,6 +805,7 @@ impl App {
             overlay: None,
             prefix_armed: false,
             selection: None,
+            last_click: None,
             drag_split: None,
             scroll_drag: None,
             mouse_position: None,
@@ -852,12 +893,12 @@ impl App {
             match self.events.receiver.try_recv() {
                 Ok(UiEvent::Message(message)) => self.handle_message(*message),
                 Ok(UiEvent::Closed(reason)) => {
-                    self.fatal = Some(anyhow!("daemon event stream closed: {reason}"));
+                    self.fatal = Some(anyhow!("FACT engine event stream closed: {reason}"));
                     return;
                 }
                 Err(TryRecvError::Empty) => return,
                 Err(TryRecvError::Disconnected) => {
-                    self.fatal = Some(anyhow!("daemon event stream stopped unexpectedly"));
+                    self.fatal = Some(anyhow!("FACT engine event stream stopped unexpectedly"));
                     return;
                 }
             }
@@ -868,12 +909,8 @@ impl App {
         match message {
             fact_protocol::ServerMessage::Frame(frame) => self.handle_frame(*frame),
             fact_protocol::ServerMessage::SessionEnded { reason } => {
-                self.exit_message = Some(format!(
-                    "Session '{}' ended: {reason}",
-                    self.info.session.name
-                ));
+                self.exit_message = Some(format!("FACT stopped: {reason}"));
             }
-            _ => {}
         }
     }
 
@@ -881,16 +918,6 @@ impl App {
         if frame.seq <= self.last_seq {
             return;
         }
-        if self.detach_base.is_none() {
-            self.detach_base = Some(frame.detach_seq);
-        } else if frame.detach_seq > self.detach_base.unwrap_or(0) {
-            self.exit_message = Some(format!(
-                "Detached from '{}'. Its shells are still running; use `fact attach {}` to return.",
-                frame.session.name, frame.session.name
-            ));
-            return;
-        }
-
         if self.selection.as_ref().is_some_and(|selection| {
             !frame.panes.iter().any(|pane| {
                 pane.id == selection.pane
@@ -921,7 +948,6 @@ impl App {
             }
         }
 
-        self.info.session = frame.session.clone();
         self.last_seq = frame.seq;
         self.frame = Some(frame);
     }
@@ -1139,7 +1165,7 @@ impl App {
         match self.client.request(command) {
             Ok(response) => Some(response),
             Err(error) => {
-                self.set_status(format!("daemon: {error}"));
+                self.set_status(format!("FACT: {error}"));
                 None
             }
         }
@@ -1321,7 +1347,7 @@ impl App {
                 }
             }
             "zoom" => {
-                // When the window is too small the daemon falls back to
+                // When the window is too small the engine falls back to
                 // focused-pane mode without setting the tab's zoom flag. In
                 // that state the useful toggle is "show all", not another
                 // no-op maximize request.
@@ -1398,21 +1424,12 @@ impl App {
                 }
             }
             "scroll_mode" => self.enter_scroll_mode(),
-            "sessions" => self.open_sessions(),
             "help" => {
                 self.overlay = Some(Overlay::Help(HelpState::default()));
             }
-            "detach" => {
-                self.exit_message = Some(format!(
-                    "Detached from '{}'. Its shells are still running.",
-                    self.info.session.name
-                ));
-            }
             "quit" => {
-                self.exit_message = Some(format!(
-                    "Closed the FACT UI for '{}'. Its shells are still running.",
-                    self.info.session.name
-                ));
+                self.exit_message =
+                    Some("Closing FACT. Every shell in this window has exited.".into());
             }
             "copy" => self.copy_selection(),
             "paste" => self.paste_clipboard(),
@@ -1472,57 +1489,6 @@ impl App {
         }
     }
 
-    fn open_sessions(&mut self) {
-        let Some(ResponsePayload::Sessions(sessions)) = self.send(Command::ListSessions {
-            include_archived: false,
-        }) else {
-            return;
-        };
-        if sessions.is_empty() {
-            self.set_status("No sessions exist yet.");
-            return;
-        }
-        self.overlay = Some(Overlay::Sessions(SessionsState {
-            sessions,
-            selected: 0,
-        }));
-    }
-
-    fn attach_session(&mut self, name: &str) {
-        let Some(ResponsePayload::Attached(info)) = self.send(Command::Attach {
-            name: name.to_string(),
-        }) else {
-            return;
-        };
-        let info = *info;
-        let stream = match self.client.subscribe(&info.stream_token) {
-            Ok(stream) => stream,
-            Err(error) => {
-                self.set_status(format!("Could not subscribe to '{name}': {error}"));
-                return;
-            }
-        };
-        let display_name = info.session.name.clone();
-        self.stop_events();
-        self.events = spawn_reader(stream);
-        self.info = info;
-        self.frame = None;
-        self.buffers.clear();
-        self.last_seq = 0;
-        self.detach_base = None;
-        self.last_bells.clear();
-        self.bells.clear();
-        self.selection = None;
-        self.drag_split = None;
-        self.scroll_drag = None;
-        self.mouse_position = None;
-        self.scroll_mode = None;
-        self.app_mouse_down = AppMouseCapture::default();
-        self.overlay = None;
-        self.set_status(format!("Attached to '{display_name}'."));
-        self.resize_session();
-    }
-
     fn copy_selection(&mut self) {
         let Some(text) = self.selection_text() else {
             self.set_status("Select text with the mouse before copying.");
@@ -1532,6 +1498,86 @@ impl App {
             Ok(()) => self.set_status("Copied."),
             Err(error) => self.set_status(format!("Clipboard copy failed: {error}")),
         }
+    }
+
+    fn has_selection(&self) -> bool {
+        self.selection_text().is_some()
+    }
+
+    /// Count consecutive clicks in the same cell, capped at three. Double and
+    /// triple clicks select a word or a line like Windows Terminal.
+    fn register_click(&mut self, pane: u64, x: u16, y: u16) -> u8 {
+        let now = Instant::now();
+        let count = match self.last_click {
+            Some(previous)
+                if previous.pane == pane
+                    && previous.x == x
+                    && previous.y == y
+                    && now.duration_since(previous.at) <= Duration::from_millis(450) =>
+            {
+                (previous.count + 1).min(3)
+            }
+            _ => 1,
+        };
+        self.last_click = Some(ClickTracker {
+            at: now,
+            pane,
+            x,
+            y,
+            count,
+        });
+        count
+    }
+
+    fn select_word(&mut self, pane: u64, x: u16, y: u16) {
+        let Some(buffer) = self.buffers.get(&pane).cloned() else {
+            self.selection = None;
+            return;
+        };
+        let (start, end) = buffer.word_bounds(x, y);
+        self.selection = Some(Selection {
+            pane,
+            anchor: (start, y),
+            end: (end, y),
+            buffer: Some(buffer),
+        });
+    }
+
+    fn select_line(&mut self, pane: u64, y: u16) {
+        let Some(buffer) = self.buffers.get(&pane).cloned() else {
+            self.selection = None;
+            return;
+        };
+        let (start, end) = buffer.line_bounds();
+        self.selection = Some(Selection {
+            pane,
+            anchor: (start, y),
+            end: (end, y),
+            buffer: Some(buffer),
+        });
+    }
+
+    fn open_context_menu(&mut self, mouse: MouseEvent) {
+        self.overlay = Some(Overlay::Context(ContextState {
+            column: mouse.column,
+            row: mouse.row,
+            selected: 0,
+            actions: vec![
+                "split_right",
+                "split_down",
+                "maximize",
+                "show_all",
+                "zoom",
+                "minimize",
+                "new_tab",
+                "rename_tab",
+                "search",
+                "restart_pane",
+                "close_pane",
+                "close_tab",
+                "copy",
+            ],
+        }));
     }
 
     fn paste_clipboard(&mut self) {
@@ -1758,25 +1804,6 @@ impl App {
                 }
                 _ => self.overlay = Some(Overlay::Context(context)),
             },
-            Overlay::Sessions(mut sessions) => match key.code {
-                CKeyCode::Esc => {}
-                CKeyCode::Up => {
-                    sessions.selected = sessions.selected.saturating_sub(1);
-                    self.overlay = Some(Overlay::Sessions(sessions));
-                }
-                CKeyCode::Down => {
-                    sessions.selected =
-                        (sessions.selected + 1).min(sessions.sessions.len().saturating_sub(1));
-                    self.overlay = Some(Overlay::Sessions(sessions));
-                }
-                CKeyCode::Enter => {
-                    if let Some(session) = sessions.sessions.get(sessions.selected) {
-                        let name = session.name.clone();
-                        self.attach_session(&name);
-                    }
-                }
-                _ => self.overlay = Some(Overlay::Sessions(sessions)),
-            },
         }
     }
 
@@ -1900,14 +1927,23 @@ impl App {
                     self.selection = None;
                     return;
                 };
+                let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
+                let clicks = self.register_click(pane, local_x, local_y);
+                if !shift && clicks >= 2 {
+                    if clicks == 2 {
+                        self.select_word(pane, local_x, local_y);
+                    } else {
+                        self.select_line(pane, local_y);
+                    }
+                    return;
+                }
                 if let Some(view) = self
                     .frame
                     .as_ref()
                     .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
                 {
-                    let app_mouse = app_tracks_mouse(view.modes)
-                        && view.scroll_offset == 0
-                        && !mouse.modifiers.contains(KeyModifiers::SHIFT);
+                    let app_mouse =
+                        app_tracks_mouse(view.modes) && view.scroll_offset == 0 && !shift;
                     if app_mouse {
                         self.app_mouse_down.press(MouseButton::Left, pane);
                         self.forward_mouse_button(
@@ -1929,6 +1965,21 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Right) => {
+                if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if let Some(pane) = self.pane_slot_at(mouse.column, content_y) {
+                        let _ = self.send(Command::FocusPane { pane });
+                        self.bells.remove(&pane);
+                    }
+                    self.open_context_menu(mouse);
+                    return;
+                }
+                // PowerShell and Windows Terminal muscle memory: right-click
+                // copies the current selection, otherwise it pastes.
+                if self.has_selection() {
+                    self.copy_selection();
+                    self.selection = None;
+                    return;
+                }
                 let Some(pane) = self.pane_slot_at(mouse.column, content_y) else {
                     return;
                 };
@@ -1938,8 +1989,7 @@ impl App {
                     .frame
                     .as_ref()
                     .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-                    .is_some_and(|view| app_tracks_mouse(view.modes) && view.scroll_offset == 0)
-                    && !mouse.modifiers.contains(KeyModifiers::SHIFT);
+                    .is_some_and(|view| app_tracks_mouse(view.modes) && view.scroll_offset == 0);
                 if app_mouse {
                     if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
                         self.selection = None;
@@ -1954,26 +2004,7 @@ impl App {
                         );
                     }
                 } else {
-                    self.overlay = Some(Overlay::Context(ContextState {
-                        column: mouse.column,
-                        row: mouse.row,
-                        selected: 0,
-                        actions: vec![
-                            "split_right",
-                            "split_down",
-                            "maximize",
-                            "show_all",
-                            "zoom",
-                            "minimize",
-                            "new_tab",
-                            "rename_tab",
-                            "search",
-                            "restart_pane",
-                            "close_pane",
-                            "close_tab",
-                            "copy",
-                        ],
-                    }));
+                    self.paste_clipboard();
                 }
             }
             MouseEventKind::Down(MouseButton::Middle) => {
@@ -2128,13 +2159,7 @@ impl App {
     fn handle_overlay_mouse(&mut self, mouse: MouseEvent) {
         if matches!(
             self.overlay,
-            Some(
-                Overlay::Context(_)
-                    | Overlay::Help(_)
-                    | Overlay::Palette(_)
-                    | Overlay::Sessions(_)
-                    | Overlay::Search(_)
-            )
+            Some(Overlay::Context(_) | Overlay::Help(_) | Overlay::Palette(_) | Overlay::Search(_))
         ) {
             let code = match mouse.kind {
                 MouseEventKind::ScrollUp => Some(CKeyCode::Up),
@@ -2451,12 +2476,16 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
         "an amber dot appears at the pane's top-right".into(),
     ));
     lines.push((
-        "Quick clipboard".into(),
-        "Ctrl+C copy · Ctrl+V paste".into(),
+        "Clipboard".into(),
+        "select then right-click or Ctrl+C · right-click or Ctrl+V pastes".into(),
     ));
     lines.push((
         "Select text".into(),
-        "drag in a pane (Shift+drag if the app uses the mouse)".into(),
+        "drag, double-click for a word, triple-click for a line".into(),
+    ));
+    lines.push((
+        "Context menu".into(),
+        "Shift+right-click (right-click otherwise copies or pastes)".into(),
     ));
     lines.push(("Direct maximize / show all".into(), "Alt+M / Alt+N".into()));
     lines.push(("Terminate active grid".into(), "Alt+T".into()));
@@ -2477,17 +2506,6 @@ pub(crate) fn fit_text(text: &str, width: usize) -> String {
     let mut result: String = text.chars().take(width - 1).collect();
     result.push('…');
     result
-}
-
-pub(crate) fn utc_clock(epoch_ms: i64) -> String {
-    let total_seconds = epoch_ms.div_euclid(1000);
-    let seconds_of_day = total_seconds.rem_euclid(86_400);
-    format!(
-        "{:02}:{:02}:{:02}Z",
-        seconds_of_day / 3_600,
-        (seconds_of_day % 3_600) / 60,
-        seconds_of_day % 60
-    )
 }
 
 #[cfg(test)]
@@ -2636,9 +2654,25 @@ mod tests {
     }
 
     #[test]
-    fn clock_formats_utc() {
-        assert_eq!(utc_clock(0), "00:00:00Z");
-        assert_eq!(utc_clock(3_661_000), "01:01:01Z");
+    fn word_selection_respects_delimiters() {
+        let mut buffers = HashMap::new();
+        let mut cells = Vec::new();
+        for ch in "git status --short".chars() {
+            cells.push(cell(ch));
+        }
+        buffers.insert(
+            1,
+            PaneBuffer {
+                cols: cells.len() as u16,
+                rows: 1,
+                cells,
+            },
+        );
+        let buffer = buffers.get(&1).unwrap();
+        assert_eq!(buffer.word_bounds(0, 0), (0, 2));
+        assert_eq!(buffer.word_bounds(5, 0), (4, 9));
+        assert_eq!(buffer.word_bounds(10, 0), (10, 10));
+        assert_eq!(buffer.line_bounds(), (0, 17));
     }
 
     fn test_view(width: u16) -> PaneView {

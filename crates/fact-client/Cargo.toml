@@ -12,9 +12,7 @@ anyhow.workspace = true
 arboard.workspace = true
 crossterm.workspace = true
 fact-config = { path = "../fact-config" }
-fact-ipc = { path = "../fact-ipc" }
+fact-engine = { path = "../fact-engine" }
 fact-layout = { path = "../fact-layout" }
 fact-protocol = { path = "../fact-protocol" }
-fact-runtime = { path = "../fact-runtime" }
 ratatui.workspace = true
-serde.workspace = true

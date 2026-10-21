@@ -1,191 +1,133 @@
 # Architecture
 
-FACT separates terminal ownership from terminal display. A per-user daemon owns
-the shells; the UI is a replaceable viewer/controller. This is what makes
-detach and live reattach possible.
+FACT is one Windows process. The terminal user interface and the ConPTY shells
+live in the same `fact.exe`; there is no daemon to connect to and no stored
+workspace to restore. The design goal is a small, predictable terminal host
+where tabs, splits and grids work without a background service or database.
 
 ## Process model
 
 ```text
-+--------------------------+         +------------------------------+
-| fact.exe                 |         | fact.exe --daemon            |
-| CLI + Ratatui client     |<------->| per-user daemon              |
-|                          |  local  |                              |
-| - terminal rendering     |  pipe   | - ConPTY processes           |
-| - key/mouse encoding     |         | - terminal models            |
-| - selection/clipboard    |         | - layout tree                |
-| - overlays               |         | - frame fan-out              |
-+--------------------------+         | - SQLite persistence         |
-                                     +---------------+--------------+
-                                                     |
-                                       +-------------+-------------+
-                                       |             |             |
-                                    pwsh.exe      cmd.exe      profile
++---------------------------------------------------------------+
+| fact.exe                                                      |
+|                                                               |
+|  TUI thread                     Engine owner thread           |
+|  - Ratatui rendering            - ConPTY processes            |
+|  - keyboard/mouse encoding      - terminal models             |
+|  - selection/clipboard          - tabs and split layout       |
+|  - overlays                     - frame generation            |
+|          |          commands          ^                       |
+|          +--------------------------> |                       |
+|          |          frames            |                       |
+|          <-------------------------- +                       |
+|                                                               |
+|                    +---------+---------+                      |
+|                    |         |         |                      |
+|                 pwsh.exe   cmd.exe   profile                  |
++---------------------------------------------------------------+
 ```
 
-The daemon is not a Windows service and does not run elevated. The first CLI
-that needs a daemon spawns the same executable with the hidden `daemon`
-subcommand, detached from the console, then waits for the authenticated pipe.
-
-The daemon has one owner thread. A bounded event channel carries commands,
-subscriptions and tick notifications. The owner thread mutates all session
-state, reads PTY output, writes SQLite and builds frames. Background threads only
-accept pipe connections, authenticate clients, wait for command replies and
-write event frames to their pipe connection.
+The engine starts before the TUI enters the alternate screen. `Engine::drop`
+sends a shutdown request, the owner thread kills each PTY and drains the
+workspace, and `drop` joins the thread. Closing the last tab, pressing the quit
+shortcut, closing the console window or otherwise ending the process therefore
+ends every shell it owns.
 
 ## Crate boundaries
 
 | Crate | Responsibility |
 | --- | --- |
-| `fact-protocol` | Wire structs, commands, frames, validation, session names, cell flags. |
+| `fact-protocol` | In-process command, frame, cell and validation types. |
 | `fact-config` | TOML config, profiles, chord parsing/compilation, paths and shell detection. |
-| `fact-layout` | Serializable binary split tree, grids, focus, zoom, minimize, move/swap. |
+| `fact-layout` | In-memory binary split tree, grids, focus, zoom, minimize, move/swap. |
 | `fact-term` | Alacritty-backed terminal model, bounded scrollback, search and frame snapshots. |
 | `fact-pty` | ConPTY creation, process/job-object ownership, input, resize and exit codes. |
-| `fact-ipc` | Local named-pipe transport, SDDL/DACL creation, frame framing, peer checks. |
-| `fact-runtime` | Identity files, daemon discovery, authenticated client and event streams. |
-| `fact-session` | SQLite schema/migrations, layout validation, export/import and lifecycle. |
-| `fact-daemon` | Session manager, frame generation, persistence loop, saved-layout restart. |
+| `fact-engine` | Owner thread, workspace state, shell lifecycle, layout commands and frame generation. |
 | `fact-client` | Ratatui renderer, keymap, themes, selection, mouse handling and overlays. |
-| `fact-cli` | Command surface, autostart, doctor, output formatting and mode dispatch. |
-| `fact-testkit` | Shared helpers for tests that need real Windows resources. |
+| `fact-cli` | Argument parsing, configuration commands and engine/TUI startup. |
 
 Dependencies point downward. `fact-client` and `fact-cli` do not parse terminal
-escape sequences; they only render `CellDto` values supplied by the daemon.
+escape sequences; they render `CellDto` values supplied by the engine.
 
-## IPC and authentication
+## Engine and channels
 
-Every data directory has a stable pipe name derived from the canonical data
-directory path. The daemon creates the first pipe instance with:
+`fact-engine::start` resolves the requested profile, creates the `FACT`
+workspace and spawns its initial grid of shells. It then starts one owner
+thread. Every later mutation happens on that thread, so PTY reads, terminal
+state, layout changes and frame construction never race each other.
 
-- `PIPE_REJECT_REMOTE_CLIENTS`
-- a protected DACL for the current user and SYSTEM
-- `FILE_FLAG_FIRST_PIPE_INSTANCE`
-- byte mode and a 64 KiB kernel buffer
+The UI holds an `EngineClient`. A command is sent through an `mpsc` channel with
+a one-slot reply channel; the UI waits for the response before continuing. The
+engine sends ordered `ServerMessage` values to an `EventStream` through a
+bounded eight-message channel. The UI's reader thread moves those messages into
+a second bounded channel, so a busy shell cannot grow an unbounded queue while
+the renderer is busy. A slow subscriber loses frames rather than blocking the
+owner thread.
 
-The daemon accepts a connection, obtains the client PID with
-`GetNamedPipeClientProcessId`, checks that the client token's user SID equals the
-daemon token's user SID, and only then speaks the protocol. Messages are
-length-prefixed bincode frames with a maximum size.
+The owner loop wakes on a command or after a 33 ms tick. On each turn it reads
+bounded PTY output, updates terminal models, records exits, handles terminal
+responses, advances titles/bells, and produces any needed frames. The first
+frame sequence is `1`; the client discards older or duplicate sequences.
 
-Client and server exchange `Hello` messages carrying a random 256-bit token
-from `runtime/daemon.json`. The token file itself is ACL-protected. A control
-connection then sends commands with monotonically increasing request IDs and
-waits for the matching response. An event stream is a second connection that
-authenticates, presents a short-lived one-time stream token, and receives
-frames until it closes.
+## Workspace model
 
-No socket, HTTP server or network listener exists.
+There is exactly one workspace, named `FACT`. It contains:
 
-## Session model
-
-A session has:
-
-- a case-insensitive name and stable ID
 - tabs, each with a binary split tree
 - pane records with shell profile, working directory, PID and exit code
-- one terminal model per pane, including bounded scrollback and modes
+- one terminal model per pane, including bounded scrollback and terminal modes
 - a viewport size (columns and rows)
-- layout and metadata epochs plus detach generation
+- layout and metadata epochs used to decide when a frame is needed
 
 The binary tree stores normalized split ratios. Layout adds a one-cell gutter at
-each split. Terminal content uses the full slot width and height. A shell
-history scrollbar overlays the right edge only on hover or drag; apps that own
-the alternate screen or mouse receive no FACT scrollbar. Protocol 6 requires
-both peers to agree on this full-width geometry. The daemon
-subtracts one row from the client viewport only when the session has more than
-one tab; a single-tab session has no persistent chrome at all. When slots fall
-below `min_pane_width` or `min_pane_height`, the layout switches to focused-pane
-mode instead of rendering unusably small terminals. The explicit show-all
-action sets a per-tab `fit_all` flag that bypasses those minimums; restoring a
-zoomed pane turns it on so a resize can never trap the UI in focused-pane mode.
+each split. Terminal content uses the full slot width and height; a shell
+history scrollbar overlays the rightmost column only on hover or drag.
+Applications in the alternate screen or with mouse reporting get no FACT
+scrollbar. When slots fall below `min_pane_width` or `min_pane_height`, the
+layout switches to focused-pane mode instead of rendering unusably small
+terminals. The explicit show-all action sets a per-tab `fit_all` flag that
+bypasses those minimums.
+
 Minimized panes keep their processes and terminal state; zoom shows only the
-focused pane. Every pane is started with `FACT_SESSION` and `FACT_PANE` in its
-environment, which lets the CLI reject a nested TUI launch instead of attaching
-to the session that owns the current terminal.
+focused pane. Every pane receives an informational `FACT_PANE` environment
+value. Fact does not use it to discover or reattach to anything.
 
 ## Frame protocol
 
-The daemon ticks every 33 ms. For each subscriber it builds a frame only when
-something relevant changed. A frame carries:
+The owner thread builds a frame only when one of its subscribers needs new
+state. A frame carries:
 
-- session summary, tabs, active tab, focus and minimized panes
+- workspace summary, tabs, active tab, focus and minimized panes
 - pane slots, content dimensions, PIDs, alive/exit state and cursor/modes
 - split handles with tree paths, regions and ratios
 - only the cell grids whose pane version is newer than what that subscriber was
   sent; layout changes force a full pane refresh
-- detach generation and server time
+- viewport and tiny-mode information
 
-Subscribers use bounded channels. A slow client drops frames rather than
-blocking PTY processing. A pane version increments only when its terminal cells
-change, so idle panes cost a small header per frame. The client keeps the last
-cell buffer per pane and keeps rendering when `cells` is absent.
+The client keeps the last cell buffer per pane and keeps rendering when `cells`
+is absent. Pane versions increment only when terminal cells change, so an idle
+pane costs a small header rather than a full screen. Frames are in-memory Rust
+values; `fact-protocol` retains serde derives for tests and diagnostics, not for
+a network or disk format.
 
-## Terminal model and frames
+## Terminal model and scrolling
 
 `fact-term` wraps `alacritty_terminal` and owns the grid, scrollback, modes,
 cursor, title callbacks and bell state. Frame snapshots are bounded `CellDto`
 grids with cursor and mode metadata; they exist only in memory and are replaced
-on every changed frame. Terminal output is never written to SQLite.
+on every changed frame. Terminal output is never written to disk.
 
-`fact-term` also implements capped case-sensitive/insensitive search across
-history and visible rows. The TUI sends the query to the daemon, so searching
-does not require transferring the whole scrollback to the client.
+`fact-term` implements capped case-sensitive/insensitive search across history
+and visible rows. The UI sends the query to the engine, so searching does not
+require transferring the whole scrollback to the client.
 
 When a pane is in the alternate screen, the application owns its viewport and
 scrollbar. FACT adds no rail. Ordinary wheel input retains its original
 coordinates when mouse reporting is enabled, with PageUp/PageDown fallback
 otherwise. Prefix scroll mode targets its own pane and synthesizes wheel input
-at that pane's centre; paging and navigation keys are still forwarded. Ordinary shell history
-uses a hover-only scrollbar overlay, without reducing terminal width.
-
-## Persistence and restart
-
-`fact-session` uses bundled SQLite with schema migrations. Saves are
-transactional. Session data records the schema/export version, timestamps,
-layout and pane records (profile, working directory and last known PID).
-
-Persistence cadence:
-
-- layout and metadata are saved on mutations and periodically
-- `fact save` forces an immediate layout save
-- normal daemon shutdown saves every live session before exiting
-
-Warm resume:
-
-1. The CLI authenticates and sends `ResumeSession`.
-2. The daemon finds a live session and returns `Attached`.
-3. The client subscribes to the event stream and receives current pane state.
-4. The original PID, terminal state and scrollback are preserved.
-
-Saved-layout restart:
-
-1. The session exists in SQLite but no live session exists in this daemon.
-2. The store validates identity, layout and pane records. v1 databases have
-   their legacy snapshot columns cleared with SQLite secure deletion, the
-   database vacuumed and the WAL truncated during migration.
-3. The daemon remaps pane IDs and spawns a fresh shell in every saved pane,
-   using the saved profile and working directory.
-4. PIDs and exit codes in the new pane records are reset.
-5. `Attached` returns the normal session summary. The TUI opens directly on the
-   fresh shells; there is no recovery modal.
-6. Terminal output is never read from the database and commands are never
-   replayed.
-
-If the layout is corrupt, the saved session fails to load instead of starting an
-inconsistent process tree.
-
-## Detach and reattach
-
-`fact detach` asks the daemon to increment every session's detach generation and
-push a frame. Clients exit when the generation changes. The daemon does not stop
-shells. `fact resume` or `fact attach` opens a new control connection and event
-stream to the same live session. Shells, PIDs, terminal scrollback and layout are
-unchanged.
-
-Closing the TUI without detaching also leaves the daemon running. Quitting the
-daemon (`fact shutdown`) saves layouts and stops the shells; the next resume
-starts fresh shells in those layouts.
+at that pane's centre; paging and navigation keys are still forwarded. Ordinary
+shell history uses a hover-only scrollbar overlay, without reducing terminal
+width.
 
 ## Input and mouse routing
 
@@ -193,7 +135,8 @@ The client converts crossterm key events to the chord format used by config and
 keybindings. A non-prefix chord that is not a FACT binding is encoded to terminal
 input according to the focused pane's modes (application cursor, bracketed
 paste, mouse reporting). The prefix chord arms a one-shot command state. F1,
-Ctrl+Shift+C/V and other direct bindings work without the prefix.
+Ctrl+Shift+C/V, clipboard aliases and the direct Alt shortcuts work without the
+prefix.
 
 Mouse events are routed by zone:
 
@@ -203,33 +146,38 @@ Mouse events are routed by zone:
 - split gutters drag to resize ratios
 - pane content is forwarded as SGR mouse input when the application requested
   mouse reporting; otherwise it starts a text selection
-- right-click opens the pane context menu when the application has not requested
-  mouse reporting; otherwise it is forwarded as SGR mouse input
+- drag selects; double-click selects a word; triple-click selects a visual line
 - Shift+drag always selects text, even when the application owns the mouse
+- right-click copies a selection; with no selection it pastes, or is forwarded
+  when the application requested mouse reporting
+- Shift+right-click always opens FACT's context menu
 
 Selections are extracted from the client's last pane buffers, skipping
-double-width spacer cells and masking hidden cells.
+double-width spacer cells and masking hidden cells. A selection snapshots the
+visible pane so a streaming process cannot change the selected text; Esc,
+typing or scrolling resumes the live view.
 
 ## Limits and failure behavior
 
-The daemon enforces limits from configuration and protocol constants: maximum
-sessions, panes per tab/session, layout depth, split ratio range, scrollback,
-frame cells, paste bytes, search query length and IPC frame size.
-Protocol versions are negotiated exactly. Invalid names, tokens, cursors,
-dimensions and malformed frames are rejected.
+FACT enforces limits from configuration and protocol constants: 32 panes in an
+initial grid, 256 panes per workspace, split ratio range 0.1-0.9, tree depth 64,
+scrollback, frame cell buffers, 16 MiB queued input, 4 MiB paste, a 256 KiB
+single input chunk and a 256-character search query. The ConPTY layer bounds
+output and input queues.
 
-If the daemon dies, the CLI reports that it is not running and can start a new
-one. If an event stream drops, the UI reports the disconnect and exits safely
-instead of continuing to render stale state as live. If the terminal setup fails,
-raw mode/alternate screen are restored on the error path.
+If a shell exits, its pane remains visible with the exit code and a restart
+hint; the process that owns the pane is cleaned up. If the last pane or tab
+closes, the engine ends the workspace and the UI exits. If the engine channel
+closes, the UI reports the failure and restores the console instead of rendering
+stale state. If terminal setup fails or the UI returns an error, raw mode and the
+alternate screen are restored on the error path.
 
-## Why not tmux, Windows Terminal or a service?
+## Why not a daemon or Windows service?
 
-- tmux does not own native Windows ConPTY processes.
-- Windows Terminal owns its own UI and session model; FACT needs a custom TUI
-  and a stable IPC protocol.
-- A Windows service would require elevation or service ACL configuration and
-  would complicate per-user sessions. A per-user daemon matches the security
-  boundary and the data directory.
-
-See [docs/adr](adr/README.md) for the recorded trade-offs.
+A daemon adds a second process, an authenticated transport, lifecycle commands,
+persistence, crash recovery and a whole class of stale-state bugs. It buys live
+detach and survival after the UI exits, neither of which is a requirement here.
+The current product is a terminal window: when the window closes, its shells
+should close too. A Windows service would additionally require elevation or
+service ACL configuration and would not match the per-user, no-persistence
+model. See [docs/adr](adr/README.md) for the recorded trade-offs.

@@ -3,7 +3,7 @@
 //! Every FACT pane owns one pseudo console, one OS process (normally a shell),
 //! and a kill-on-close job object containing that process tree. Output is read
 //! on a dedicated thread and delivered over a bounded channel so a noisy pane
-//! cannot grow the daemon's memory without bound.
+//! cannot grow the engine's memory without bound.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_void, OsStr};
@@ -84,7 +84,7 @@ pub struct SpawnOptions {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
-    /// Custom environment entries merged over the daemon environment.
+    /// Custom environment entries merged over the parent FACT process environment.
     pub env: BTreeMap<String, String>,
     pub cols: u16,
     pub rows: u16,
@@ -129,7 +129,7 @@ impl Shared {
         let handle = self.conpty.lock().ok().and_then(|mut guard| guard.take());
         if let Some(handle) = handle {
             // ClosePseudoConsole can wait for output. Keep the dedicated
-            // reader active until EOF; normal daemon ticks consume its bounded
+            // reader active until EOF; normal engine ticks consume its bounded
             // queue so process-exit cleanup does not block the owner thread.
             unsafe { ClosePseudoConsole(handle) };
         }
@@ -273,7 +273,7 @@ impl PtyProcess {
     }
 
     /// Queue terminal input. The queue is bounded; callers receive
-    /// [`PtyError::InputBackpressure`] instead of blocking the daemon.
+    /// [`PtyError::InputBackpressure`] instead of blocking the engine owner thread.
     pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
         if bytes.len() > MAX_INPUT_CHUNK {
             return Err(PtyError::TooMuchInput(bytes.len()));
@@ -326,7 +326,7 @@ impl PtyProcess {
     }
 
     /// Change the pseudo console dimensions. The terminal model is resized by
-    /// the daemon separately, before calling this method.
+    /// the engine separately, before calling this method.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         let cols = cols.clamp(1, i16::MAX as u16);
         let rows = rows.clamp(1, i16::MAX as u16);
@@ -354,7 +354,7 @@ impl PtyProcess {
         Ok(())
     }
 
-    /// Non-blocking output read used by the daemon tick.
+    /// Non-blocking output read used by the engine tick.
     pub fn try_read(&self) -> Option<Vec<u8>> {
         self.output_rx.try_recv().ok()
     }
@@ -678,7 +678,7 @@ fn wide(value: &str) -> Vec<u16> {
         .collect()
 }
 
-/// Merge the daemon environment with pane-specific values and serialize a
+/// Merge the FACT process environment with pane-specific values and serialize a
 /// double-NUL-terminated, case-insensitively sorted Unicode environment block.
 fn build_environment_block(custom: &BTreeMap<String, String>) -> Vec<u16> {
     let mut entries: HashMap<String, (String, String)> = HashMap::new();

@@ -1,5 +1,10 @@
 # FACT 0.3.3 follow-up audit
 
+> **Historical record.** This audit describes the daemon-based 0.3.2 baseline and
+> the 0.3.3 fixes. FACT is now a single process with no daemon, IPC or
+> persistence, and the daemon/TUI test harnesses mentioned below no longer exist.
+> See [testing.md](testing.md) for current coverage.
+
 Baseline: `fc991ac` / 0.3.2. This follows the initial scrolling audit and the
 request for a broader reliability pass and a less intrusive scrollbar.
 
@@ -42,8 +47,8 @@ not instrument queue saturation; it does not prove shutdown behavior on every
 Windows build.
 
 The release/installer checks and CI results are recorded in the PR. README
-screenshots are captured from isolated live sessions; regeneration is documented
-in `docs/screenshots/README.md`.
+screenshots were captured from isolated live sessions; regeneration was documented
+in `docs/screenshots/README.md` at the time.
 
 This is a bounded audit with reproducible fixes, not proof that every possible
 bug is eliminated. Windows 10 and live model conversations were not exercised.

@@ -1,112 +1,73 @@
 # Testing and verification
 
-FACT treats Windows behavior as the product. Unit tests cover parsers and data
-structures; integration tests launch real ConPTY shells and drive the daemon, CLI
-and TUI through the same binary a user runs.
+FACT treats Windows behavior as the product. Unit tests cover parsers, layout,
+configuration and terminal state. Integration tests start real ConPTY shells and
+drive the in-process engine and the CLI through the binaries a user runs. There
+are no mock shells and no daemon to test.
 
 ## Local gates
 
-Run all three before merging or tagging:
+Run all four before merging or tagging:
 
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --no-fail-fast
+.\scripts\test-install.ps1 -FactExe .\target\debug\fact.exe
 ```
 
-Tests create temporary data directories. They do not use the developer's real
-`%LOCALAPPDATA%\FACT` state. The daemon tests start a daemon on a per-test data
-directory, use a real shell and terminate the daemon during cleanup.
+The CLI tests point `FACT_HOME` at a throwaway directory, so a developer's real
+`%LOCALAPPDATA%\FACT\config.toml` is never read or written. The engine and PTY
+tests start their own shells and do not read the developer's configuration. A
+normal test run creates no database, log, saved layout or runtime identity because
+FACT has no such state. The ConPTY tests terminate their shells during cleanup.
 
 ## What is covered
 
 | Area | Evidence |
 | --- | --- |
-| Protocol framing | Round-trip, malformed bincode, zero/oversize frame rejection, name and cell validation. |
-| Configuration | Defaults, unknown-field rejection, version mismatch, environment expansion, profiles, duplicate/invalid keybindings, theme and range checks. |
-| Layout | Grid construction, split/close/focus, zoom, minimize/restore, move/swap, ratio clamping and serialization. |
-| Terminal | ANSI colors/styles, wide and zero-width cells, alternate screen, cursor/modes, bounded scrollback, search and frame snapshots. |
-| ConPTY | Independent processes, input/output, resize, exit status, environment block and argument quoting. |
-| IPC | Pipe round-trip, peer PID/current-user check, protected DACL, local name validation, identity file ACL, DACL diagnostics. |
-| Sessions | Schema migration (including secure v1 snapshot cleanup and WAL truncation), save/load, case-insensitive names, layout corruption rejection, export/import copy semantics, archive/delete. |
-| Daemon | Maximum-size bracketed UTF-8 paste with live-view reset, queued-output/exit ordering, grid of eight independent shells, live detach/reattach PID preservation, saved-layout restart with fresh shells and discarded output, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
-| CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
-| Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. A replacement install also proves a dead daemon identity is cleared. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, hover scrollbar appearance and disappearance, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes the saved layout, proves the old marker and recovery screen are absent, and verifies a new shell PID accepts input. A seventh writes a stale protocol-3 identity and proves startup clears it and renders a live pane. An eighth generates 120 lines, enters scroll mode with the configured prefix and `[`, verifies the offset moves on PageUp and that Esc returns to the shell. A ninth starts a fake alternate-screen app, proves no FACT rail appears even on hover, enters app scroll mode, verifies PageUp is forwarded to the app and that Esc leaves the mode. Further scenarios exercise streaming mouse gestures/selection, history motion suppression and clickable/clamped context menus. The documentation capture is opt-in and ignored by default. |
-| Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
-
-## Requirement-to-test map
-
-The streaming regression `mouse_tracking_and_selection_work_while_an_app_is_streaming`
-starts `crates/fact-cli/tests/fixtures/mouse-app.ps1` as a real child behind two ConPTY layers.
-It asserts wheel, click, drag and release reports with mode 1002, selects text
-while a timer redraws the screen, checks the selected viewport stays stable,
-and verifies Esc resumes live output. The keyboard-only alternate-screen test
-also sends a real wheel event and requires PageUp instead of UpArrow. Client
-unit tests cover SGR/legacy encodings, coordinate limits and copying from a
-snapshot after the live cells change.
-`mouse_motion_does_not_snap_scrollback_to_live_output` uses the same fixture in
-main-screen mode with all-motion tracking. It checks Shift+wheel, pointer motion
-over history and selection of history without passing clicks to the app.
-The TUI scenarios share a test lock: each starts real console processes, and
-running all the eight-pane grids alongside the streaming fixtures can exhaust
-local Windows console/startup resources. Other crate tests retain their normal
-parallel execution.
-
-| Requirement | Test |
-| --- | --- |
-| `fact --grid 8` creates independent shells | `fact-daemon` integration test `grid_launches_independent_shells_and_streams_output` checks eight distinct PIDs and output routing. `fact-cli` test `grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session` proves a prior saved/live session cannot swallow the grid request. |
-| Live detach/reattach preserves processes | `detach_and_reattach_keep_the_same_processes` checks the original pane ID, PID and alive state after reattach. |
-| Restart reopens layout with fresh shells | `saved_layout_starts_fresh_shells_without_replaying_output` checks the saved pane count, new PIDs, an empty search for the old marker and a new shell that accepts input. The TUI test repeats the restart through the real UI and rejects both the old marker and the removed recovery screen. |
-| Layout integrity | `fact-session` tests `rejects_pane_layout_mismatch` and validates pane IDs before a saved layout can start processes. The v1 migration test clears legacy snapshots, asserts no SQLite free pages remain and scans the database and WAL sidecars for the old snapshot marker. |
-| Bad token rejection | `wrong_token_is_rejected_without_killing_the_daemon` verifies the daemon rejects authentication and remains available. |
-| Non-owner access | Pipe and identity files use a protected current-user/SYSTEM DACL. Tests assert exactly those grants, peer-user comparison is in the accept path, and local-only pipe names are enforced. |
-| No network listeners | A source-level test scans every crate's `src` tree for TCP/UDP/HTTP listener and stream APIs. |
-| Import copies identity | `export_import_is_a_copy` and the daemon lifecycle test verify fresh session/pane IDs and reset process state. |
-| Clean, controllable UI | Layout tests prove 8 panes retain full content height and fit 120x35, 100x30 and 80x24. Client unit tests cover tab/new-tab geometry, the bottom-right minimized tray, hover-only history scrollbar geometry, app rail suppression and steady cursor styles. The real-ConPTY TUI test renders the screen and rejects pane-header buttons, shell paths, PIDs, pane counts, focused-mode labels, session names and theme names. |
-| Recover from a narrow window | Layout tests prove `zoom(false)`/`fit_all` keeps all eight panes visible at 60x18 and survives serialization. The real-ConPTY `maximize_and_show_all_work_in_a_small_window` test presses prefix+M/N and counts the rendered panes. |
-| Safe nested launch | The real-ConPTY `nested_launch_is_rejected_inside_a_pane` test launches `fact --grid 1` inside a pane and checks for the explicit refusal instead of a black second UI. |
-| Upgrade over a stale daemon | The startup unit test removes an unusable protocol-3 identity; the real-ConPTY stale-identity test proves the TUI then starts; the installer replacement test proves a dead identity is cleared. A live incompatible daemon is never overwritten and produces a stop-and-retry error. |
-| Windows CI on every PR | `.github/workflows/ci.yml` runs format, Clippy and the full suite on `windows-latest` for every pull request. |
-
-A true second-Windows-user connection test requires creating a local account or
-credentials, which CI does not provide. The ACL assertions, peer SID comparison
-and server-side rejection are tested directly instead.
+| Protocol values | `fact-protocol` tests cover title sanitization, friendly shell titles, preserved zero-width symbols and rectangle hit testing. Frames are in-memory Rust values; serde is used for tests and diagnostics, not for a wire or disk format. |
+| Configuration | Defaults, version mismatch, bad values, unknown and obsolete fields, environment/profile resolution, round trips and disabled profiles; chord parsing, uppercase/Shift handling, invalid chords, unique defaults and duplicate overrides. |
+| Layout | Grid construction, full-width content, focused-pane fallback at tiny sizes, zoom, show-all, serialization, split/close symmetry, minimize/restore, focus cycling, ratio clamping, move/swap and moving panes between tabs. |
+| Terminal model | Plain text and cursor, ANSI colors and bold, wide/combining characters, alternate screen and modes, scrollback and search, tiny resizes, malformed escapes, title callbacks and mouse mode bits. |
+| ConPTY | Real `cmd.exe` processes: output and exit, propagated exit codes, interactive input, resize, eight independent shells, more than 100 KB of output without truncation, kill cleanup and a no-deadlock shutdown regression with unread output. |
+| Engine | A real grid of two shells is resized, receives typed input, returns output through the ordered frame stream and shuts down with its shells. |
+| Client | Selection extraction and snapshot copy, wide-spacer handling, overlapping mouse buttons, direct Alt shortcuts, action labels, word selection, tab/new-tab geometry, the minimized tray, hover-only scrollbar hit testing, app scroll routing and theme/render helpers. |
+| CLI | Help surface (including the absence of removed session commands), `FACT_HOME` path resolution, `config validate` with built-in defaults and JSON, `config init` and overwrite refusal, invalid-prefix diagnostics and rejection of obsolete daemon settings. |
+| Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and the installed `--version`. |
+| Windows CI | `.github/workflows/ci.yml` runs format, Clippy, the full suite and the offline installer test on `windows-latest` for every push to `main` and every pull request. |
 
 ## Real-ConPTY tests
 
 These are intentionally not mock tests:
 
-- Daemon tests use the testkit harness to write an isolated config, start the
-  daemon executable, connect over the real named pipe and run `powershell.exe` or
-  the detected shell.
-- The TUI test allocates a 120x35 ConPTY, launches `fact --grid 8`, waits for a
-  real PowerShell prompt before typing (early input can race the first frame),
-  opens the palette, searches for an echoed marker, opens help, detaches with the
-  configured prefix and verifies through `fact sessions --json` that the session
-  is still live with eight panes. Another test first detaches a one-pane session,
-  then proves a bare `fact --grid 8` creates `grid-8` instead of attaching to it.
-  A third saves the layout, stops the daemon, resumes it, proves the old output
-  and recovery screen are absent and verifies a new shell PID. Further tests
-  cover a second live client, a 60x18 grid with prefix+M/N, nested-launch
-  refusal, a stale protocol-3 identity that must not block startup, scroll
-  mode reading real history, mouse gestures/selection during streaming,
-  context-menu clicks (including clamped menus and outside dismissal), and an
-  alternate-screen app with no FACT rail that receives forwarded PageUp. Set
-  `FACT_SMOKE_EXE` to run all twelve tests against a downloaded release binary instead of the test build. Fresh
-  PIDs and discarded old output are asserted
-  directly by the daemon saved-layout test.
-- Tests wait for frames and output with deadlines rather than fixed sleeps where
-  possible. Restart assertions search the whole pane buffer, not only the visible
-  screen, so a new shell's banner cannot mask a replay bug.
+- `crates/fact-pty/tests/conpty.rs` starts `cmd.exe` through the Windows
+  pseudo-console API and drives it directly. The eight-shell case keeps eight
+  distinct processes alive at once, and the backpressure case runs in an isolated
+  child process so a deadlocked `ClosePseudoConsole` cannot hang the suite.
+- `crates/fact-engine/tests/engine.rs` starts the same engine the TUI uses,
+  resizes the workspace to 100x30, types `echo FACT_ENGINE_OK` into a pane and
+  waits for the marker in the ordered frame stream. It ends with
+  `Command::Shutdown`.
+- `crates/fact-cli/tests/cli.rs` launches the compiled `fact` binary with a
+  temporary `FACT_HOME`. It exercises argument parsing and configuration
+  commands and never enters the interactive TUI.
+
+Helpers wait on frames and output with deadlines instead of fixed sleeps where
+possible. The ConPTY layer needs a short settle after a resize because Windows
+rebuilds the console around the new dimensions.
 
 Run the focused integration suites with:
 
 ```powershell
-cargo test -p fact-daemon --test daemon -- --nocapture
+cargo test -p fact-pty --test conpty -- --nocapture
+cargo test -p fact-engine --test engine -- --nocapture
 cargo test -p fact-cli --test cli -- --nocapture
-cargo test -p fact-cli --test tui -- --nocapture
 ```
+
+The TUI itself is verified manually; there is no scripted TUI harness in this
+tree. The manual checklist below is the release gate for rendering, mouse and
+clipboard behavior.
 
 ## CI
 
@@ -128,53 +89,58 @@ artifact. A tag cannot bypass a failing test.
 - Development and manual verification: Windows 11.
 - CI: GitHub's current Windows Server runner, which is not the same as Windows
   11 or Windows 10.
-- Windows 10 1809+: intended, but not verified for v0.3.1. Do not claim support
-  until a run on a physical or VM Windows 10 installation passes the suite.
+- Windows 10 1809+: intended, but not verified for the current build. Do not
+  claim support until a run on a physical or VM Windows 10 installation passes
+  the suite.
 
 ## Manual smoke check
 
-Before a release, on a clean Windows 11 account:
+Before a release, on a clean Windows 11 account, build and install the binary:
 
 ```powershell
-fact doctor
-fact --grid 8
-# confirm there is no title row, button strip or status bar around any pane
-# in each pane: hostname; $PID; echo $env:TERM_PROGRAM
-# confirm eight panes are visible, not focused-pane mode
-# right-click a pane or press Ctrl+Space then | and - to split; confirm input
-# press Ctrl+Space C; confirm a one-line tab strip appears and + is clickable
-# shrink the window below min_pane_width, then press Alt+N and confirm all panes return
-# press Alt+M to maximize the focused pane, then Alt+N to restore the grid
-# press Ctrl+Space M/N and confirm the same behavior
-# press Alt+T, cancel the confirmation, then confirm and verify the grid closes
-# minimize a pane, then click the bottom-right tray to restore it
-# maximize a pane with Ctrl+Space Z and restore it with Ctrl+Space Z
-# from a pane, run `fact --grid 8` and confirm it refuses instead of going black
-# generate 200 lines, hover at the right edge, then click/drag; confirm output moves
-# move away and confirm the bar hides; run an agent and confirm no FACT bar appears
-# press Ctrl+Space then [, scroll with Up/Down and PgUp/PgDn, and press Esc
-# hold Shift and use the wheel over a pane; confirm it scrolls FACT, not the app
-# start Codex, Claude Code or OpenCode; confirm no FACT rail appears, wheel and
-#   Shift+wheel page the app, and Ctrl+Space then [ reports APP SCROLL
-# select text, press Ctrl+C, focus another pane and press Ctrl+V
-# press Ctrl+Space and confirm the two-cell accent marker appears only while armed
-# detach with Ctrl+Space D
-fact sessions --json
-fact --grid 8
-# verify this reattaches grid-8, not whichever session was used most recently
-fact resume
-# verify pane PIDs are unchanged by printing $PID again
-
-fact shutdown
-fact resume
-# verify the saved grid reopens directly with a fresh shell prompt in every pane
-# confirm there is no recovery modal and no old output on screen
-# print $PID in a pane and confirm it differs from the pre-shutdown PID
-
-fact export <session> --output .\exports
-fact import .\exports\<file>.json --name imported
-fact config validate --json
+cargo build --release --bin fact
+.\scripts\install.ps1 -BinaryPath .\target\release\fact.exe -Force
 ```
+
+Then start FACT:
+
+```powershell
+fact --version
+fact config validate
+fact --grid 8
+```
+
+In the running window:
+
+1. Confirm eight independent panes, each with its own prompt and no title row,
+   button strip or permanent status bar.
+2. Print `$PID` in two panes and confirm the values differ.
+3. Split with prefix `|` and `-`, move focus with the arrow keys, and close a
+   split with prefix `X`.
+4. Press prefix `C`; confirm the one-line tab strip appears and `+` works. Close
+   the tab with `Alt+T`, first cancelling and then confirming.
+5. Press `Alt+M` and `Alt+N`; confirm maximize and full-grid restore. Minimize a
+   pane with prefix `Shift+M` and restore it from the `▾ N` tray.
+6. Drag to select text; double-click a word; triple-click a line. Press `Ctrl+C`
+   and paste into another pane with `Ctrl+V`.
+7. Right-click with a selection (copy), then right-click with no selection
+   (paste). `Shift`+right-click opens the pane menu in both cases.
+8. Start a mouse-aware program, confirm wheel and click reports reach it, then
+   hold `Shift` and drag to select text.
+9. Generate 200 lines, hover the right edge and click/drag the scrollbar. Confirm
+   it hides when the pointer leaves. Press prefix `[` and scroll with arrows,
+   PgUp/PgDn and Home/End; press Esc.
+10. Start a full-screen agent (Codex, Claude Code or OpenCode). Confirm FACT adds
+    no scrollbar, wheel and `Shift`+wheel page the app, and prefix `[` reports
+    app scroll.
+11. Press `F1`; confirm help lists the compiled bindings. Press prefix `K` and
+    filter the palette. Press prefix `/` and search a marker in the focused pane.
+12. Press `F2`; confirm the theme changes for this run and is not written to disk.
+13. Note a pane PID, quit with prefix `Shift+Q`, and confirm that process no
+    longer exists.
+14. Before launching, record `Get-ChildItem $env:LOCALAPPDATA\FACT -Force`. After
+    launching, using and quitting FACT, confirm the listing is unchanged. A
+    normal launch writes nothing.
 
 Record the result in the release checklist. Screenshots are not a substitute for
 the checks above.
