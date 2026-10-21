@@ -127,7 +127,6 @@ impl App {
             return;
         }
 
-        let bell = self.bells.contains(&pane.id);
         let content = Rect::new(
             slot.x,
             slot.y,
@@ -191,19 +190,6 @@ impl App {
             self.render_cursor(frame, pane, content);
         }
         self.render_scrollbar(frame, main, pane);
-        // A hovered scrollbar signals a bell through an amber thumb.
-        // Otherwise use a single top-right indicator.
-        if bell && self.visible_scrollbar(pane).is_none() && slot.width > 0 && slot.height > 0 {
-            let buffer = frame.buffer_mut();
-            buffer[(slot.x + slot.width - 1, slot.y)]
-                .set_symbol("•")
-                .set_style(
-                    Style::default()
-                        .bg(self.theme.terminal_bg)
-                        .fg(self.theme.warning),
-                );
-        }
-
         if !pane.alive {
             let code = pane
                 .exit_code

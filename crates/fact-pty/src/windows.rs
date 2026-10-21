@@ -46,7 +46,7 @@ use windows_sys::Win32::System::Threading::{
 pub use fact_protocol::MAX_INPUT_CHUNK;
 const OUTPUT_CHUNK: usize = 32 * 1024;
 const INPUT_QUEUE: usize = 64;
-const MAX_QUEUED_INPUT_BYTES: usize = INPUT_QUEUE * MAX_INPUT_CHUNK;
+const MAX_QUEUED_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const OUTPUT_QUEUE: usize = 512;
 
 #[derive(Debug, Error)]
@@ -284,7 +284,11 @@ impl PtyProcess {
     /// Queue a whole normalized paste, including optional bracket markers, as
     /// one ordered item. Rejection cannot leave half a bracketed paste behind.
     pub fn write_paste(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        if bytes.len() > fact_protocol::MAX_PASTE_BYTES + 12 {
+        if bytes.len()
+            > fact_protocol::MAX_PASTE_BYTES
+                + fact_protocol::BRACKETED_PASTE_START.len()
+                + fact_protocol::BRACKETED_PASTE_END.len()
+        {
             return Err(PtyError::TooMuchInput(bytes.len()));
         }
         self.queue_input(bytes)
@@ -546,9 +550,11 @@ fn spawn_input_writer(handle: usize, receiver: Receiver<Vec<u8>>, shared: Arc<Sh
             let mut file = unsafe { File::from_raw_handle(handle as *mut _) };
             while let Ok(chunk) = receiver.recv() {
                 let result = file.write_all(&chunk);
+                let written = chunk.len();
+                drop(chunk);
                 shared
                     .queued_input_bytes
-                    .fetch_sub(chunk.len(), Ordering::AcqRel);
+                    .fetch_sub(written, Ordering::AcqRel);
                 if result.is_err() {
                     if let Ok(mut state) = shared.state.lock() {
                         state.input_error = Some("could not write pane input".into());

@@ -7,6 +7,8 @@ All notable changes to FACT are documented here. The format follows
 
 ### Changed
 
+- Wire protocol is now version 6. The installer stops the previous daemon;
+  saved layouts reopen with fresh shells on the next launch.
 - Shell history scrollbars appear only near the right edge on hover and remain
   visible during a drag. Alternate-screen and mouse-controlled applications get
   no FACT scrollbar. Panes use their full width, with protocol 6 preventing
@@ -16,6 +18,8 @@ All notable changes to FACT are documented here. The format follows
 
 - Context-menu actions now respond to mouse clicks, clicks outside dismiss the
   menu, and the wheel navigates menus, help, the palette and session lists.
+  Focus loss clears hover state; bell cues no longer overwrite terminal
+  content. Search results also accept wheel navigation.
   The menu fits full action labels and configured shortcuts when space allows.
 - Exit notices wait for all process output to drain, preserving the final
   result even when a busy daemon has several ticks of output queued.

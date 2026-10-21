@@ -7,7 +7,7 @@ request for a broader reliability pass and a less intrusive scrollbar.
 
 | Defect | Root cause | Fix and regression |
 | --- | --- | --- |
-| Clicking a right-click menu action does nothing | `handle_mouse` returned whenever any overlay was open | Context actions now use the same clipped geometry as rendering. A real-ConPTY test clicks Split right, dismisses outside the menu and clicks a menu clamped to the bottom-right. Wheel input also navigates context menus, help, palette and sessions. |
+| Clicking a right-click menu action does nothing | `handle_mouse` returned whenever any overlay was open | Context actions now use the same clipped geometry as rendering. A real-ConPTY test clicks Split right, dismisses outside the menu and clicks a menu clamped to the bottom-right. Wheel input also navigates context menus, help, palette, sessions and search. |
 | Menu labels and shortcuts are unnecessarily truncated | A fixed 34-column width could not fit the existing labels and configured bindings | Size the menu to its longest actual row, clamped to the viewport. The ConPTY menu test asserts the complete restart shortcut is visible. |
 | Valid large pastes are rejected | Protocol accepts 4 MiB, but paste used the ordinary 256 KiB PTY input method; bracket markers also pushed boundary-size input over that lower limit | A bounded paste method queues the complete operation atomically. The original 16 MiB queued-input byte budget remains. A real daemon/raw-input fixture verifies exactly 4 MiB of UTF-8 text, normalized newlines and complete bracket markers, and rejects input beyond the protocol limit. The test failed before the fix with `input chunk is too large`. |
 | Paste can leave the user looking at history while input executes | Paste did not reset terminal scroll offset, unlike typing | Reset the offset only after successful queueing. The raw fixture deliberately emits no output; the test verifies the viewport returns to live input anyway. |
@@ -17,7 +17,9 @@ request for a broader reliability pass and a less intrusive scrollbar.
 
 - Ordinary shell panes reveal a history scrollbar when the pointer is within
   two columns of their right edge. It remains visible during dragging, hides
-  when the pointer moves away, and is absent when there is no history.
+  when the pointer moves away after a drag ends, and is absent when there is
+  no history. Host focus loss clears hover and local drag state; bell cues no
+  longer overwrite terminal cells.
 - Alternate-screen and mouse-controlled panes receive no FACT rail or rail
   click interception. The app owns its UI. Wheel reports retain the actual
   coordinates, including the last column; keyboard-only full-screen apps still

@@ -1,3 +1,5 @@
+# FACT
+
 <p align="center">
   <img src="docs/screenshots/banner.svg" alt="FACT — Windows-native terminal multiplexer. Real shells. Your workspace." width="100%">
 </p>
@@ -117,7 +119,7 @@ transcript. Use `Alt+N` when a narrow window would otherwise leave you in
 focused-pane mode. `Ctrl+M` is Enter in terminal input, so it is not available as
 a direct shortcut.
 Mouse wheel scrollback works in shells. Hover near a pane's right edge to reveal
-its scrollbar, then click or drag it. Moving away hides it. `Ctrl+C` copies a
+its scrollbar, then click or drag it. Moving away hides it after any active drag ends. `Ctrl+C` copies a
 selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` remain available alongside `Ctrl+Insert` / `Shift+Insert`.
 Use `Shift`+drag to select text when an app captures the mouse. Selection holds
@@ -133,13 +135,14 @@ the full pane width; the shell history scrollbar overlays the last column only
 while hovered or dragged. The wheel, Shift+wheel and `Ctrl+Space` then `[` still
 browse full-screen apps, forwarding mouse reports or page keys as appropriate.
 
-Claude Code, Codex and OpenCode use the alternate screen by default. For a true
-terminal history with FACT search and a position thumb, launch them in their
-main-screen/inline mode:
+Agent CLIs can use a private alternate screen. For terminal history with FACT
+search, choose an inline/main-screen mode supported by your agent:
 
-- **Codex:** `codex --no-alt-screen`
-- **Claude Code:** run `/tui default` once to use its classic main-screen renderer
-- **OpenCode:** set `OTUI_USE_ALTERNATE_SCREEN=false` before launching it
+- **Codex:** `codex --no-alt-screen` ([CLI reference](https://developers.openai.com/codex/cli/reference/)).
+- **Claude Code:** `/tui default` selects its classic renderer; background agent-view
+  sessions remain fullscreen ([renderer settings](https://code.claude.com/docs/en/env-vars)).
+- **OpenCode / OpenTUI:** set `OTUI_USE_ALTERNATE_SCREEN=false` before launching
+  ([renderer source](https://github.com/anomalyco/opentui/blob/main/packages/core/src/renderer.ts)).
 
 Their output then flows into FACT's scrollback instead of a private alternate
 screen.

@@ -1317,6 +1317,34 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
         "hover did not reveal shell scrollbar: {}",
         tail(&output)
     );
+    let wait_absent = |output: &mut Vec<u8>, needle: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            drain(&process, output);
+            if !screen_text(output, 120, 35).contains(needle) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "screen still contains {needle}: {}",
+                tail(output)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    process.write(b"\x1b[O").expect("host loses focus");
+    wait_absent(&mut output, "▐");
+    process
+        .write(b"\x1b[I\x1b[<35;120;5M")
+        .expect("focus and hover again");
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        "▐",
+        120,
+        35,
+        Duration::from_secs(10)
+    ));
     process
         .write(b"\x1b[<0;120;35M\x1b[<32;120;3M\x1b[<0;120;3m")
         .expect("drag the shell scrollbar to older output");
@@ -1335,6 +1363,7 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
     process
         .write(b"\x1b[<0;120;35M\x1b[<0;120;35m")
         .expect("click the scrollbar back to live output");
+    wait_absent(&mut output, "FACT_TUI_INPUT");
     process
         .write(b"\x1b[<35;60;5M")
         .expect("move away from the edge");

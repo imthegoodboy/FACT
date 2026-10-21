@@ -6,13 +6,13 @@ using System.IO;
 using System.Runtime.InteropServices;
 public static class PasteSink {
     [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
-    [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr h, uint mode);
-    [DllImport("kernel32.dll")] static extern bool SetConsoleCP(uint codepage);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleMode(IntPtr h, uint mode);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetConsoleCP(uint codepage);
     [DllImport("kernel32.dll")] static extern bool ReadFile(IntPtr h, byte[] data, uint size, out uint read, IntPtr overlapped);
     public static void Run(string path) {
         var input = GetStdHandle(-10);
-        SetConsoleCP(65001);
-        SetConsoleMode(input, 0x0200);
+        if (!SetConsoleCP(65001) || !SetConsoleMode(input, 0x0200))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         for (int i = 0; i < 120; i++) Console.Write("HISTORY_" + i + "\r\n");
         Console.Write("\x1b[?2004hPASTE_READY");
         var stream = new MemoryStream();

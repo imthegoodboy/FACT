@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, Context, Result};
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode as CKeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, Event, KeyCode as CKeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -180,7 +180,13 @@ impl TerminalGuard {
         enable_raw_mode().context("could not enable terminal raw mode")?;
         let mut stdout = io::stdout();
         let setup = (|| -> io::Result<()> {
-            execute!(stdout, EnterAlternateScreen, Hide, EnableBracketedPaste)?;
+            execute!(
+                stdout,
+                EnterAlternateScreen,
+                Hide,
+                EnableBracketedPaste,
+                EnableFocusChange
+            )?;
             if mouse {
                 execute!(stdout, EnableMouseCapture)?;
             }
@@ -225,7 +231,7 @@ impl TerminalGuard {
 fn leave_terminal(mouse: bool) {
     let _ = disable_raw_mode();
     let mut stdout = io::stdout();
-    let _ = execute!(stdout, DisableBracketedPaste);
+    let _ = execute!(stdout, DisableBracketedPaste, DisableFocusChange);
     if mouse {
         let _ = execute!(stdout, DisableMouseCapture);
     }
@@ -797,6 +803,11 @@ impl App {
                     }
                     Event::Paste(text) => {
                         self.paste_text(text);
+                    }
+                    Event::FocusLost => {
+                        self.mouse_position = None;
+                        self.scroll_drag = None;
+                        self.drag_split = None;
                     }
                     Event::Resize(cols, rows) => {
                         self.selection = None;
@@ -2118,7 +2129,11 @@ impl App {
         if matches!(
             self.overlay,
             Some(
-                Overlay::Context(_) | Overlay::Help(_) | Overlay::Palette(_) | Overlay::Sessions(_)
+                Overlay::Context(_)
+                    | Overlay::Help(_)
+                    | Overlay::Palette(_)
+                    | Overlay::Sessions(_)
+                    | Overlay::Search(_)
             )
         ) {
             let code = match mouse.kind {

@@ -8,7 +8,7 @@ import argparse
 import json
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 
 ANSI = [
@@ -64,7 +64,17 @@ def render(source, destination, font_directory):
         x = padding + index % cols * cell_width
         y = padding + index // cols * cell_height
         foreground = color(cell["bg"] if flags & 16 else cell["fg"])
+        if flags & 32:  # dim text, matching a typical terminal's reduced intensity
+            rgb = ImageColor.getrgb(foreground) if isinstance(foreground, str) else foreground
+            foreground = tuple(round(channel * 0.66) for channel in rgb)
         text = cell["ch"] + "".join(cell["zero"])
+        if flags & 8:
+            for offset in (22, 24):
+                draw.line((x, y + offset, x + cell_width - 1, y + offset), fill=foreground)
+        elif flags & 4:
+            draw.line((x, y + 23, x + cell_width - 1, y + 23), fill=foreground)
+        if flags & 64:
+            draw.line((x, y + 14, x + cell_width - 1, y + 14), fill=foreground)
         # Terminal box glyphs join cell boundaries; font line spacing must not
         # turn continuous pane gutters into dashed lines.
         connections = {
@@ -85,8 +95,6 @@ def render(source, destination, font_directory):
             continue
         draw.text((x, y + 2), text, fill=foreground,
                   font=fonts[bool(flags & 1), bool(flags & 2)])
-        if flags & 4:
-            draw.line((x, y + 23, x + cell_width - 1, y + 23), fill=foreground)
     image.save(destination / f"{source.stem}.png", optimize=True)
 
 

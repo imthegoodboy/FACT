@@ -158,6 +158,7 @@ fn killing_a_pane_with_unread_output_does_not_deadlock() {
         let process = PtyProcess::spawn(options).expect("start noisy pane");
         std::thread::sleep(Duration::from_secs(3));
         process.kill(); // Do not read: the bounded output channel is full.
+        assert!(process.wait_for_exit(Duration::from_secs(5)).is_some());
         drop(process);
         return;
     }

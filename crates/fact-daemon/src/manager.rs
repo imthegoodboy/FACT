@@ -16,8 +16,9 @@ use fact_layout::{
 use fact_protocol::{
     sanitize_title, validate_session_name, AttachInfo, Command, CursorDto, DaemonStats, ErrorCode,
     FocusDirection, Frame, PaneSummary, PaneView, ProtocolError, ResponsePayload, SearchHit,
-    SearchResult, SessionSummary, SplitHandle, SplitOrientation, TabView, Viewport, MAX_GRID_PANES,
-    MAX_INPUT_CHUNK, MAX_PASTE_BYTES, MAX_SESSIONS,
+    SearchResult, SessionSummary, SplitHandle, SplitOrientation, TabView, Viewport,
+    BRACKETED_PASTE_END, BRACKETED_PASTE_START, MAX_GRID_PANES, MAX_INPUT_CHUNK, MAX_PASTE_BYTES,
+    MAX_SESSIONS,
 };
 use fact_pty::{PtyProcess, SpawnOptions};
 use fact_session::{now_ms, PaneRecord, SessionData, SessionError, SessionMeta, SessionStore};
@@ -1026,7 +1027,7 @@ impl SessionManager {
             .ok_or_else(|| ProtocolError::not_found(format!("pane {pane}")))?;
         let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if live.term.bracketed_paste() {
-            format!("\x1b[200~{normalized}\x1b[201~").into_bytes()
+            format!("{BRACKETED_PASTE_START}{normalized}{BRACKETED_PASTE_END}").into_bytes()
         } else {
             normalized.into_bytes()
         };
