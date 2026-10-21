@@ -41,6 +41,7 @@ use theme::Theme;
 const FRAME_POLL: Duration = Duration::from_millis(30);
 const EVENT_POLL: Duration = Duration::from_millis(10);
 const STATUS_LIFETIME: Duration = Duration::from_secs(2);
+const MAX_EVENTS_PER_TURN: usize = 64;
 
 /// Width of the new-tab button in the tab strip.
 const NEW_TAB_WIDTH: u16 = 3;
@@ -126,7 +127,9 @@ struct UiEvents {
 }
 
 fn spawn_reader(mut stream: EventStream) -> UiEvents {
-    let (tx, rx) = mpsc::channel();
+    // Preserve ordered delta frames without letting a busy agent grow an
+    // unbounded queue when drawing or clipboard work temporarily falls behind.
+    let (tx, rx) = mpsc::sync_channel(8);
     let cancel = Arc::new(AtomicBool::new(false));
     let thread_cancel = Arc::clone(&cancel);
     thread::Builder::new()
@@ -257,10 +260,15 @@ struct Selection {
     pane: u64,
     anchor: (u16, u16),
     end: (u16, u16),
+    /// Keep the selected viewport stable while the child continues streaming.
+    buffer: Option<PaneBuffer>,
 }
 
 fn selection_text(buffers: &HashMap<u64, PaneBuffer>, selection: &Selection) -> Option<String> {
-    let buffer = buffers.get(&selection.pane)?;
+    let buffer = selection
+        .buffer
+        .as_ref()
+        .or_else(|| buffers.get(&selection.pane))?;
     if buffer.cols == 0 || buffer.rows == 0 {
         return None;
     }
@@ -446,10 +454,10 @@ impl ScrollbarMode {
 /// there is scrollback would be misleading. Instead, expose an app-scroll mode
 /// that forwards the standard terminal scroll gestures to the application.
 fn pane_scroll_mode(pane: &PaneView) -> Option<ScrollbarMode> {
-    if pane.history_lines > 0 {
-        Some(ScrollbarMode::History)
-    } else if pane.modes & pane_modes::ALT_SCREEN != 0 {
+    if pane.modes & pane_modes::ALT_SCREEN != 0 {
         Some(ScrollbarMode::App)
+    } else if pane.history_lines > 0 {
+        Some(ScrollbarMode::History)
     } else {
         None
     }
@@ -726,7 +734,16 @@ impl App {
                 break;
             }
 
-            if event::poll(FRAME_POLL).context("could not poll terminal input")? {
+            let input_started = Instant::now();
+            for index in 0..MAX_EVENTS_PER_TURN {
+                let timeout = if index == 0 {
+                    FRAME_POLL
+                } else {
+                    Duration::ZERO
+                };
+                if !event::poll(timeout).context("could not poll terminal input")? {
+                    break;
+                }
                 match event::read().context("could not read terminal input")? {
                     Event::Key(key) if key.kind != KeyEventKind::Release => {
                         self.handle_key(key);
@@ -738,11 +755,18 @@ impl App {
                         self.paste_text(text);
                     }
                     Event::Resize(cols, rows) => {
+                        self.selection = None;
                         self.width = cols;
                         self.height = rows;
                         self.resize_session();
                     }
                     _ => {}
+                }
+                if self.fatal.is_some()
+                    || self.exit_message.is_some()
+                    || input_started.elapsed() >= Duration::from_millis(8)
+                {
+                    break;
                 }
             }
 
@@ -769,7 +793,7 @@ impl App {
     }
 
     fn drain_events(&mut self) {
-        loop {
+        for _ in 0..MAX_EVENTS_PER_TURN {
             match self.events.receiver.try_recv() {
                 Ok(UiEvent::Message(message)) => self.handle_message(*message),
                 Ok(UiEvent::Closed(reason)) => {
@@ -812,6 +836,16 @@ impl App {
             return;
         }
 
+        if self.selection.as_ref().is_some_and(|selection| {
+            !frame.panes.iter().any(|pane| {
+                pane.id == selection.pane
+                    && selection.buffer.as_ref().is_none_or(|buffer| {
+                        buffer.cols == pane.content_cols && buffer.rows == pane.content_rows
+                    })
+            })
+        }) {
+            self.selection = None;
+        }
         for pane in &frame.panes {
             if let Some(cells) = &pane.cells {
                 let expected = usize::from(pane.content_cols) * usize::from(pane.content_rows);
@@ -987,49 +1021,35 @@ impl App {
 
     /// Wheel events over the rail have no meaningful cell coordinate. If the
     /// app asked for mouse reporting, synthesize the wheel at the centre of its
-    /// viewport; otherwise use the standard alternate-scroll arrow keys.
+    /// viewport; otherwise page the transcript. Arrow keys often navigate the
+    /// agent's input history rather than its transcript.
     fn send_app_wheel(&mut self, pane: u64, up: bool) {
-        let geometry = self
-            .frame
-            .as_ref()
-            .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-            .map(|view| {
-                (
-                    app_tracks_mouse(view.modes),
-                    view.content_cols / 2,
-                    view.content_rows / 2,
-                )
-            });
-        match geometry {
-            Some((true, x, y)) => {
-                let data = keymap::sgr_wheel(up, x, y, KeyModifiers::NONE);
-                let _ = self.send(Command::Input { pane, data });
-            }
-            _ => self.send_app_scroll(pane, up, false),
-        }
+        self.send_app_wheels(pane, up, 1);
     }
 
     /// Page the app without requiring it to understand PageUp/PageDown. Mouse
     /// UIs get a short burst of wheel events; keyboard UIs get the page key.
     fn send_app_page(&mut self, pane: u64, up: bool) {
+        self.send_app_wheels(pane, up, 5);
+    }
+
+    fn send_app_wheels(&mut self, pane: u64, up: bool, count: usize) {
         let geometry = self
             .frame
             .as_ref()
             .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-            .map(|view| {
-                (
-                    app_tracks_mouse(view.modes),
-                    view.content_cols / 2,
-                    view.content_rows / 2,
-                )
-            });
+            .map(|view| (view.modes, view.content_cols / 2, view.content_rows / 2));
         match geometry {
-            Some((true, x, y)) => {
-                let data = keymap::sgr_wheel(up, x, y, KeyModifiers::NONE);
-                for _ in 0..5 {
+            Some((modes, x, y)) if app_tracks_mouse(modes) => {
+                let kind = if up {
+                    MouseEventKind::ScrollUp
+                } else {
+                    MouseEventKind::ScrollDown
+                };
+                if let Some(data) = keymap::encode_mouse(modes, kind, x, y, KeyModifiers::NONE) {
                     let _ = self.send(Command::Input {
                         pane,
-                        data: data.clone(),
+                        data: data.repeat(count),
                     });
                 }
             }
@@ -1038,11 +1058,13 @@ impl App {
     }
 
     fn scroll_relative(&mut self, pane: u64, delta: i64) {
+        self.selection = None;
         let delta = delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         let _ = self.send(Command::ScrollPane { pane, delta });
     }
 
     fn scroll_to(&mut self, pane: u64, offset: usize, history: usize) {
+        self.selection = None;
         let _ = self.send(Command::SetScrollOffset { pane, offset });
         self.set_status(format!("Scroll {offset}/{history} — Esc exits."));
     }
@@ -1142,6 +1164,10 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
+            CKeyCode::Esc if self.selection.is_some() => {
+                self.selection = None;
+                return;
+            }
             CKeyCode::Char('v' | 'V') if control && !shift => {
                 self.paste_clipboard();
                 return;
@@ -1170,6 +1196,7 @@ impl App {
     }
 
     fn forward_key(&mut self, key: KeyEvent) {
+        self.selection = None;
         let Some(pane) = self.focused_pane() else {
             return;
         };
@@ -1199,6 +1226,7 @@ impl App {
         if text.is_empty() {
             return;
         }
+        self.selection = None;
         if text.len() > MAX_PASTE_BYTES {
             self.set_status(format!(
                 "Clipboard is too large ({} MiB; limit {} MiB).",
@@ -1731,6 +1759,17 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent) {
+        // Complete an app gesture even if release lands on the tab strip.
+        if let MouseEventKind::Up(button) = mouse.kind {
+            if self.app_mouse_down.is_some_and(|(held, _)| held == button) {
+                let (_, pane) = self.app_mouse_down.take().unwrap();
+                let content_y = mouse.row.saturating_sub(u16::from(self.tabs_visible()));
+                if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
+                    self.forward_mouse_button(button, pane, x, y, false, mouse.modifiers);
+                }
+                return;
+            }
+        }
         if self.overlay.is_some() {
             return;
         }
@@ -1777,6 +1816,8 @@ impl App {
         }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = None;
+                self.app_mouse_down = None;
                 if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
                     let _ = self.send(Command::FocusPane {
                         pane: geometry.pane,
@@ -1838,7 +1879,8 @@ impl App {
                     .as_ref()
                     .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
                 {
-                    let app_mouse = view.modes & pane_modes::MOUSE_CLICK != 0
+                    let app_mouse = app_tracks_mouse(view.modes)
+                        && view.scroll_offset == 0
                         && !mouse.modifiers.contains(KeyModifiers::SHIFT);
                     if app_mouse {
                         self.app_mouse_down = Some((MouseButton::Left, pane));
@@ -1855,6 +1897,7 @@ impl App {
                             pane,
                             anchor: (local_x, local_y),
                             end: (local_x, local_y),
+                            buffer: self.buffers.get(&pane).cloned(),
                         });
                     }
                 }
@@ -1869,23 +1912,18 @@ impl App {
                     .frame
                     .as_ref()
                     .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-                    .is_some_and(|view| view.modes & pane_modes::MOUSE_CLICK != 0);
+                    .is_some_and(|view| app_tracks_mouse(view.modes) && view.scroll_offset == 0)
+                    && !mouse.modifiers.contains(KeyModifiers::SHIFT);
                 if app_mouse {
                     if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
+                        self.selection = None;
+                        self.app_mouse_down = Some((MouseButton::Right, pane));
                         self.forward_mouse_button(
                             MouseButton::Right,
                             pane,
                             x,
                             y,
                             true,
-                            mouse.modifiers,
-                        );
-                        self.forward_mouse_button(
-                            MouseButton::Right,
-                            pane,
-                            x,
-                            y,
-                            false,
                             mouse.modifiers,
                         );
                     }
@@ -1912,6 +1950,29 @@ impl App {
                     }));
                 }
             }
+            MouseEventKind::Down(MouseButton::Middle) => {
+                if let Some((pane, x, y)) = self.pane_at(mouse.column, content_y) {
+                    let tracks = self
+                        .frame
+                        .as_ref()
+                        .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+                        .is_some_and(|view| {
+                            app_tracks_mouse(view.modes) && view.scroll_offset == 0
+                        });
+                    if tracks && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        self.selection = None;
+                        self.app_mouse_down = Some((MouseButton::Middle, pane));
+                        self.forward_mouse_button(
+                            MouseButton::Middle,
+                            pane,
+                            x,
+                            y,
+                            true,
+                            mouse.modifiers,
+                        );
+                    }
+                }
+            }
             MouseEventKind::Drag(button) => {
                 if button == MouseButton::Left {
                     if let Some(drag) = self.scroll_drag.clone() {
@@ -1930,37 +1991,36 @@ impl App {
                 }
                 if let Some((held, pane)) = self.app_mouse_down {
                     let drags = held == button
-                        && button == MouseButton::Left
                         && self
                             .frame
                             .as_ref()
                             .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-                            .is_some_and(|view| view.modes & pane_modes::MOUSE_DRAG != 0);
+                            .is_some_and(|view| {
+                                view.modes & (pane_modes::MOUSE_DRAG | pane_modes::MOUSE_MOTION)
+                                    != 0
+                            });
                     if drags {
                         if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
-                            let data = keymap::sgr_mouse_motion(button, x, y, mouse.modifiers);
-                            let _ = self.send(Command::Input { pane, data });
+                            self.send_mouse(
+                                pane,
+                                MouseEventKind::Drag(button),
+                                x,
+                                y,
+                                mouse.modifiers,
+                            );
                         }
                     }
                     return;
                 }
                 if button == MouseButton::Left {
-                    if let Some((pane, x, y)) = self.pane_at(mouse.column, content_y) {
-                        if let Some(selection) = &mut self.selection {
-                            if selection.pane == pane {
-                                selection.end = (x, y);
-                            }
+                    if let Some(pane) = self.selection.as_ref().map(|selection| selection.pane) {
+                        if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
+                            self.selection.as_mut().unwrap().end = (x, y);
                         }
                     }
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some((button, pane)) = self.app_mouse_down.take() {
-                    if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
-                        self.forward_mouse_button(button, pane, x, y, false, mouse.modifiers);
-                    }
-                    return;
-                }
                 let dragged = self
                     .selection
                     .as_ref()
@@ -1972,6 +2032,7 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.selection = None;
                 let up = matches!(mouse.kind, MouseEventKind::ScrollUp);
                 let delta = if up { 3 } else { -3 };
                 if let Some(pane) = self.scroll_mode {
@@ -2010,28 +2071,65 @@ impl App {
                     .frame
                     .as_ref()
                     .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-                    .map(|view| (app_tracks_mouse(view.modes), pane_scroll_mode(view)))
+                    .map(|view| {
+                        (
+                            app_tracks_mouse(view.modes) && view.scroll_offset == 0,
+                            pane_scroll_mode(view),
+                        )
+                    })
                     .unwrap_or((false, None));
                 if mode == Some(ScrollbarMode::App) {
                     if app_mouse {
                         let mut modifiers = mouse.modifiers;
                         modifiers.remove(KeyModifiers::SHIFT);
-                        let data = keymap::sgr_wheel(up, x, y, modifiers);
-                        let _ = self.send(Command::Input { pane, data });
+                        self.send_mouse(pane, mouse.kind, x, y, modifiers);
                     } else {
                         // The app owns the viewport but did not request mouse
-                        // reporting. Standard terminal alternate-scroll keys are
-                        // the portable way to page it.
+                        // reporting. Use page keys to browse its transcript.
                         self.send_app_wheel(pane, up);
                     }
                 } else if app_mouse && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                    let data = keymap::sgr_wheel(up, x, y, mouse.modifiers);
-                    let _ = self.send(Command::Input { pane, data });
+                    self.send_mouse(pane, mouse.kind, x, y, mouse.modifiers);
                 } else {
                     let _ = self.send(Command::ScrollPane { pane, delta });
                 }
             }
+            MouseEventKind::Moved if !mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                if let Some((pane, x, y)) = self.pane_at(mouse.column, content_y) {
+                    let motion = self
+                        .frame
+                        .as_ref()
+                        .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+                        .is_some_and(|view| {
+                            view.modes & pane_modes::MOUSE_MOTION != 0 && view.scroll_offset == 0
+                        });
+                    if motion {
+                        self.send_mouse(pane, mouse.kind, x, y, mouse.modifiers);
+                    }
+                }
+            }
             _ => {}
+        }
+    }
+
+    fn send_mouse(
+        &mut self,
+        pane: u64,
+        kind: MouseEventKind,
+        x: u16,
+        y: u16,
+        modifiers: KeyModifiers,
+    ) {
+        let modes = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+            .map_or(0, |view| view.modes);
+        if !app_tracks_mouse(modes) {
+            return;
+        }
+        if let Some(data) = keymap::encode_mouse(modes, kind, x, y, modifiers) {
+            let _ = self.send(Command::Input { pane, data });
         }
     }
 
@@ -2044,8 +2142,17 @@ impl App {
         pressed: bool,
         modifiers: KeyModifiers,
     ) {
-        let data = keymap::sgr_mouse(button, x, y, pressed, modifiers);
-        let _ = self.send(Command::Input { pane, data });
+        self.send_mouse(
+            pane,
+            if pressed {
+                MouseEventKind::Down(button)
+            } else {
+                MouseEventKind::Up(button)
+            },
+            x,
+            y,
+            modifiers,
+        );
     }
 
     fn scrollbar_at(&self, column: u16, content_y: u16) -> Option<ScrollbarGeometry> {
@@ -2056,6 +2163,7 @@ impl App {
     }
 
     fn scroll_drag_to(&mut self, drag: &ScrollDrag, content_y: u16) {
+        self.selection = None;
         if drag.geometry.mode.is_app() {
             let still_app = self
                 .frame
@@ -2371,6 +2479,7 @@ mod tests {
             pane: 1,
             anchor: (3, 0),
             end: (1, 1),
+            buffer: None,
         };
         assert!(selection.contains(3, 0));
         assert!(selection.contains(0, 1));
@@ -2400,8 +2509,23 @@ mod tests {
             pane: 1,
             anchor: (0, 0),
             end: (3, 0),
+            buffer: None,
         };
         assert_eq!(selection_text(&buffers, &selection).unwrap(), "界 !");
+    }
+
+    #[test]
+    fn copying_uses_the_selected_snapshot_while_output_changes() {
+        let mut buffers = HashMap::new();
+        test_pane(&mut buffers);
+        let selection = Selection {
+            pane: 1,
+            anchor: (0, 0),
+            end: (4, 0),
+            buffer: buffers.get(&1).cloned(),
+        };
+        buffers.get_mut(&1).unwrap().cells.fill(cell('x'));
+        assert_eq!(selection_text(&buffers, &selection).unwrap(), "abcde");
     }
 
     #[test]
@@ -2567,6 +2691,8 @@ mod tests {
         let mut view = test_view(40);
         view.history_lines = 0;
         view.modes = pane_modes::ALT_SCREEN;
+        assert_eq!(pane_scroll_mode(&view), Some(ScrollbarMode::App));
+        view.history_lines = 100;
         assert_eq!(pane_scroll_mode(&view), Some(ScrollbarMode::App));
         let app = scrollbar_geometry(&view).expect("full-screen panes keep the rail");
         assert_eq!(app.mode, ScrollbarMode::App);

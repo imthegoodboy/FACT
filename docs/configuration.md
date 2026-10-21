@@ -214,6 +214,7 @@ Additional interaction that is not a configurable chord:
   visible with a centred grip and paging caps. Clicking or dragging the rail,
   wheeling over it, or using Shift+wheel pages the app; if the app requested
   mouse reporting, FACT synthesizes wheel events at the centre of its viewport.
+  Keyboard-only apps receive PageUp/PageDown, avoiding prompt-history arrows.
 - For true terminal history and a position thumb, launch an agent in inline
   mode: `codex --no-alt-screen`, `/tui default` in Claude Code, or
   `OTUI_USE_ALTERNATE_SCREEN=false` for OpenCode.
@@ -223,11 +224,13 @@ Additional interaction that is not a configurable chord:
 - Drag a split gutter with the mouse to resize.
 - Drag in pane content to select text; `Shift`+drag selects even when the
   application has requested mouse reporting.
+  The selected pane's display pauses while its process continues running; copied
+  text comes from that snapshot. Esc, typing or scrolling resumes live output.
 - Click a pane body to focus it. A single-tab session has no tab strip; with two
   or more tabs, click a tab to select it and click the trailing `+` to add one.
 - Right-click a pane for split, zoom, minimize, new tab, rename, search, restart,
   close and copy actions. Applications that request mouse reporting receive the
-  click instead; use the keyboard actions in that case.
+  click instead; Shift+right-click opens FACT's menu in that case.
 - Click or drag the scrollbar to move through scrollback. In a full-screen pane
   the same rail pages the application instead. The mouse wheel is forwarded to
   the focused application when it requested mouse reporting.

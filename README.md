@@ -7,7 +7,7 @@ running when the UI detaches or the terminal window closes.
 FACT is not a wrapper around Windows Terminal or tmux. It owns its ConPTY
 processes, terminal models, layout tree and session database.
 
-> **Status:** v0.3.1. Windows 11 is the primary, continuously tested target.
+> **Status:** v0.3.2. Windows 11 is the primary, continuously tested target.
 > Windows 10 1809+ is intended to work but is not yet verified; see
 > [Compatibility](#compatibility). Release artifacts are produced only from
 > version tags after every gate in this repository passes.
@@ -102,6 +102,10 @@ a direct shortcut.
 Mouse wheel scrollback works in shells, and the scrollbar can be clicked or
 dragged. `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Shift+C` /
 `Ctrl+Shift+V` remain available alongside `Ctrl+Insert` / `Shift+Insert`.
+Use `Shift`+drag to select text when an app captures the mouse. Selection holds
+that pane's visible output steady while the process keeps running. `Esc`, typing,
+or scrolling resumes its live view. `Shift`+right-click opens FACT's menu inside
+mouse-enabled apps.
 
 ### Full-screen apps and agent CLIs
 
@@ -242,7 +246,7 @@ original shell processes and their scrollback untouched.
   GitHub's current Windows Server image, which is not Windows 11 itself.
 - **Windows 10 1809+:** expected to work because FACT uses ConPTY and Win32 APIs
   available since 1809. It has not been verified on a physical Windows 10
-  machine, so v0.3.1 does not claim Windows 10 support.
+  machine, so v0.3.2 does not claim Windows 10 support.
 - **Windows on ARM:** not tested.
 - **Linux/macOS:** not supported. The IPC and ConPTY layers are Windows-only.
 

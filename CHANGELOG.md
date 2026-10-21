@@ -3,6 +3,27 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.3.2] - 2026-10-21
+
+### Fixed
+
+- Wheel input in keyboard-only full-screen apps now sends PageUp/PageDown rather
+  than arrow keys, which agent CLIs commonly reserve for prompt history.
+- Mouse clicks, releases and drags now work in all three tracking modes (1000,
+  1002 and 1003). Reports honor the app's SGR or legacy X11 encoding; motion and
+  middle/right-button gestures are forwarded too. Releases outside a pane,
+  including over the tab strip, finish the original gesture.
+- Text selection holds a snapshot of the visible pane while the agent continues
+  running, so redraws cannot change the copied text. Esc, typing or scrolling
+  resumes the live view. Shift+right-click opens FACT's menu in mouse apps.
+- Pointer movement over main-screen scrollback no longer snaps the view to live
+  output. History can be selected without sending clicks to the running app.
+- Pending input is processed in bounded batches and the ordered frame queue is
+  bounded, preventing unchecked frame accumulation during heavy output. App
+  scrollbar page bursts use one input request instead of five round trips.
+- Added real-ConPTY regressions for wheel routing, mouse gestures and stable
+  selection during streaming output, plus encoding and snapshot copy tests.
+
 ## [0.3.1] - 2026-10-21
 
 ### Fixed

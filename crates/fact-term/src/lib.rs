@@ -730,4 +730,17 @@ mod tests {
         assert_ne!(modes & pane_modes::MOUSE_CLICK, 0);
         assert_ne!(modes & pane_modes::SGR_MOUSE, 0);
     }
+
+    #[test]
+    fn mouse_tracking_modes_are_mutually_exclusive() {
+        let mut t = term(20, 5);
+        for (sequence, expected) in [
+            (b"\x1b[?1000h".as_slice(), pane_modes::MOUSE_CLICK),
+            (b"\x1b[?1002h".as_slice(), pane_modes::MOUSE_DRAG),
+            (b"\x1b[?1003h".as_slice(), pane_modes::MOUSE_MOTION),
+        ] {
+            t.feed(sequence);
+            assert_eq!(t.mouse_mode(), expected);
+        }
+    }
 }
