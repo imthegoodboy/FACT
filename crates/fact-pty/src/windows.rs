@@ -300,14 +300,18 @@ impl PtyProcess {
         let tx = self.input_tx.as_ref().ok_or(PtyError::Exited)?;
         // Preserve the original 16 MiB memory bound even when queue items can
         // contain a 4 MiB paste instead of a normal 256 KiB input chunk.
-        self.shared
-            .queued_input_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-                queued
-                    .checked_add(bytes.len())
-                    .filter(|total| *total <= MAX_QUEUED_INPUT_BYTES)
-            })
-            .map_err(|_| PtyError::InputBackpressure)?;
+        let budget = &self.shared.queued_input_bytes;
+        let mut queued = budget.load(Ordering::Acquire);
+        loop {
+            let total = queued
+                .checked_add(bytes.len())
+                .filter(|total| *total <= MAX_QUEUED_INPUT_BYTES)
+                .ok_or(PtyError::InputBackpressure)?;
+            match budget.compare_exchange_weak(queued, total, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(current) => queued = current,
+            }
+        }
         if tx.try_send(bytes.to_vec()).is_err() {
             self.shared
                 .queued_input_bytes
