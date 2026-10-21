@@ -128,9 +128,9 @@ impl Shared {
     fn close_conpty(&self) {
         let handle = self.conpty.lock().ok().and_then(|mut guard| guard.take());
         if let Some(handle) = handle {
-            // ClosePseudoConsole drains the output pipe. The dedicated reader
-            // thread continues draining while this call waits, so this cannot
-            // deadlock the way closing without a reader would.
+            // ClosePseudoConsole can wait for output. Keep the dedicated
+            // reader active until EOF; normal daemon ticks consume its bounded
+            // queue so process-exit cleanup does not block the owner thread.
             unsafe { ClosePseudoConsole(handle) };
         }
     }

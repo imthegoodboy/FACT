@@ -37,7 +37,9 @@ scenarios, 10 daemon integration scenarios, eight PTY scenarios, session
 lifecycle/restart/import/export, input encoding, configuration validation,
 authenticated IPC and the no-network source check. A noisy-pane kill test
 also passed on the baseline: it is additional regression coverage, not a claim
-that a deadlock was found or fixed.
+that a deadlock was found or fixed. The test leaves output unread but does
+not instrument queue saturation; it does not prove shutdown behavior on every
+Windows build.
 
 The release/installer checks and CI results are recorded in the PR. README
 screenshots are captured from isolated live sessions; regeneration is documented

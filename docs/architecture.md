@@ -133,9 +133,10 @@ history and visible rows. The TUI sends the query to the daemon, so searching
 does not require transferring the whole scrollback to the client.
 
 When a pane is in the alternate screen, the application owns its viewport and
-scrollbar. FACT adds no rail, forwards the wheel with its original coordinates
-when mouse reporting is enabled, and uses PageUp/PageDown otherwise. Prefix
-scroll mode still forwards paging and navigation keys. Ordinary shell history
+scrollbar. FACT adds no rail. Ordinary wheel input retains its original
+coordinates when mouse reporting is enabled, with PageUp/PageDown fallback
+otherwise. Prefix scroll mode targets its own pane and synthesizes wheel input
+at that pane's centre; paging and navigation keys are still forwarded. Ordinary shell history
 uses a hover-only scrollbar overlay, without reducing terminal width.
 
 ## Persistence and restart

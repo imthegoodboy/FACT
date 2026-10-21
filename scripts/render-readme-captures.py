@@ -105,5 +105,8 @@ if __name__ == "__main__":
     parser.add_argument("--fonts", type=Path, default=Path("C:/Windows/Fonts"))
     args = parser.parse_args()
     args.destination.mkdir(parents=True, exist_ok=True)
-    for source in sorted(args.captures.glob("*.json")):
+    captures = sorted(args.captures.glob("*.json"))
+    if not captures:
+        parser.error(f"no terminal capture JSON files found in {args.captures}")
+    for source in captures:
         render(source, args.destination, args.fonts)

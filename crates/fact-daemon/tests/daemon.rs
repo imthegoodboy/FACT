@@ -288,8 +288,8 @@ fn maximum_bracketed_paste_is_complete_and_returns_to_live_view() {
     })
     .expect("paste returns to live view even when the app produces no output");
     let expected = format!(
-        "\x1b[200~{}\x1b[201~",
-        text.replace("\r\n", "\r").replace('\n', "\r")
+        "\x1b[200~{}\r\r\ré\x1b[201~",
+        "x".repeat(fact_protocol::MAX_PASTE_BYTES - suffix.len())
     )
     .into_bytes();
     let deadline = Instant::now() + FRAME_TIMEOUT;
