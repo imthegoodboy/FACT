@@ -89,8 +89,10 @@ A session has:
 - layout and metadata epochs plus detach generation
 
 The binary tree stores normalized split ratios. Layout adds a one-cell gutter at
-each split and reserves the rightmost column of each pane for its scrollbar. A
-pane has no title row: terminal content uses the full slot height. The daemon
+each split. Terminal content uses the full slot width and height. A shell
+history scrollbar overlays the right edge only on hover or drag; apps that own
+the alternate screen or mouse receive no FACT scrollbar. Protocol 6 requires
+both peers to agree on this full-width geometry. The daemon
 subtracts one row from the client viewport only when the session has more than
 one tab; a single-tab session has no persistent chrome at all. When slots fall
 below `min_pane_width` or `min_pane_height`, the layout switches to focused-pane
@@ -130,12 +132,11 @@ on every changed frame. Terminal output is never written to SQLite.
 history and visible rows. The TUI sends the query to the daemon, so searching
 does not require transferring the whole scrollback to the client.
 
-When a pane is in the alternate screen with no terminal history, the client
-keeps its rail visible but routes wheel and rail gestures to the application.
-Scroll mode becomes app scroll: paging and arrow keys are encoded and sent as
-input instead of moving a FACT offset. This preserves the terminal convention
-that a full-screen application owns its viewport, while keeping the rail
-discoverable and usable.
+When a pane is in the alternate screen, the application owns its viewport and
+scrollbar. FACT adds no rail, forwards the wheel with its original coordinates
+when mouse reporting is enabled, and uses PageUp/PageDown otherwise. Prefix
+scroll mode still forwards paging and navigation keys. Ordinary shell history
+uses a hover-only scrollbar overlay, without reducing terminal width.
 
 ## Persistence and restart
 

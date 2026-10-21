@@ -43,9 +43,10 @@ use windows_sys::Win32::System::Threading::{
 };
 
 /// Maximum bytes accepted by a single [`PtyProcess::write`] call.
-pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
+pub use fact_protocol::MAX_INPUT_CHUNK;
 const OUTPUT_CHUNK: usize = 32 * 1024;
 const INPUT_QUEUE: usize = 64;
+const MAX_QUEUED_INPUT_BYTES: usize = INPUT_QUEUE * MAX_INPUT_CHUNK;
 const OUTPUT_QUEUE: usize = 512;
 
 #[derive(Debug, Error)]
@@ -120,6 +121,7 @@ struct Shared {
     conpty: Mutex<Option<HPCON>>,
     state: Mutex<PaneState>,
     alive: AtomicBool,
+    queued_input_bytes: AtomicUsize,
 }
 
 impl Shared {
@@ -233,6 +235,7 @@ impl PtyProcess {
                 closed: false,
             }),
             alive: AtomicBool::new(true),
+            queued_input_bytes: AtomicUsize::new(0),
         });
 
         let pid = process_info.dwProcessId;
@@ -272,18 +275,46 @@ impl PtyProcess {
     /// Queue terminal input. The queue is bounded; callers receive
     /// [`PtyError::InputBackpressure`] instead of blocking the daemon.
     pub fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
-        if bytes.is_empty() {
-            return Ok(());
-        }
         if bytes.len() > MAX_INPUT_CHUNK {
             return Err(PtyError::TooMuchInput(bytes.len()));
+        }
+        self.queue_input(bytes)
+    }
+
+    /// Queue a whole normalized paste, including optional bracket markers, as
+    /// one ordered item. Rejection cannot leave half a bracketed paste behind.
+    pub fn write_paste(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        if bytes.len() > fact_protocol::MAX_PASTE_BYTES + 12 {
+            return Err(PtyError::TooMuchInput(bytes.len()));
+        }
+        self.queue_input(bytes)
+    }
+
+    fn queue_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        if bytes.is_empty() {
+            return Ok(());
         }
         if !self.is_alive() {
             return Err(PtyError::Exited);
         }
         let tx = self.input_tx.as_ref().ok_or(PtyError::Exited)?;
-        tx.try_send(bytes.to_vec())
-            .map_err(|_| PtyError::InputBackpressure)
+        // Preserve the original 16 MiB memory bound even when queue items can
+        // contain a 4 MiB paste instead of a normal 256 KiB input chunk.
+        self.shared
+            .queued_input_bytes
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                queued
+                    .checked_add(bytes.len())
+                    .filter(|total| *total <= MAX_QUEUED_INPUT_BYTES)
+            })
+            .map_err(|_| PtyError::InputBackpressure)?;
+        if tx.try_send(bytes.to_vec()).is_err() {
+            self.shared
+                .queued_input_bytes
+                .fetch_sub(bytes.len(), Ordering::AcqRel);
+            return Err(PtyError::InputBackpressure);
+        }
+        Ok(())
     }
 
     /// Change the pseudo console dimensions. The terminal model is resized by
@@ -318,6 +349,12 @@ impl PtyProcess {
     /// Non-blocking output read used by the daemon tick.
     pub fn try_read(&self) -> Option<Vec<u8>> {
         self.output_rx.try_recv().ok()
+    }
+
+    /// The reader has reached EOF and will enqueue no further output. Check
+    /// this before draining the queue to establish that an empty read is final.
+    pub fn output_closed(&self) -> bool {
+        self.shared.state.lock().is_ok_and(|state| state.closed)
     }
 
     /// Blocking helper for tests and tools. Returns `None` on timeout.
@@ -504,7 +541,11 @@ fn spawn_input_writer(handle: usize, receiver: Receiver<Vec<u8>>, shared: Arc<Sh
         .spawn(move || {
             let mut file = unsafe { File::from_raw_handle(handle as *mut _) };
             while let Ok(chunk) = receiver.recv() {
-                if file.write_all(&chunk).is_err() {
+                let result = file.write_all(&chunk);
+                shared
+                    .queued_input_bytes
+                    .fetch_sub(chunk.len(), Ordering::AcqRel);
+                if result.is_err() {
                     if let Ok(mut state) = shared.state.lock() {
                         state.input_error = Some("could not write pane input".into());
                     }

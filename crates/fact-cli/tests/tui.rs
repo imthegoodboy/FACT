@@ -432,7 +432,123 @@ fn scroll_mode_reads_history_without_sending_keys_to_the_shell() {
 }
 
 #[test]
-fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
+fn context_menu_actions_respond_to_clicks() {
+    let home = TestHome::new("tui-context-click");
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+    ];
+    let process = PtyProcess::spawn(options).expect("start context-menu TUI");
+    let mut output = Vec::new();
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        SHELL_PROMPT,
+        120,
+        35,
+        Duration::from_secs(30)
+    ));
+    process
+        .write(b"\x1b[<2;6;6M\x1b[<2;6;6m")
+        .expect("open menu");
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        "Split right",
+        120,
+        35,
+        Duration::from_secs(10)
+    ));
+    assert!(
+        screen_text(&output, 120, 35).contains("Ctrl+b then Shift+r"),
+        "menu cut off a configured shortcut despite sufficient terminal width"
+    );
+    process
+        .write(b"\x1b[<0;9;7M\x1b[<0;9;7m")
+        .expect("click Split right");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        drain(&process, &mut output);
+        let sessions: Value =
+            serde_json::from_slice(&home.run(&["sessions", "--json"]).stdout).unwrap();
+        if sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["pane_count"] == 2)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "clicking a context action did nothing: {}",
+            tail(&output)
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    process
+        .write(b"\x1b[<2;120;35M\x1b[<2;120;35m")
+        .expect("open clamped menu");
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        "Split right",
+        120,
+        35,
+        Duration::from_secs(10)
+    ));
+    process
+        .write(b"\x1b[<0;1;1M\x1b[<0;1;1m")
+        .expect("dismiss outside the menu");
+    thread::sleep(Duration::from_millis(250));
+    drain(&process, &mut output);
+    assert!(
+        !screen_text(&output, 120, 35).contains("Split right"),
+        "outside click did not dismiss the menu"
+    );
+    process
+        .write(b"\x1b[<2;120;35M\x1b[<2;120;35m")
+        .expect("reopen clamped menu");
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        "Split right",
+        120,
+        35,
+        Duration::from_secs(10)
+    ));
+    // Click the first row after right/bottom clamping; hit testing must
+    // use the drawn geometry, including the width of full action labels.
+    process
+        .write(b"\x1b[<65;100;25M\x1b[<0;89;22M\x1b[<0;89;22m")
+        .expect("navigate and click a clamped menu");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        drain(&process, &mut output);
+        let sessions: Value =
+            serde_json::from_slice(&home.run(&["sessions", "--json"]).stdout).unwrap();
+        if sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["pane_count"] == 3)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "clamped menu click did not split: {}",
+            tail(&output)
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
+    process.write(b"\x02d").expect("detach");
+    assert_eq!(process.wait_for_exit(Duration::from_secs(15)), Some(0));
+}
+
+#[test]
+fn full_screen_app_has_no_fact_rail_and_receives_app_scroll_keys() {
     const APP_MARKER: &str = "FACT_ALT_SCREEN_APP";
     const KEY_MARKER: &str = "FACT_APP_KEY";
 
@@ -471,10 +587,15 @@ fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
         tail(&output)
     );
 
+    process
+        .write(b"\x1b[<35;120;5M")
+        .expect("hover over the app edge");
+    thread::sleep(Duration::from_millis(200));
+    drain(&process, &mut output);
     let screen = screen_text(&output, 120, 35);
     assert!(
-        screen.contains('▐') || screen.contains('▴') || screen.contains('▾'),
-        "the app-scroll rail was not visible:\n{}",
+        !screen.contains('▐') && !screen.contains('▴') && !screen.contains('▾'),
+        "FACT drew a rail over the app:\n{}",
         screen
     );
 
@@ -593,7 +714,7 @@ fn mouse_tracking_and_selection_work_while_an_app_is_streaming() {
         ("\x1b[<1;10;5M", "ESC[<1;10;5M"),
         ("\x1b[<33;12;6M", "ESC[<33;12;6M"),
         ("\x1b[<1;12;6m", "ESC[<1;12;6m"),
-        ("\x1b[<64;120;5M", "ESC[<64;60;18M"),
+        ("\x1b[<64;120;5M", "ESC[<64;120;5M"),
     ] {
         process
             .write(input.as_bytes())
@@ -1173,24 +1294,50 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
         tail(&output)
     );
 
-    // Generate a screenful of scrollback and verify that the pane exposes a
-    // scrollbar. The bar stays hidden at an empty prompt so it does not read
-    // as another pane border.
+    // Shell history remains hidden until the pointer reaches the right edge.
+    process.write(&[b'\r'; 48]).expect("generate shell history");
+    thread::sleep(Duration::from_secs(1));
+    drain(&process, &mut output);
+    assert!(!screen_text(&output, 120, 35).contains('▐'));
+    // Maximize to exercise hover at the viewport edge.
+    process.write(b"\x02z").expect("maximize the focused pane");
+    thread::sleep(Duration::from_millis(300));
     process
-        .write(&[b'\r'; 48])
-        .expect("generate scrollback in the focused pane");
+        .write(b"\x1b[<35;120;5M")
+        .expect("hover at the right edge");
     assert!(
-        wait_for(&process, &mut output, "▐", Duration::from_secs(20)),
-        "the scrollbar did not appear after generating scrollback:\n{}",
+        wait_for_screen(&process, &mut output, "▐", 120, 35, Duration::from_secs(10)),
+        "hover did not reveal shell scrollbar: {}",
         tail(&output)
     );
+    process
+        .write(b"\x1b[<0;120;35M\x1b[<32;120;3M\x1b[<0;120;3m")
+        .expect("drag the shell scrollbar to older output");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "FACT_TUI_INPUT",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "scrollbar drag did not reach history: {}",
+        tail(&output)
+    );
+    process
+        .write(b"\x1b[<0;120;35M\x1b[<0;120;35m")
+        .expect("click the scrollbar back to live output");
+    process
+        .write(b"\x1b[<35;60;5M")
+        .expect("move away from the edge");
     thread::sleep(Duration::from_millis(300));
     drain(&process, &mut output);
-    let scrolled_screen = screen_text(&output, 120, 35);
     assert!(
-        scrolled_screen.contains('▐'),
-        "the scrollbar thumb is missing from the rendered screen:\n{scrolled_screen}"
+        !screen_text(&output, 120, 35).contains('▐'),
+        "scrollbar stayed visible after hover ended"
     );
+    process.write(b"\x02z").expect("restore the grid");
 
     process.write(b"\x02k").expect("open the command palette");
     assert!(
@@ -1288,4 +1435,110 @@ fn tui_renders_accepts_input_and_detaches_cleanly() {
         "shutdown failed: {}",
         String::from_utf8_lossy(&shutdown.stderr)
     );
+}
+
+/// Documentation capture uses the real binary/ConPTY, never a mock UI.
+/// See docs/screenshots/README.md for the opt-in regeneration command.
+#[test]
+#[ignore = "manual documentation capture; requires FACT_SCREENSHOT_DIR"]
+fn capture_readme_screens() {
+    let destination = PathBuf::from(
+        std::env::var_os("FACT_SCREENSHOT_DIR")
+            .expect("set FACT_SCREENSHOT_DIR to the terminal-cell capture directory"),
+    );
+    fs::create_dir_all(&destination).unwrap();
+    let home = TestHome::new("readme-capture");
+    let startup = home.path.join("startup.ps1");
+    fs::write(&startup, "function global:prompt { 'PS FACT> ' }; Clear-Host; Write-Host 'FACT / independent shell' -ForegroundColor Cyan; Write-Host (\"Process {0}\" -f $PID); Write-Host (\"PowerShell {0}\" -f $PSVersionTable.PSVersion); Write-Host 'Own process. Own terminal.'").unwrap();
+    fs::write(home.path.join("config.toml"), format!(
+        "config_version = 1\nprefix = 'ctrl+b'\ndefault_profile = 'docs'\n\n[profiles.docs]\ncommand = '{}'\nargs = ['-NoLogo', '-NoProfile', '-NoExit', '-File', '{}']\n",
+        powershell_path(), startup.display())).unwrap();
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.env.insert("NO_COLOR".into(), "".into());
+    options.env.insert("TERM".into(), "xterm-256color".into());
+    options.env.insert("COLORTERM".into(), "truecolor".into());
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+        "--session".into(),
+        "readme-demo".into(),
+        "--grid".into(),
+        "8".into(),
+    ];
+    let process = PtyProcess::spawn(options).unwrap();
+    let mut output = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        drain(&process, &mut output);
+        if screen_text(&output, 120, 35).matches("PS FACT>").count() == 8 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "documentation grid did not start: {}",
+            tail(&output)
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    let capture = |output: &[u8], name: &str| {
+        let mut terminal = TerminalModel::new(120, 35, 0, TerminalEventSink::new());
+        terminal.feed(output);
+        let snapshot = terminal.snapshot();
+        fs::write(
+            destination.join(format!("{name}.json")),
+            serde_json::to_vec(&serde_json::json!({
+                "cols": 120, "rows": 35, "cells": snapshot.cells
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    capture(&output, "grid");
+    process.write(b"\x02k").unwrap();
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        "Commands",
+        120,
+        35,
+        Duration::from_secs(10)
+    ));
+    capture(&output, "commands");
+    process.write(b"\x1b").unwrap();
+    thread::sleep(Duration::from_millis(200));
+    process.write(b"\x1b[<2;40;8M\x1b[<2;40;8m").unwrap();
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        "Split right",
+        120,
+        35,
+        Duration::from_secs(10)
+    ));
+    capture(&output, "pane-menu");
+    process.write(b"\x1b").unwrap();
+    thread::sleep(Duration::from_millis(200));
+    process.write(b"\x02z").unwrap();
+    thread::sleep(Duration::from_millis(200));
+    process.write(b"Clear-Host; 1..160 | ForEach-Object { Write-Host (\"History line {0:D3} / mouse wheel and keyboard browsing\" -f $_) }; Write-Host 'Hover at the right edge to reveal the scrollbar.'\r").unwrap();
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        "History line 160",
+        120,
+        35,
+        Duration::from_secs(10)
+    ));
+    process.write(b"\x1b[<35;120;6M").unwrap();
+    assert!(wait_for_screen(
+        &process,
+        &mut output,
+        "▐",
+        120,
+        35,
+        Duration::from_secs(10)
+    ));
+    capture(&output, "history-hover");
+    process.write(b"\x02d").unwrap();
+    assert_eq!(process.wait_for_exit(Duration::from_secs(15)), Some(0));
 }

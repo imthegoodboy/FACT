@@ -359,13 +359,20 @@ impl SessionManager {
             if let Some(session) = self.sessions.get_mut(&key) {
                 for pane in session.panes.values_mut() {
                     let mut dirty = false;
+                    // Observe EOF before draining: checking it afterwards can
+                    // race a final chunk arriving just after an empty read.
+                    let output_closed = pane.pty.output_closed();
+                    let mut output_drained = false;
                     for _ in 0..OUTPUT_CHUNKS_PER_TICK {
                         match pane.pty.try_read() {
                             Some(bytes) => {
                                 pane.term.feed(&bytes);
                                 dirty = true;
                             }
-                            None => break,
+                            None => {
+                                output_drained = output_closed;
+                                break;
+                            }
                         }
                     }
                     if dirty {
@@ -376,7 +383,7 @@ impl SessionManager {
                             break;
                         }
                     }
-                    if pane.exit_code.is_none() {
+                    if pane.exit_code.is_none() && output_drained {
                         if let Some(exit) = pane.pty.exit() {
                             pane.exit_code = Some(exit.code);
                             pane.term.feed(
@@ -1024,8 +1031,9 @@ impl SessionManager {
             normalized.into_bytes()
         };
         live.pty
-            .write(&bytes)
+            .write_paste(&bytes)
             .map_err(|error| ProtocolError::invalid(error.to_string()))?;
+        live.term.reset_scroll();
         live.version = live.version.wrapping_add(1);
         Ok(())
     }
@@ -2137,5 +2145,57 @@ fn map_config_error(error: fact_config::ConfigError) -> ProtocolError {
             ProtocolError::new(ErrorCode::NotFound, error.to_string())
         }
         _ => ProtocolError::invalid(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_notice_follows_all_queued_process_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().to_path_buf();
+        let paths = Paths::from_parts(base.clone(), base.join("config.toml"));
+        let mut config = Config {
+            default_profile: "tail-output".into(),
+            ..Config::default()
+        };
+        config.profiles.insert("tail-output".into(), fact_config::Profile {
+            enabled: true,
+            command: Some(format!("{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into()))),
+            args: vec!["-NoLogo".into(), "-NoProfile".into(), "-Command".into(),
+                "1..90 | ForEach-Object { [Console]::Write(\"OUTPUT_$_`r`n\"); Start-Sleep -Milliseconds 20 }; [Console]::Write('FACT_FINAL_OUTPUT')".into()],
+            ..fact_config::Profile::default()
+        });
+        let mut manager = SessionManager::new(paths, config).unwrap();
+        manager
+            .create_session("tail".into(), 1, None, None)
+            .unwrap();
+        let pane_id = *manager.sessions["tail"].panes.keys().next().unwrap();
+        // Delay the owner tick until the process has exited and its output is
+        // queued, reproducing a busy daemon with more than one tick of output.
+        let pty = &manager.sessions["tail"].panes[&pane_id].pty;
+        assert_eq!(pty.wait_for_exit(Duration::from_secs(15)), Some(0));
+        std::thread::sleep(Duration::from_millis(300));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while manager.sessions["tail"].panes[&pane_id].exit_code.is_none() {
+            manager.tick();
+            assert!(Instant::now() < deadline, "output did not finish draining");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pane = &manager.sessions["tail"].panes[&pane_id];
+        let text = pane.term.plain_text();
+        let tail = text
+            .find("FACT_FINAL_OUTPUT")
+            .expect("final output is present");
+        let notice = text
+            .find("[FACT] process exited")
+            .expect("exit notice is present");
+        assert!(
+            notice > tail,
+            "exit notice preceded the final output: {text}"
+        );
     }
 }

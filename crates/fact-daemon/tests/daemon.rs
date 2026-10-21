@@ -226,6 +226,93 @@ fn shutdown(
 }
 
 #[test]
+fn maximum_bracketed_paste_is_complete_and_returns_to_live_view() {
+    let harness = harness();
+    let report = harness._dir.path().join("paste.bin");
+    let fixture =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/paste-sink.ps1");
+    let mut config = Config {
+        default_profile: "paste-sink".into(),
+        ..Config::default()
+    };
+    config.profiles.insert(
+        "paste-sink".into(),
+        fact_config::Profile {
+            enabled: true,
+            command: Some(format!(
+                "{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())
+            )),
+            args: vec![
+                "-NoLogo".into(),
+                "-NoProfile".into(),
+                "-File".into(),
+                fixture.to_string_lossy().into_owned(),
+                "-ReportPath".into(),
+                report.to_string_lossy().into_owned(),
+            ],
+            ..fact_config::Profile::default()
+        },
+    );
+    let handle = start_daemon_with(&harness, config);
+    let (_, mut client) = wait_for_daemon(&harness);
+    let info = resume(&mut client, "paste", 1);
+    let events = event_reader(&client, &info.stream_token);
+    let mut buffers = HashMap::new();
+    let (frame, _) = wait_for_text(&events, &mut buffers, "PASTE_READY", FRAME_TIMEOUT)
+        .expect("raw input sink ready");
+    let pane = frame.panes[0].id;
+    client
+        .request(Command::SetScrollOffset { pane, offset: 10 })
+        .expect("browse history");
+    wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
+        frame.panes[0].scroll_offset == 10
+    })
+    .expect("history viewport");
+    // Exactly the advertised byte limit, including UTF-8 and mixed newlines.
+    let suffix = "\r\n\n\ré";
+    let text = format!(
+        "{}{suffix}",
+        "x".repeat(fact_protocol::MAX_PASTE_BYTES - suffix.len())
+    );
+    let result = client.request(Command::Paste {
+        pane,
+        text: text.clone(),
+    });
+    if result.is_err() {
+        shutdown(client, handle, &harness);
+        panic!("valid maximum-size paste was rejected: {result:?}");
+    }
+    wait_for_frame(&events, FRAME_TIMEOUT, |frame| {
+        frame.panes[0].scroll_offset == 0
+    })
+    .expect("paste returns to live view even when the app produces no output");
+    let expected = format!(
+        "\x1b[200~{}\x1b[201~",
+        text.replace("\r\n", "\r").replace('\n', "\r")
+    )
+    .into_bytes();
+    let deadline = Instant::now() + FRAME_TIMEOUT;
+    loop {
+        if std::fs::read(&report).is_ok_and(|actual| actual == expected) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "paste was truncated or bracket markers were lost"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(client
+        .request(Command::Paste {
+            pane,
+            text: "x".repeat(fact_protocol::MAX_PASTE_BYTES + 1)
+        })
+        .is_err());
+    shutdown(client, handle, &harness);
+}
+
+#[test]
 fn grid_launches_independent_shells_and_streams_output() {
     let harness = harness();
     let handle = start_daemon(&harness);

@@ -210,11 +210,11 @@ Additional interaction that is not a configurable chord:
   scrollback. In an alternate-screen app it becomes app scroll: PgUp/PgDn,
   Up/Down and Home/End are forwarded to the app so its own transcript moves.
 - Full-screen applications (Claude Code, Codex and OpenCode by default) own the
-  alternate screen, which has no terminal scrollback. FACT keeps the rail
-  visible with a centred grip and paging caps. Clicking or dragging the rail,
-  wheeling over it, or using Shift+wheel pages the app; if the app requested
-  mouse reporting, FACT synthesizes wheel events at the centre of its viewport.
-  Keyboard-only apps receive PageUp/PageDown, avoiding prompt-history arrows.
+  alternate screen, which has no terminal scrollback. FACT adds no scrollbar
+  to alternate-screen or mouse-controlled panes. Wheel and Shift+wheel still
+  page full-screen apps: mouse-aware apps receive wheel reports at the original
+  cell, and keyboard-only apps receive PageUp/PageDown, avoiding prompt-history
+  arrows. Prefix scroll mode targets its pane even if the pointer moves away.
 - For true terminal history and a position thumb, launch an agent in inline
   mode: `codex --no-alt-screen`, `/tui default` in Claude Code, or
   `OTUI_USE_ALTERNATE_SCREEN=false` for OpenCode.
@@ -231,9 +231,10 @@ Additional interaction that is not a configurable chord:
 - Right-click a pane for split, zoom, minimize, new tab, rename, search, restart,
   close and copy actions. Applications that request mouse reporting receive the
   click instead; Shift+right-click opens FACT's menu in that case.
-- Click or drag the scrollbar to move through scrollback. In a full-screen pane
-  the same rail pages the application instead. The mouse wheel is forwarded to
-  the focused application when it requested mouse reporting.
+- Hover near a shell pane's right edge to reveal its history scrollbar, then
+  click or drag it. Moving away hides it. FACT adds no scrollbar to
+  alternate-screen or mouse-controlled apps. Their wheel events still reach
+  the application, with page-key fallback for keyboard-only full-screen apps.
 - When panes are minimized, a small `▾ N` tray appears at the bottom-right; the
   same tray is clickable to restore them.
 - `Ctrl+C` copies a selection, `Ctrl+V` pastes, and `Ctrl+Insert` /

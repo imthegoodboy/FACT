@@ -29,10 +29,10 @@ directory, use a real shell and terminate the daemon during cleanup.
 | ConPTY | Independent processes, input/output, resize, exit status, environment block and argument quoting. |
 | IPC | Pipe round-trip, peer PID/current-user check, protected DACL, local name validation, identity file ACL, DACL diagnostics. |
 | Sessions | Schema migration (including secure v1 snapshot cleanup and WAL truncation), save/load, case-insensitive names, layout corruption rejection, export/import copy semantics, archive/delete. |
-| Daemon | Grid of eight independent shells, live detach/reattach PID preservation, saved-layout restart with fresh shells and discarded output, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
+| Daemon | Maximum-size bracketed UTF-8 paste with live-view reset, queued-output/exit ordering, grid of eight independent shells, live detach/reattach PID preservation, saved-layout restart with fresh shells and discarded output, split/tab/focus/search, direct scrollback offsets, lifecycle, bad-token rejection. |
 | CLI | Help surface, config init/validate, offline session lifecycle, export/import, doctor, JSON output. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and installed `--version`. A replacement install also proves a dead daemon identity is cleared. |
-| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, scrollbar rendering, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes the saved layout, proves the old marker and recovery screen are absent, and verifies a new shell PID accepts input. A seventh writes a stale protocol-3 identity and proves startup clears it and renders a live pane. An eighth generates 120 lines, enters scroll mode with the configured prefix and `[`, verifies the offset moves on PageUp and that Esc returns to the shell. A ninth starts a fake alternate-screen app, proves the app-scroll rail is visible, enters app scroll mode, verifies PageUp is forwarded to the app and that Esc leaves the mode. |
+| TUI | A driven real-ConPTY `--grid 8` session covering pane output, chrome-free rendering, hover scrollbar appearance and disappearance, keyboard input, palette, search, F1 help, prefix detach and eight live panes afterwards. A second test leaves a one-pane session behind and proves `--grid 8` starts `grid-8` instead of resuming it. A third verifies a second client sees the same live grid. A fourth shrinks to 60x18 and proves maximize/show-all return to the full grid. A fifth proves a nested `fact` launch inside a pane is rejected. A sixth shuts the daemon down, resumes the saved layout, proves the old marker and recovery screen are absent, and verifies a new shell PID accepts input. A seventh writes a stale protocol-3 identity and proves startup clears it and renders a live pane. An eighth generates 120 lines, enters scroll mode with the configured prefix and `[`, verifies the offset moves on PageUp and that Esc returns to the shell. A ninth starts a fake alternate-screen app, proves no FACT rail appears even on hover, enters app scroll mode, verifies PageUp is forwarded to the app and that Esc leaves the mode. Further scenarios exercise streaming mouse gestures/selection, history motion suppression and clickable/clamped context menus. The documentation capture is opt-in and ignored by default. |
 | Security invariant | Source scan rejects network listener/stream APIs; DACL tests assert only the current user and SYSTEM are granted. |
 
 ## Requirement-to-test map
@@ -63,7 +63,7 @@ parallel execution.
 | Non-owner access | Pipe and identity files use a protected current-user/SYSTEM DACL. Tests assert exactly those grants, peer-user comparison is in the accept path, and local-only pipe names are enforced. |
 | No network listeners | A source-level test scans every crate's `src` tree for TCP/UDP/HTTP listener and stream APIs. |
 | Import copies identity | `export_import_is_a_copy` and the daemon lifecycle test verify fresh session/pane IDs and reset process state. |
-| Clean, controllable UI | Layout tests prove 8 panes retain full content height and fit 120x35, 100x30 and 80x24. Client unit tests cover tab/new-tab geometry, the bottom-right minimized tray, scrollbar geometry and steady cursor styles. The real-ConPTY TUI test renders the screen and rejects pane-header buttons, shell paths, PIDs, pane counts, focused-mode labels, session names and theme names. |
+| Clean, controllable UI | Layout tests prove 8 panes retain full content height and fit 120x35, 100x30 and 80x24. Client unit tests cover tab/new-tab geometry, the bottom-right minimized tray, hover-only history scrollbar geometry, app rail suppression and steady cursor styles. The real-ConPTY TUI test renders the screen and rejects pane-header buttons, shell paths, PIDs, pane counts, focused-mode labels, session names and theme names. |
 | Recover from a narrow window | Layout tests prove `zoom(false)`/`fit_all` keeps all eight panes visible at 60x18 and survives serialization. The real-ConPTY `maximize_and_show_all_work_in_a_small_window` test presses prefix+M/N and counts the rendered panes. |
 | Safe nested launch | The real-ConPTY `nested_launch_is_rejected_inside_a_pane` test launches `fact --grid 1` inside a pane and checks for the explicit refusal instead of a black second UI. |
 | Upgrade over a stale daemon | The startup unit test removes an unusable protocol-3 identity; the real-ConPTY stale-identity test proves the TUI then starts; the installer replacement test proves a dead identity is cleared. A live incompatible daemon is never overwritten and produces a stop-and-retry error. |
@@ -90,9 +90,10 @@ These are intentionally not mock tests:
   and recovery screen are absent and verifies a new shell PID. Further tests
   cover a second live client, a 60x18 grid with prefix+M/N, nested-launch
   refusal, a stale protocol-3 identity that must not block startup, scroll
-  mode reading real history, and a fake alternate-screen app whose rail stays
-  visible and receives forwarded PageUp. Set `FACT_SMOKE_EXE` to run all nine
-  tests against a downloaded release binary instead of the test build. Fresh
+  mode reading real history, mouse gestures/selection during streaming,
+  context-menu clicks (including clamped menus and outside dismissal), and an
+  alternate-screen app with no FACT rail that receives forwarded PageUp. Set
+  `FACT_SMOKE_EXE` to run all twelve tests against a downloaded release binary instead of the test build. Fresh
   PIDs and discarded old output are asserted
   directly by the daemon saved-layout test.
 - Tests wait for frames and output with deadlines rather than fixed sleeps where
@@ -149,10 +150,11 @@ fact --grid 8
 # minimize a pane, then click the bottom-right tray to restore it
 # maximize a pane with Ctrl+Space Z and restore it with Ctrl+Space Z
 # from a pane, run `fact --grid 8` and confirm it refuses instead of going black
-# generate 200 lines, then click and drag the scrollbar; confirm output moves
+# generate 200 lines, hover at the right edge, then click/drag; confirm output moves
+# move away and confirm the bar hides; run an agent and confirm no FACT bar appears
 # press Ctrl+Space then [, scroll with Up/Down and PgUp/PgDn, and press Esc
 # hold Shift and use the wheel over a pane; confirm it scrolls FACT, not the app
-# start Codex, Claude Code or OpenCode; confirm the rail stays visible, wheel and
+# start Codex, Claude Code or OpenCode; confirm no FACT rail appears, wheel and
 #   Shift+wheel page the app, and Ctrl+Space then [ reports APP SCROLL
 # select text, press Ctrl+C, focus another pane and press Ctrl+V
 # press Ctrl+Space and confirm the two-cell accent marker appears only while armed

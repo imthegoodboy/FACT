@@ -8,6 +8,7 @@ repository.workspace = true
 description = "ConPTY process engine for FACT"
 
 [dependencies]
+fact-protocol = { path = "../fact-protocol" }
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
