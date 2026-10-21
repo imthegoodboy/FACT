@@ -1157,10 +1157,6 @@ impl App {
             self.handle_scroll_key(key);
             return;
         }
-        if key.code == CKeyCode::Esc && self.selection.is_some() {
-            self.selection = None;
-            return;
-        }
         let Some(chord) = keymap::chord_for(key) else {
             return;
         };
@@ -1198,6 +1194,10 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
+            CKeyCode::Esc if self.selection.is_some() => {
+                self.selection = None;
+                return;
+            }
             CKeyCode::Char('v' | 'V') if control && !shift => {
                 self.paste_clipboard();
                 return;
