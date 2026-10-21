@@ -1,8 +1,75 @@
 //! Crossterm event translation: key bindings and terminal input encoding.
 
-use crossterm::event::{KeyCode as CKey, KeyEvent, KeyModifiers, MouseButton};
+use crossterm::event::{KeyCode as CKey, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
 use fact_config::keys::{KeyCode as FactKey, Modifiers};
 use fact_config::KeyChord;
+use fact_protocol::pane_modes;
+
+/// Tracking mode and report encoding are negotiated independently by the app.
+pub fn encode_mouse(
+    modes: u32,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+) -> Option<Vec<u8>> {
+    if modes & pane_modes::SGR_MOUSE != 0 {
+        return match kind {
+            MouseEventKind::Down(button) => Some(sgr_mouse(button, column, row, true, modifiers)),
+            MouseEventKind::Up(button) => Some(sgr_mouse(button, column, row, false, modifiers)),
+            MouseEventKind::Drag(button) => Some(sgr_mouse_motion(button, column, row, modifiers)),
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => Some(sgr_wheel(
+                kind == MouseEventKind::ScrollUp,
+                column,
+                row,
+                modifiers,
+            )),
+            MouseEventKind::Moved => Some(
+                format!(
+                    "\x1b[<{};{};{}M",
+                    35 + mouse_modifiers(modifiers),
+                    column.saturating_add(1),
+                    row.saturating_add(1)
+                )
+                .into_bytes(),
+            ),
+            _ => None,
+        };
+    }
+    // The original X11 encoding has a one-byte coordinate limit. Dropping an
+    // out-of-range report is safer than wrapping it to a different cell.
+    if column > 222 || row > 222 {
+        return None;
+    }
+    let button_code = |button| match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    };
+    let code = match kind {
+        MouseEventKind::Down(button) => button_code(button),
+        MouseEventKind::Up(_) => 3,
+        MouseEventKind::Drag(button) => 32 + button_code(button),
+        MouseEventKind::Moved => 35,
+        MouseEventKind::ScrollUp => 64,
+        MouseEventKind::ScrollDown => 65,
+        _ => return None,
+    } + mouse_modifiers(modifiers);
+    Some(vec![
+        0x1b,
+        b'[',
+        b'M',
+        code + 32,
+        (column + 33) as u8,
+        (row + 33) as u8,
+    ])
+}
+
+fn mouse_modifiers(modifiers: KeyModifiers) -> u8 {
+    u8::from(modifiers.contains(KeyModifiers::SHIFT)) * 4
+        + u8::from(modifiers.contains(KeyModifiers::ALT)) * 8
+        + u8::from(modifiers.contains(KeyModifiers::CONTROL)) * 16
+}
 
 pub fn chord_for(key: KeyEvent) -> Option<KeyChord> {
     let code = match key.code {
@@ -177,9 +244,7 @@ pub fn sgr_mouse(
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
     };
-    let modifier_code = u8::from(modifiers.contains(KeyModifiers::SHIFT)) * 4
-        + u8::from(modifiers.contains(KeyModifiers::ALT)) * 8
-        + u8::from(modifiers.contains(KeyModifiers::CONTROL)) * 16;
+    let modifier_code = mouse_modifiers(modifiers);
     let terminator = if pressed { 'M' } else { 'm' };
     format!(
         "\x1b[<{};{};{}{terminator}",
@@ -204,9 +269,7 @@ pub fn sgr_mouse_motion(
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
     };
-    let modifier_code = u8::from(modifiers.contains(KeyModifiers::SHIFT)) * 4
-        + u8::from(modifiers.contains(KeyModifiers::ALT)) * 8
-        + u8::from(modifiers.contains(KeyModifiers::CONTROL)) * 16;
+    let modifier_code = mouse_modifiers(modifiers);
     format!(
         "\x1b[<{};{};{}M",
         base + 32 + modifier_code,
@@ -218,9 +281,7 @@ pub fn sgr_mouse_motion(
 
 pub fn sgr_wheel(up: bool, column: u16, row: u16, modifiers: KeyModifiers) -> Vec<u8> {
     let base = if up { 64 } else { 65 };
-    let modifier_code = u8::from(modifiers.contains(KeyModifiers::SHIFT)) * 4
-        + u8::from(modifiers.contains(KeyModifiers::ALT)) * 8
-        + u8::from(modifiers.contains(KeyModifiers::CONTROL)) * 16;
+    let modifier_code = mouse_modifiers(modifiers);
     format!(
         "\x1b[<{};{};{}M",
         base + modifier_code,
@@ -288,5 +349,40 @@ mod tests {
         assert_eq!(sgr, b"\x1b[<18;1;1m");
         let sgr = sgr_mouse_motion(MouseButton::Left, 4, 2, KeyModifiers::NONE);
         assert_eq!(sgr, b"\x1b[<32;5;3M");
+    }
+
+    #[test]
+    fn mouse_reports_honor_the_negotiated_encoding() {
+        let events = [
+            (MouseEventKind::Down(MouseButton::Left), 0, "\x1b[<0;5;3M"),
+            (MouseEventKind::Up(MouseButton::Left), 3, "\x1b[<0;5;3m"),
+            (MouseEventKind::Drag(MouseButton::Left), 32, "\x1b[<32;5;3M"),
+            (MouseEventKind::Moved, 35, "\x1b[<35;5;3M"),
+            (MouseEventKind::ScrollUp, 64, "\x1b[<64;5;3M"),
+            (MouseEventKind::ScrollDown, 65, "\x1b[<65;5;3M"),
+        ];
+        for (kind, code, sgr) in events {
+            assert_eq!(
+                encode_mouse(pane_modes::SGR_MOUSE, kind, 4, 2, KeyModifiers::NONE).unwrap(),
+                sgr.as_bytes()
+            );
+            assert_eq!(
+                encode_mouse(0, kind, 4, 2, KeyModifiers::NONE).unwrap(),
+                vec![0x1b, b'[', b'M', code + 32, 37, 35]
+            );
+        }
+        assert!(encode_mouse(0, MouseEventKind::ScrollUp, 223, 0, KeyModifiers::NONE).is_none());
+        assert!(encode_mouse(
+            pane_modes::SGR_MOUSE,
+            MouseEventKind::ScrollUp,
+            400,
+            0,
+            KeyModifiers::NONE
+        )
+        .is_some());
+        assert_eq!(
+            encode_mouse(0, MouseEventKind::ScrollUp, 0, 0, KeyModifiers::CONTROL).unwrap(),
+            b"\x1b[Mp!!"
+        );
     }
 }

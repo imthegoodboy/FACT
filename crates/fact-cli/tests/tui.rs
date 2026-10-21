@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,9 @@ const SESSION: &str = "ui-smoke";
 // The raw ConPTY stream positions the cursor between "PS" and the space in the
 // PowerShell prompt, so wait for the stable prefix rather than "PS ".
 const SHELL_PROMPT: &str = "PS";
+// Each scenario starts multiple real console processes (some start 8 panes).
+// Avoid exhausting the desktop's console/startup resources in parallel tests.
+static TUI_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn screen_text(output: &[u8], cols: u16, rows: u16) -> String {
     let mut term = TerminalModel::new(cols, rows, 0, TerminalEventSink::new());
@@ -45,10 +49,14 @@ fn powershell_path() -> String {
 
 struct TestHome {
     path: PathBuf,
+    _run: MutexGuard<'static, ()>,
 }
 
 impl TestHome {
     fn new(name: &str) -> Self {
+        let run = TUI_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let path = std::env::temp_dir().join(format!(
             "fact-{name}-{}-{}",
             std::process::id(),
@@ -67,7 +75,7 @@ impl TestHome {
             ),
         )
         .expect("write config");
-        Self { path }
+        Self { path, _run: run }
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -116,7 +124,15 @@ fn wait_for(process: &PtyProcess, output: &mut Vec<u8>, needle: &str, timeout: D
         if String::from_utf8_lossy(output).contains(needle) {
             return true;
         }
-        if process.exit().is_some() || Instant::now() >= deadline {
+        if let Some(exit) = process.exit() {
+            drain(process, output);
+            eprintln!(
+                "FACT exited before rendering {needle:?}: {} (0x{:08x})",
+                exit.code, exit.code as u32
+            );
+            return false;
+        }
+        if Instant::now() >= deadline {
             return false;
         }
         thread::sleep(Duration::from_millis(10));
@@ -137,7 +153,15 @@ fn wait_for_screen(
         if screen_text(output, cols, rows).contains(needle) {
             return true;
         }
-        if process.exit().is_some() || Instant::now() >= deadline {
+        if let Some(exit) = process.exit() {
+            drain(process, output);
+            eprintln!(
+                "FACT exited before rendering {needle:?}: {} (0x{:08x})",
+                exit.code, exit.code as u32
+            );
+            return false;
+        }
+        if Instant::now() >= deadline {
             return false;
         }
         thread::sleep(Duration::from_millis(10));
@@ -410,15 +434,15 @@ fn scroll_mode_reads_history_without_sending_keys_to_the_shell() {
 #[test]
 fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
     const APP_MARKER: &str = "FACT_ALT_SCREEN_APP";
-    const KEY_MARKER: &str = "FACT_APP_KEY_PageUp";
+    const KEY_MARKER: &str = "FACT_APP_KEY";
 
     let home = TestHome::new("tui-app-scroll");
     let config = format!(
         "config_version = 1\nprefix = \"ctrl+b\"\ndefault_profile = \"alt-shell\"\n\n\
          [profiles.alt-shell]\ncommand = \"{}\"\nargs = ['-NoLogo', '-NoProfile', '-Command', \
          '$e=[char]27; [Console]::Write(\"$e[?1049h$e[2J$e[H{APP_MARKER}\"); \
-         while($true){{ $k=[Console]::ReadKey($true); \
-         [Console]::Write(\"$e[2J$e[H{KEY_MARKER}_$($k.Key)\") }}']\n",
+         $n=0; while($true){{ $k=[Console]::ReadKey($true); $n++; \
+         [Console]::Write(\"$e[2J$e[H{KEY_MARKER}_$($k.Key)_$n\") }}']\n",
         powershell_path()
     );
     fs::write(home.path.join("config.toml"), config).expect("write alt-screen config");
@@ -454,6 +478,22 @@ fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
         screen
     );
 
+    process
+        .write(b"\x1b[<64;10;5M")
+        .expect("wheel up over the full-screen app");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "FACT_APP_KEY_PageUp_1",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "wheel input must page the transcript instead of navigating prompt history:\n{}",
+        tail(&output)
+    );
+
     process.write(b"\x02[").expect("enter app scroll mode");
     assert!(
         wait_for_screen(
@@ -475,7 +515,7 @@ fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
         wait_for_screen(
             &process,
             &mut output,
-            KEY_MARKER,
+            "FACT_APP_KEY_PageUp_2",
             120,
             35,
             Duration::from_secs(10)
@@ -506,6 +546,228 @@ fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
         tail(&output)
     );
     home.shutdown();
+}
+
+#[test]
+fn mouse_tracking_and_selection_work_while_an_app_is_streaming() {
+    let home = TestHome::new("tui-mouse-stream");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mouse-app.ps1");
+    fs::write(
+        home.path.join("config.toml"),
+        format!(
+            "config_version = 1\nprefix = 'ctrl+b'\ndefault_profile = 'mouse-app'\n\n\
+         [profiles.mouse-app]\ncommand = '{}'\nargs = ['-NoLogo', '-NoProfile', '-File', '{}']\n",
+            powershell_path(),
+            fixture.display()
+        ),
+    )
+    .expect("write mouse-app config");
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+    ];
+    let process = PtyProcess::spawn(options).expect("start streaming mouse app");
+    let mut output = Vec::new();
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "FACT_MOUSE_APP",
+            120,
+            35,
+            Duration::from_secs(30)
+        ),
+        "{}",
+        tail(&output)
+    );
+
+    for (input, expected) in [
+        ("\x1b[<64;10;5M", "ESC[<64;10;5M"),
+        ("\x1b[<0;10;5M", "ESC[<0;10;5M"),
+        ("\x1b[<32;12;6M", "ESC[<32;12;6M"),
+        ("\x1b[<0;12;6m", "ESC[<0;12;6m"),
+        ("\x1b[<2;10;5M", "ESC[<2;10;5M"),
+        ("\x1b[<34;12;6M", "ESC[<34;12;6M"),
+        ("\x1b[<2;12;6m", "ESC[<2;12;6m"),
+        ("\x1b[<1;10;5M", "ESC[<1;10;5M"),
+        ("\x1b[<33;12;6M", "ESC[<33;12;6M"),
+        ("\x1b[<1;12;6m", "ESC[<1;12;6m"),
+        ("\x1b[<64;120;5M", "ESC[<64;60;18M"),
+    ] {
+        process
+            .write(input.as_bytes())
+            .expect("send a real mouse event");
+        assert!(
+            wait_for_screen(
+                &process,
+                &mut output,
+                expected,
+                120,
+                35,
+                Duration::from_secs(10)
+            ),
+            "mouse event {input:?} was lost:\n{}",
+            tail(&output)
+        );
+    }
+
+    // Shift reserves selection for FACT even when the child owns the mouse.
+    process
+        .write(b"\x1b[<4;1;1M\x1b[<36;14;1M")
+        .expect("select streaming output");
+    thread::sleep(Duration::from_millis(250));
+    drain(&process, &mut output);
+    let selected = screen_text(&output, 120, 35);
+    thread::sleep(Duration::from_millis(350));
+    drain(&process, &mut output);
+    assert_eq!(
+        selected,
+        screen_text(&output, 120, 35),
+        "streaming output changed the selected viewport"
+    );
+    process
+        .write(b"\x1b[<4;14;1m\x1b")
+        .expect("release and clear selection");
+    thread::sleep(Duration::from_millis(350));
+    drain(&process, &mut output);
+    assert_ne!(
+        selected,
+        screen_text(&output, 120, 35),
+        "clearing selection did not resume live output"
+    );
+
+    // A release outside the pane must reach the app that received the press.
+    process.write(b"\x02c").expect("create a second tab");
+    assert!(
+        wait_for_screen(&process, &mut output, "+", 120, 35, Duration::from_secs(10)),
+        "second tab did not appear:\n{}",
+        tail(&output)
+    );
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "TICK_",
+            120,
+            35,
+            Duration::from_secs(30)
+        ),
+        "second app did not start"
+    );
+    process
+        .write(b"\x1b[<0;12;6M")
+        .expect("press in the app below the tab strip");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "ESC[<0;12;5M",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "press did not reach the second app"
+    );
+    process
+        .write(b"\x1b[<0;12;1m")
+        .expect("release over the tab strip");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "ESC[<0;12;1m",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "release on the tab strip left the app dragging"
+    );
+    process.write(b"\x02d").expect("detach");
+    assert_eq!(process.wait_for_exit(Duration::from_secs(15)), Some(0));
+}
+
+#[test]
+fn mouse_motion_does_not_snap_scrollback_to_live_output() {
+    let home = TestHome::new("tui-mouse-history");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mouse-app.ps1");
+    let reports = home.path.join("mouse-reports.log");
+    fs::write(home.path.join("config.toml"), format!(
+        "config_version = 1\nprefix = 'ctrl+b'\ndefault_profile = 'mouse-app'\n\n\
+         [profiles.mouse-app]\ncommand = '{}'\nargs = ['-NoLogo', '-NoProfile', '-File', '{}', '-MainScreen', '-ReportPath', '{}']\n",
+        powershell_path(), fixture.display(), reports.display()
+    )).expect("write main-screen mouse-app config");
+    let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
+    options.args = vec![
+        "--data-dir".into(),
+        home.path.to_string_lossy().into_owned(),
+    ];
+    let process = PtyProcess::spawn(options).expect("start main-screen mouse app");
+    let mut output = Vec::new();
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "HISTORY_119",
+            120,
+            35,
+            Duration::from_secs(30)
+        ),
+        "{}",
+        tail(&output)
+    );
+    process
+        .write(b"\x1b[<68;10;5M")
+        .expect("Shift+wheel into FACT history");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        drain(&process, &mut output);
+        let screen = screen_text(&output, 120, 35);
+        if screen.contains("HISTORY_") && !screen.contains("HISTORY_119") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Shift+wheel did not leave live output:\n{screen}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let scrolled = screen_text(&output, 120, 35);
+    process
+        .write(b"\x1b[<35;10;5M")
+        .expect("move the pointer over history");
+    thread::sleep(Duration::from_millis(250));
+    drain(&process, &mut output);
+    assert_eq!(
+        scrolled,
+        screen_text(&output, 120, 35),
+        "pointer motion reset scrollback to live output"
+    );
+    process
+        .write(b"\x1b[<0;1;1M\x1b[<32;10;1M\x1b[<0;10;1m")
+        .expect("select history without Shift");
+    assert!(
+        wait_for_screen(
+            &process,
+            &mut output,
+            "Selection paused",
+            120,
+            35,
+            Duration::from_secs(10)
+        ),
+        "history selection was forwarded to the app"
+    );
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        fs::read_to_string(&reports)
+            .expect("read fixture input log")
+            .is_empty(),
+        "history browsing sent mouse reports to the child"
+    );
+    process.write(b"\x1b").expect("clear selection");
+    thread::sleep(Duration::from_millis(250));
+    process.write(b"\x02d").expect("detach");
+    assert_eq!(process.wait_for_exit(Duration::from_secs(15)), Some(0));
 }
 
 #[test]

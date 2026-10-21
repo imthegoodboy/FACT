@@ -154,11 +154,14 @@ impl App {
             return;
         }
 
-        if let Some(buffer) = self.buffers.get(&pane.id) {
-            let selected = self
-                .selection
-                .as_ref()
-                .filter(|selection| selection.pane == pane.id);
+        let selected = self
+            .selection
+            .as_ref()
+            .filter(|selection| selection.pane == pane.id);
+        if let Some(buffer) = selected
+            .and_then(|selection| selection.buffer.as_ref())
+            .or_else(|| self.buffers.get(&pane.id))
+        {
             let buf = frame.buffer_mut();
             for y in 0..pane.content_rows.min(content.height) {
                 for x in 0..pane.content_cols.min(content.width) {
@@ -185,7 +188,9 @@ impl App {
             }
         }
 
-        self.render_cursor(frame, pane, content);
+        if selected.is_none() {
+            self.render_cursor(frame, pane, content);
+        }
         self.render_scrollbar(frame, main, pane);
         // A pane with a scrollbar rail signals a bell through an amber thumb.
         // Only panes too narrow or short for a rail use the reserved top-right
@@ -442,7 +447,18 @@ impl App {
                 }
             }
 
-            if let Some((message, _)) = &self.status {
+            let selection_status = self.selection.as_ref().map(|_| {
+                format!(
+                    "Selection paused  {} copy  Esc resume",
+                    self.keys.describe("copy")
+                )
+            });
+            if let Some(message) = self
+                .status
+                .as_ref()
+                .map(|(message, _)| message.as_str())
+                .or(selection_status.as_deref())
+            {
                 let available = right_edge.saturating_sub(area.x);
                 let message = fit(&format!(" {message} "), usize::from(available));
                 let width = (message.chars().count() as u16).min(available);

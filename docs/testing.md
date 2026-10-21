@@ -37,6 +37,22 @@ directory, use a real shell and terminate the daemon during cleanup.
 
 ## Requirement-to-test map
 
+The streaming regression `mouse_tracking_and_selection_work_while_an_app_is_streaming`
+starts `crates/fact-cli/tests/fixtures/mouse-app.ps1` as a real child behind two ConPTY layers.
+It asserts wheel, click, drag and release reports with mode 1002, selects text
+while a timer redraws the screen, checks the selected viewport stays stable,
+and verifies Esc resumes live output. The keyboard-only alternate-screen test
+also sends a real wheel event and requires PageUp instead of UpArrow. Client
+unit tests cover SGR/legacy encodings, coordinate limits and copying from a
+snapshot after the live cells change.
+`mouse_motion_does_not_snap_scrollback_to_live_output` uses the same fixture in
+main-screen mode with all-motion tracking. It checks Shift+wheel, pointer motion
+over history and selection of history without passing clicks to the app.
+The TUI scenarios share a test lock: each starts real console processes, and
+running all the eight-pane grids alongside the streaming fixtures can exhaust
+local Windows console/startup resources. Other crate tests retain their normal
+parallel execution.
+
 | Requirement | Test |
 | --- | --- |
 | `fact --grid 8` creates independent shells | `fact-daemon` integration test `grid_launches_independent_shells_and_streams_output` checks eight distinct PIDs and output routing. `fact-cli` test `grid_flag_starts_a_new_grid_instead_of_resuming_the_latest_session` proves a prior saved/live session cannot swallow the grid request. |
