@@ -434,15 +434,15 @@ fn scroll_mode_reads_history_without_sending_keys_to_the_shell() {
 #[test]
 fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
     const APP_MARKER: &str = "FACT_ALT_SCREEN_APP";
-    const KEY_MARKER: &str = "FACT_APP_KEY_PageUp";
+    const KEY_MARKER: &str = "FACT_APP_KEY";
 
     let home = TestHome::new("tui-app-scroll");
     let config = format!(
         "config_version = 1\nprefix = \"ctrl+b\"\ndefault_profile = \"alt-shell\"\n\n\
          [profiles.alt-shell]\ncommand = \"{}\"\nargs = ['-NoLogo', '-NoProfile', '-Command', \
          '$e=[char]27; [Console]::Write(\"$e[?1049h$e[2J$e[H{APP_MARKER}\"); \
-         while($true){{ $k=[Console]::ReadKey($true); \
-         [Console]::Write(\"$e[2J$e[H{KEY_MARKER}_$($k.Key)\") }}']\n",
+         $n=0; while($true){{ $k=[Console]::ReadKey($true); $n++; \
+         [Console]::Write(\"$e[2J$e[H{KEY_MARKER}_$($k.Key)_$n\") }}']\n",
         powershell_path()
     );
     fs::write(home.path.join("config.toml"), config).expect("write alt-screen config");
@@ -485,7 +485,7 @@ fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
         wait_for_screen(
             &process,
             &mut output,
-            "FACT_APP_KEY_PageUp_PageUp",
+            "FACT_APP_KEY_PageUp_1",
             120,
             35,
             Duration::from_secs(10)
@@ -515,7 +515,7 @@ fn full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys() {
         wait_for_screen(
             &process,
             &mut output,
-            KEY_MARKER,
+            "FACT_APP_KEY_PageUp_2",
             120,
             35,
             Duration::from_secs(10)
@@ -691,10 +691,11 @@ fn mouse_tracking_and_selection_work_while_an_app_is_streaming() {
 fn mouse_motion_does_not_snap_scrollback_to_live_output() {
     let home = TestHome::new("tui-mouse-history");
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mouse-app.ps1");
+    let reports = home.path.join("mouse-reports.log");
     fs::write(home.path.join("config.toml"), format!(
         "config_version = 1\nprefix = 'ctrl+b'\ndefault_profile = 'mouse-app'\n\n\
-         [profiles.mouse-app]\ncommand = '{}'\nargs = ['-NoLogo', '-NoProfile', '-File', '{}', '-MainScreen']\n",
-        powershell_path(), fixture.display()
+         [profiles.mouse-app]\ncommand = '{}'\nargs = ['-NoLogo', '-NoProfile', '-File', '{}', '-MainScreen', '-ReportPath', '{}']\n",
+        powershell_path(), fixture.display(), reports.display()
     )).expect("write main-screen mouse-app config");
     let mut options = SpawnOptions::new(fact_exe().to_string_lossy().into_owned(), 120, 35);
     options.args = vec![
@@ -755,6 +756,13 @@ fn mouse_motion_does_not_snap_scrollback_to_live_output() {
             Duration::from_secs(10)
         ),
         "history selection was forwarded to the app"
+    );
+    thread::sleep(Duration::from_millis(250));
+    assert!(
+        fs::read_to_string(&reports)
+            .expect("read fixture input log")
+            .is_empty(),
+        "history browsing sent mouse reports to the child"
     );
     process.write(b"\x1b").expect("clear selection");
     thread::sleep(Duration::from_millis(250));

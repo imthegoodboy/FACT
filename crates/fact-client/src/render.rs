@@ -447,15 +447,17 @@ impl App {
                 }
             }
 
-            let selection_status = self
-                .selection
-                .as_ref()
-                .map(|_| "Selection paused  Ctrl+C copy  Esc resume");
+            let selection_status = self.selection.as_ref().map(|_| {
+                format!(
+                    "Selection paused  {} copy  Esc resume",
+                    self.keys.describe("copy")
+                )
+            });
             if let Some(message) = self
                 .status
                 .as_ref()
                 .map(|(message, _)| message.as_str())
-                .or(selection_status)
+                .or(selection_status.as_deref())
             {
                 let available = right_edge.saturating_sub(area.x);
                 let message = fit(&format!(" {message} "), usize::from(available));

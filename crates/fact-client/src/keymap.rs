@@ -244,9 +244,7 @@ pub fn sgr_mouse(
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
     };
-    let modifier_code = u8::from(modifiers.contains(KeyModifiers::SHIFT)) * 4
-        + u8::from(modifiers.contains(KeyModifiers::ALT)) * 8
-        + u8::from(modifiers.contains(KeyModifiers::CONTROL)) * 16;
+    let modifier_code = mouse_modifiers(modifiers);
     let terminator = if pressed { 'M' } else { 'm' };
     format!(
         "\x1b[<{};{};{}{terminator}",
@@ -271,9 +269,7 @@ pub fn sgr_mouse_motion(
         MouseButton::Middle => 1,
         MouseButton::Right => 2,
     };
-    let modifier_code = u8::from(modifiers.contains(KeyModifiers::SHIFT)) * 4
-        + u8::from(modifiers.contains(KeyModifiers::ALT)) * 8
-        + u8::from(modifiers.contains(KeyModifiers::CONTROL)) * 16;
+    let modifier_code = mouse_modifiers(modifiers);
     format!(
         "\x1b[<{};{};{}M",
         base + 32 + modifier_code,
@@ -285,9 +281,7 @@ pub fn sgr_mouse_motion(
 
 pub fn sgr_wheel(up: bool, column: u16, row: u16, modifiers: KeyModifiers) -> Vec<u8> {
     let base = if up { 64 } else { 65 };
-    let modifier_code = u8::from(modifiers.contains(KeyModifiers::SHIFT)) * 4
-        + u8::from(modifiers.contains(KeyModifiers::ALT)) * 8
-        + u8::from(modifiers.contains(KeyModifiers::CONTROL)) * 16;
+    let modifier_code = mouse_modifiers(modifiers);
     format!(
         "\x1b[<{};{};{}M",
         base + modifier_code,

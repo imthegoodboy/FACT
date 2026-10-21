@@ -257,6 +257,7 @@ All notable changes to FACT are documented here. The format follows
   restart reopens the saved layout with fresh shells and no replay of old output.
   Unsaved work in a lost process cannot be recovered.
 
+[0.3.2]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.2
 [0.3.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.1
 [0.3.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.0
 [0.2.3]: https://github.com/imthegoodboy/FACT/releases/tag/v0.2.3

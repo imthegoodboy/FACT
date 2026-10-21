@@ -264,6 +264,34 @@ struct Selection {
     buffer: Option<PaneBuffer>,
 }
 
+/// Each button keeps its own originating pane during overlapping gestures.
+#[derive(Default)]
+struct AppMouseCapture {
+    buttons: [Option<u64>; 3],
+}
+
+impl AppMouseCapture {
+    fn index(button: MouseButton) -> usize {
+        match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        }
+    }
+
+    fn press(&mut self, button: MouseButton, pane: u64) {
+        self.buttons[Self::index(button)] = Some(pane);
+    }
+
+    fn pane(&self, button: MouseButton) -> Option<u64> {
+        self.buttons[Self::index(button)]
+    }
+
+    fn release(&mut self, button: MouseButton) -> Option<u64> {
+        self.buttons[Self::index(button)].take()
+    }
+}
+
 fn selection_text(buffers: &HashMap<u64, PaneBuffer>, selection: &Selection) -> Option<String> {
     let buffer = selection
         .buffer
@@ -681,7 +709,7 @@ struct App {
     drag_split: Option<DragSplit>,
     scroll_drag: Option<ScrollDrag>,
     scroll_mode: Option<u64>,
-    app_mouse_down: Option<(MouseButton, u64)>,
+    app_mouse_down: AppMouseCapture,
     status: Option<(String, Instant)>,
     exit_message: Option<String>,
     fatal: Option<anyhow::Error>,
@@ -719,7 +747,7 @@ impl App {
             drag_split: None,
             scroll_drag: None,
             scroll_mode: None,
-            app_mouse_down: None,
+            app_mouse_down: AppMouseCapture::default(),
             status: None,
             exit_message: None,
             fatal: None,
@@ -1051,6 +1079,8 @@ impl App {
                         pane,
                         data: data.repeat(count),
                     });
+                } else {
+                    self.send_app_scroll(pane, up, true);
                 }
             }
             _ => self.send_app_scroll(pane, up, true),
@@ -1127,6 +1157,10 @@ impl App {
             self.handle_scroll_key(key);
             return;
         }
+        if key.code == CKeyCode::Esc && self.selection.is_some() {
+            self.selection = None;
+            return;
+        }
         let Some(chord) = keymap::chord_for(key) else {
             return;
         };
@@ -1164,10 +1198,6 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            CKeyCode::Esc if self.selection.is_some() => {
-                self.selection = None;
-                return;
-            }
             CKeyCode::Char('v' | 'V') if control && !shift => {
                 self.paste_clipboard();
                 return;
@@ -1475,7 +1505,7 @@ impl App {
         self.drag_split = None;
         self.scroll_drag = None;
         self.scroll_mode = None;
-        self.app_mouse_down = None;
+        self.app_mouse_down = AppMouseCapture::default();
         self.overlay = None;
         self.set_status(format!("Attached to '{display_name}'."));
         self.resize_session();
@@ -1761,8 +1791,7 @@ impl App {
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         // Complete an app gesture even if release lands on the tab strip.
         if let MouseEventKind::Up(button) = mouse.kind {
-            if self.app_mouse_down.is_some_and(|(held, _)| held == button) {
-                let (_, pane) = self.app_mouse_down.take().unwrap();
+            if let Some(pane) = self.app_mouse_down.release(button) {
                 let content_y = mouse.row.saturating_sub(u16::from(self.tabs_visible()));
                 if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
                     self.forward_mouse_button(button, pane, x, y, false, mouse.modifiers);
@@ -1817,7 +1846,7 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
-                self.app_mouse_down = None;
+                self.app_mouse_down.release(MouseButton::Left);
                 if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
                     let _ = self.send(Command::FocusPane {
                         pane: geometry.pane,
@@ -1883,7 +1912,7 @@ impl App {
                         && view.scroll_offset == 0
                         && !mouse.modifiers.contains(KeyModifiers::SHIFT);
                     if app_mouse {
-                        self.app_mouse_down = Some((MouseButton::Left, pane));
+                        self.app_mouse_down.press(MouseButton::Left, pane);
                         self.forward_mouse_button(
                             MouseButton::Left,
                             pane,
@@ -1917,7 +1946,7 @@ impl App {
                 if app_mouse {
                     if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
                         self.selection = None;
-                        self.app_mouse_down = Some((MouseButton::Right, pane));
+                        self.app_mouse_down.press(MouseButton::Right, pane);
                         self.forward_mouse_button(
                             MouseButton::Right,
                             pane,
@@ -1961,7 +1990,7 @@ impl App {
                         });
                     if tracks && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
                         self.selection = None;
-                        self.app_mouse_down = Some((MouseButton::Middle, pane));
+                        self.app_mouse_down.press(MouseButton::Middle, pane);
                         self.forward_mouse_button(
                             MouseButton::Middle,
                             pane,
@@ -1989,16 +2018,14 @@ impl App {
                         return;
                     }
                 }
-                if let Some((held, pane)) = self.app_mouse_down {
-                    let drags = held == button
-                        && self
-                            .frame
-                            .as_ref()
-                            .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
-                            .is_some_and(|view| {
-                                view.modes & (pane_modes::MOUSE_DRAG | pane_modes::MOUSE_MOTION)
-                                    != 0
-                            });
+                if let Some(pane) = self.app_mouse_down.pane(button) {
+                    let drags = self
+                        .frame
+                        .as_ref()
+                        .and_then(|frame| frame.panes.iter().find(|view| view.id == pane))
+                        .is_some_and(|view| {
+                            view.modes & (pane_modes::MOUSE_DRAG | pane_modes::MOUSE_MOTION) != 0
+                        });
                     if drags {
                         if let Some((x, y)) = self.pane_local(pane, mouse.column, content_y) {
                             self.send_mouse(
@@ -2526,6 +2553,20 @@ mod tests {
         };
         buffers.get_mut(&1).unwrap().cells.fill(cell('x'));
         assert_eq!(selection_text(&buffers, &selection).unwrap(), "abcde");
+    }
+
+    #[test]
+    fn overlapping_mouse_buttons_retain_their_original_panes() {
+        let mut capture = AppMouseCapture::default();
+        capture.press(MouseButton::Right, 7);
+        capture.press(MouseButton::Middle, 8);
+        capture.release(MouseButton::Left); // A local selection or rail press.
+        capture.press(MouseButton::Left, 9);
+        assert_eq!(capture.release(MouseButton::Right), Some(7));
+        assert_eq!(capture.pane(MouseButton::Middle), Some(8));
+        assert_eq!(capture.release(MouseButton::Left), Some(9));
+        assert_eq!(capture.release(MouseButton::Middle), Some(8));
+        assert_eq!(capture.release(MouseButton::Right), None);
     }
 
     #[test]

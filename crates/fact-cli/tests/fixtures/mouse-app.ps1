@@ -1,5 +1,5 @@
 # A deterministic VT application. No model, network or user data is used.
-param([switch]$MainScreen)
+param([switch]$MainScreen, [string]$ReportPath = "")
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -7,7 +7,8 @@ public static class MouseApp {
     [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int n);
     [DllImport("kernel32.dll")] static extern bool SetConsoleMode(IntPtr h, uint mode);
     [DllImport("kernel32.dll")] static extern bool ReadFile(IntPtr h, byte[] data, uint size, out uint read, IntPtr overlapped);
-    public static void Run(bool mainScreen) {
+    public static void Run(bool mainScreen, string reportPath) {
+        if (reportPath.Length > 0) System.IO.File.WriteAllText(reportPath, "");
         var input = GetStdHandle(-10);
         SetConsoleMode(input, 0x0200);
         if (mainScreen) {
@@ -27,6 +28,7 @@ public static class MouseApp {
             while ((end = pending.IndexOfAny(new char[] {'M', 'm'})) >= 0) {
                 var report = pending.Substring(0, end + 1);
                 pending = pending.Substring(end + 1);
+                if (reportPath.Length > 0) System.IO.File.AppendAllText(reportPath, report);
                 Console.Write("\x1b[2;1H" + report.Replace("\x1b", "ESC") + "                ");
             }
         }
@@ -34,4 +36,4 @@ public static class MouseApp {
     }
 }
 '@
-[MouseApp]::Run($MainScreen.IsPresent)
+[MouseApp]::Run($MainScreen.IsPresent, $ReportPath)

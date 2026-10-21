@@ -38,7 +38,7 @@ directory, use a real shell and terminate the daemon during cleanup.
 ## Requirement-to-test map
 
 The streaming regression `mouse_tracking_and_selection_work_while_an_app_is_streaming`
-starts `tests/fixtures/mouse-app.ps1` as a real child behind two ConPTY layers.
+starts `crates/fact-cli/tests/fixtures/mouse-app.ps1` as a real child behind two ConPTY layers.
 It asserts wheel, click, drag and release reports with mode 1002, selects text
 while a timer redraws the screen, checks the selected viewport stays stable,
 and verifies Esc resumes live output. The keyboard-only alternate-screen test
