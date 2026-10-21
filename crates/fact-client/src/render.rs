@@ -11,9 +11,8 @@ use ratatui::layout::Position;
 
 use crate::{
     action_label, filtered_palette, fit_text as fit, help_lines, minimized_tray_rect, new_tab_rect,
-    palette_items, pane_scroll_mode, scrollbar_geometry, tab_ranges, utc_clock, App, ContextState,
-    HelpState, Overlay, PaletteState, PromptKind, PromptState, ScrollbarMode, SearchState,
-    SessionsState,
+    palette_items, pane_scroll_mode, tab_ranges, utc_clock, App, ContextState, HelpState, Overlay,
+    PaletteState, PromptKind, PromptState, ScrollMode, SearchState, SessionsState,
 };
 
 impl App {
@@ -128,11 +127,10 @@ impl App {
             return;
         }
 
-        let bell = self.bells.contains(&pane.id);
         let content = Rect::new(
             slot.x,
             slot.y,
-            slot.width.saturating_sub(1).min(pane.content_cols),
+            slot.width.min(pane.content_cols),
             slot.height.min(pane.content_rows),
         )
         .intersection(main);
@@ -192,20 +190,6 @@ impl App {
             self.render_cursor(frame, pane, content);
         }
         self.render_scrollbar(frame, main, pane);
-        // A pane with a scrollbar rail signals a bell through an amber thumb.
-        // Only panes too narrow or short for a rail use the reserved top-right
-        // cell.
-        if bell && scrollbar_geometry(pane).is_none() && slot.width > 0 && slot.height > 0 {
-            let buffer = frame.buffer_mut();
-            buffer[(slot.x + slot.width - 1, slot.y)]
-                .set_symbol("•")
-                .set_style(
-                    Style::default()
-                        .bg(self.theme.terminal_bg)
-                        .fg(self.theme.warning),
-                );
-        }
-
         if !pane.alive {
             let code = pane
                 .exit_code
@@ -266,7 +250,7 @@ impl App {
     }
 
     fn render_scrollbar(&self, frame: &mut Frame, main: Rect, pane: &PaneView) {
-        let Some(geometry) = scrollbar_geometry(pane) else {
+        let Some(geometry) = self.visible_scrollbar(pane) else {
             return;
         };
         let track = Rect::new(
@@ -310,25 +294,6 @@ impl App {
         } else {
             self.theme.title_fg
         };
-        if geometry.mode.is_app() {
-            // A full-screen app owns its scroll position. Draw a centred grip
-            // with paging caps instead of a lying thumb position.
-            let cap_fg = if bell {
-                self.theme.warning
-            } else if pane.focused {
-                self.theme.accent
-            } else {
-                self.theme.muted
-            };
-            if track.height >= 3 {
-                buffer[(track.x, track.y)]
-                    .set_symbol("▴")
-                    .set_style(Style::default().bg(self.theme.title_bg).fg(cap_fg));
-                buffer[(track.x, track.bottom().saturating_sub(1))]
-                    .set_symbol("▾")
-                    .set_style(Style::default().bg(self.theme.title_bg).fg(cap_fg));
-            }
-        }
         for y in start..end {
             buffer[(track.x, y)]
                 .set_symbol("▐")
@@ -424,10 +389,10 @@ impl App {
             }) {
                 let available = right_edge.saturating_sub(area.x);
                 let message = match mode {
-                    ScrollbarMode::History => {
+                    ScrollMode::History => {
                         format!(" SCROLL {offset}/{history}  Esc ")
                     }
-                    ScrollbarMode::App => " APP SCROLL  PgUp/PgDn  Esc ".to_string(),
+                    ScrollMode::App => " APP SCROLL  PgUp/PgDn  Esc ".to_string(),
                 };
                 let message = fit(&message, usize::from(available));
                 let width = (message.chars().count() as u16).min(available);
@@ -866,20 +831,9 @@ impl App {
     }
 
     fn render_context(&self, frame: &mut Frame, area: Rect, context: &ContextState) {
-        let width = 34u16.min(area.width.saturating_sub(2));
-        if width < 8 {
+        let Some((rect, start)) = context.layout(area, &self.keys) else {
             return;
-        }
-        let height = (context.actions.len() as u16 + 2).min(area.height.saturating_sub(2));
-        if height < 3 {
-            return;
-        }
-        let x = context.column.min(area.right().saturating_sub(width));
-        let y = context
-            .row
-            .min(area.bottom().saturating_sub(height))
-            .max(area.y);
-        let rect = Rect::new(x, y, width, height);
+        };
         frame.render_widget(Clear, rect);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -895,10 +849,6 @@ impl App {
             return;
         }
         let visible = usize::from(inner.height);
-        let start = context
-            .selected
-            .saturating_sub(visible.saturating_sub(1))
-            .min(context.actions.len().saturating_sub(1));
         let mut lines = Vec::new();
         for (index, action) in context.actions.iter().enumerate().skip(start).take(visible) {
             let selected = index == context.selected;

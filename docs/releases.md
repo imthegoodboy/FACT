@@ -149,8 +149,9 @@ markers.
    the daemon and resumes to check for a fresh shell PID, no old output and no
    recovery modal; `scroll_mode_reads_history_without_sending_keys_to_the_shell`
    covers keyboard scrolling, and
-   `full_screen_app_keeps_a_visible_rail_and_receives_app_scroll_keys` covers
-   the alternate-screen rail and app paging. Also perform the manual checks in
+   `full_screen_app_has_no_fact_rail_and_receives_app_scroll_keys` covers
+   the absence of a FACT rail over full-screen apps and app paging. Also perform
+   the manual checks in
    [testing.md](testing.md#manual-smoke-check) for the final release sign-off.
 
 Do not create a release manually. A release without the gate run is not a FACT

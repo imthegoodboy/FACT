@@ -3,6 +3,30 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.3.3] - 2026-10-21
+
+### Changed
+
+- Wire protocol is now version 6. The installer stops the previous daemon;
+  saved layouts reopen with fresh shells on the next launch.
+- Shell history scrollbars appear only near the right edge on hover and remain
+  visible during a drag. Alternate-screen and mouse-controlled applications get
+  no FACT scrollbar. Panes use their full width, with protocol 6 preventing
+  older peers from clipping the last column. Wheel and keyboard scrolling remain.
+
+### Fixed
+
+- Context-menu actions now respond to mouse clicks, clicks outside dismiss the
+  menu, and the wheel navigates menus, help, the palette and session lists.
+  Focus loss clears hover state; bell cues no longer overwrite terminal
+  content. Search results also accept wheel navigation.
+  The menu fits full action labels and configured shortcuts when space allows.
+- Exit notices wait for all process output to drain, preserving the final
+  result even when a busy daemon has several ticks of output queued.
+- Pastes up to the advertised 4 MiB limit are queued as one ordered operation,
+  including bracket markers, without increasing the input queue's byte budget.
+  Pasting returns a history viewport to live input even without new output.
+
 ## [0.3.2] - 2026-10-21
 
 ### Fixed
@@ -257,6 +281,7 @@ All notable changes to FACT are documented here. The format follows
   restart reopens the saved layout with fresh shells and no replay of old output.
   Unsaved work in a lost process cannot be recovered.
 
+[0.3.3]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.3
 [0.3.2]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.2
 [0.3.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.1
 [0.3.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.0

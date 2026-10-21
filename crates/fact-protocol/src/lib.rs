@@ -14,10 +14,13 @@ use serde::{Deserialize, Serialize};
 /// `ZoomPane { zoomed: false }` restore-to-full-grid semantics; an older daemon
 /// would leave a small viewport stuck in focused-pane mode. Version 5 removes
 /// cold-recovery metadata fields; saved layouts now always start fresh shells.
-pub const PROTOCOL_VERSION: u16 = 5;
+/// Version 6 gives the terminal the full pane width; scrollbars overlay on hover.
+pub const PROTOCOL_VERSION: u16 = 6;
 pub const MAX_WIRE_FRAME: usize = 64 * 1024 * 1024;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
+pub const BRACKETED_PASTE_START: &str = "\x1b[200~";
+pub const BRACKETED_PASTE_END: &str = "\x1b[201~";
 pub const MAX_SESSIONS: usize = 128;
 pub const MAX_GRID_PANES: u8 = 32;
 pub const MAX_SEARCH_QUERY: usize = 256;

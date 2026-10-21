@@ -1,8 +1,8 @@
 //! Split-tree layout engine.
 //!
 //! A tab owns a binary tree of panes. Slots tile the content area with a
-//! one-cell gutter around every split. A slot's last column is reserved for its
-//! scrollbar; every other cell belongs to the terminal grid. Very small
+//! one-cell gutter around every split. Scrollbars overlay the right edge on
+//! hover; every cell belongs to the terminal grid. Very small
 //! viewports switch to focused-pane mode instead of shrinking every pane below a
 //! readable size.
 
@@ -615,12 +615,7 @@ impl SessionLayout {
                 .filter(|p| Some(*p) != focused)
                 .collect();
             let panes = if let Some(focus) = focused {
-                let content = if options.cols > 1 {
-                    // Keep the rightmost column free for the pane scrollbar.
-                    Rect::new(0, 0, options.cols.saturating_sub(1).max(1), options.rows)
-                } else {
-                    Rect::new(0, 0, options.cols, options.rows)
-                };
+                let content = full_rect;
                 vec![PaneSlot {
                     pane: focus,
                     slot: full_rect,
@@ -817,14 +812,7 @@ fn layout_node(
             slots.push(PaneSlot {
                 pane: *pane,
                 slot: rect,
-                content: Rect::new(
-                    rect.x,
-                    rect.y,
-                    // The last column belongs to the scrollbar so terminal
-                    // output is never painted underneath it.
-                    rect.width.saturating_sub(1).max(1),
-                    rect.height,
-                ),
+                content: rect,
                 focused: false,
             });
         }
@@ -1149,16 +1137,16 @@ mod tests {
     }
 
     #[test]
-    fn scrollbar_column_is_not_part_of_terminal_content() {
+    fn terminal_content_uses_the_full_pane_width() {
         let layout = SessionLayout::new(1, &[1]);
         let result = layout.layout(opts(80, 24));
         assert_eq!(result.panes.len(), 1);
         let slot = &result.panes[0];
         assert_eq!(slot.slot.width, 80);
         assert_eq!(slot.slot.height, 24);
-        assert_eq!(slot.content.width, 79);
+        assert_eq!(slot.content.width, 80);
         assert_eq!(slot.content.height, 24);
-        assert_eq!(slot.content.x + slot.content.width, 79);
+        assert_eq!(slot.content.x + slot.content.width, 80);
         assert_eq!(slot.slot.x + slot.slot.width, 80);
     }
 

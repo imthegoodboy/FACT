@@ -143,3 +143,50 @@ fn no_shell_is_left_behind_after_kill() {
     // PIDs can be reused, so only check that the process object reported exit.
     assert!(!process.is_alive(), "pid {pid} should no longer be running");
 }
+
+#[test]
+fn killing_a_pane_with_unread_output_does_not_deadlock() {
+    const CHILD: &str = "FACT_TEST_OUTPUT_BACKPRESSURE";
+    if std::env::var_os(CHILD).is_some() {
+        let mut options = SpawnOptions::new(cmd(), 100, 30);
+        options.args = vec![
+            "/D".into(),
+            "/Q".into(),
+            "/C".into(),
+            "for /L %i in (1,1,1000000) do @echo 0123456789012345678901234567890123456789".into(),
+        ];
+        let process = PtyProcess::spawn(options).expect("start noisy pane");
+        std::thread::sleep(Duration::from_secs(3));
+        process.kill(); // Leave output unread while terminating the noisy pane.
+        assert!(process.wait_for_exit(Duration::from_secs(5)).is_some());
+        drop(process);
+        return;
+    }
+    // Isolate the regression so a deadlocked ClosePseudoConsole cannot hang CI.
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "killing_a_pane_with_unread_output_does_not_deadlock",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("start isolated shutdown regression");
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(
+                status.success(),
+                "shutdown regression child failed: {status}"
+            );
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("stop deadlocked regression child");
+            let _ = child.wait();
+            panic!("closing a pane with a full unread output queue deadlocked");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
