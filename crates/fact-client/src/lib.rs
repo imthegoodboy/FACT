@@ -1605,7 +1605,9 @@ impl App {
             Overlay::Help(mut help) => {
                 let total = help_lines(&self.keys).len();
                 match key.code {
-                    CKeyCode::Esc | CKeyCode::F(1) => {}
+                    // Esc is reserved for stopping agent CLIs in the focused
+                    // pane, so it must not dismiss help. F1 opens and closes it.
+                    CKeyCode::F(1) => {}
                     CKeyCode::Up => {
                         help.scroll = help.scroll.saturating_sub(1);
                         self.overlay = Some(Overlay::Help(help));

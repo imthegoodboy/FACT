@@ -3,6 +3,13 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [Unreleased]
+
+### Changed
+
+- `Esc` no longer dismisses the `F1` help overlay; press `F1` again to close
+  it, leaving `Esc` for the focused pane rather than FACT help.
+
 ## [0.4.0] - 2026-10-21
 
 ### Changed

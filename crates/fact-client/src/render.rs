@@ -507,13 +507,9 @@ impl App {
             body,
         );
         let footer = if max_scroll > 0 {
-            format!(
-                "↑↓ scroll ({}/{}) · Esc or F1 closes",
-                scroll + 1,
-                max_scroll + 1
-            )
+            format!("↑↓ scroll ({}/{}) · F1 closes", scroll + 1, max_scroll + 1)
         } else {
-            "Esc or F1 closes".to_string()
+            "F1 closes".to_string()
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(

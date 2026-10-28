@@ -203,7 +203,7 @@ Direct keys and mouse gestures:
 | `Ctrl+C` | Copy the visible selection. With no selection it is sent to the shell as normal Ctrl+C. |
 | `Ctrl+V`, `Ctrl+Insert`, `Shift+Insert` | Paste clipboard text into the focused pane. |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Remappable copy / paste bindings. |
-| `Esc` | Clear a selection overlay, close FACT overlays, or leave scroll mode and return to live output. |
+| `Esc` | Clear a selection overlay, close FACT overlays (help closes with `F1`), or leave scroll mode and return to live output. |
 | Drag in a pane | Select text. |
 | Double-click / triple-click | Select the word / visual line under the pointer. |
 | `Shift`+drag | Select text even when the application requested mouse reporting. |
