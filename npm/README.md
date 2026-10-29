@@ -12,7 +12,8 @@ npm install -g fact-terminal
 fact                  # one shell
 fact --grid 4         # four shells in a grid
 fact doctor           # check the terminal, config, PATH and agent CLIs
-fact wallpaper set C:\Pictures\sky.jpg   # background image (Windows Terminal)
+fact wallpaper set C:\Pictures\sky.jpg   # picture behind every pane, any terminal
+fact wallpaper set C:\Videos\rain.mp4   # looping video (needs ffmpeg)
 ```
 
 Inside FACT the prefix is `Ctrl+Space`; press `F1` for every shortcut.

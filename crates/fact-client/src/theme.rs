@@ -88,8 +88,9 @@ impl Theme {
             title_focus_fg: Color::Rgb(248, 249, 251),
             status_bg: Color::Rgb(0, 0, 0),
             status_fg: Color::Rgb(157, 163, 173),
-            gutter: Color::Rgb(38, 41, 47),
-            selection: Color::Rgb(58, 63, 73),
+            gutter: Color::Rgb(58, 62, 70),
+            // A clear blue, readable over black and over wallpapers.
+            selection: Color::Rgb(38, 79, 120),
             warning: Color::Rgb(242, 189, 99),
             error: Color::Rgb(244, 112, 112),
             terminal_bg: Color::Rgb(0, 0, 0),

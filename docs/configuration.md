@@ -279,30 +279,45 @@ line there.
 
 ## Wallpaper
 
-A console program cannot paint images, but Windows Terminal can, and FACT can
-leave its background to Windows Terminal:
+FACT paints a picture or a looping video behind every pane itself, so it shows
+in any terminal: Windows Terminal, the classic console, VS Code and others.
 
 ```powershell
 fact wallpaper set C:\Pictures\sky.jpg               # 35% strength, cover the window
 fact wallpaper set .\forest.png --opacity 20 --fit fit
+fact wallpaper set C:\Videos\rain.mp4                # loops; needs ffmpeg on PATH
 fact wallpaper                                       # show the current wallpaper
 fact wallpaper clear                                 # remove it again
-wt -p FACT                                           # open FACT with the wallpaper
 ```
 
-`set` copies the image to `%LOCALAPPDATA%\FACT\wallpaper\` and writes a Windows
-Terminal *fragment* (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`)
-that adds a "FACT" profile with the image and starts `fact --transparent`. Your
-own `settings.json` is never edited. Restart Windows Terminal once after the
-first `set` so it loads the new profile. `--fit` accepts `fill` (default),
-`fit`, `stretch` and `center`; `--opacity` accepts 5-100 or 0.05-1.0. Set
-`FACT_WT_FRAGMENTS_DIR` to use another fragments folder (portable Windows
-Terminal).
+- **Images** (png, jpg, gif, bmp, webp, tif) are copied to
+  `%LOCALAPPDATA%\FACT\wallpaper\`. Animated GIFs loop.
+- **Videos** (mp4, mkv, webm, mov, avi, m4v, wmv, flv) play from where they are,
+  in a loop, at their own colors. ffmpeg decodes them and streams frames scaled
+  to the window's cell grid at 24 fps, the finest detail a terminal can show
+  behind text. Install ffmpeg with `winget install ffmpeg`, or point
+  `FACT_FFMPEG` at `ffmpeg.exe`.
+- FACT draws two image pixels per cell and darkens them by `--opacity` (5-100
+  or 0.05-1.0) so text stays readable. Only cells at the default background are
+  painted: the cursor, selections, panels and program colors stay on top.
+- Animation pauses while the FACT window is unfocused, so a video costs nothing
+  in the background.
+- `--fit` accepts `fill` (default, cover and crop), `fit` (letterbox),
+  `stretch` and `center`.
 
-With `background = "transparent"` (or `--transparent`) every pane's default
-background is transparent, so any background image or acrylic configured in
-your terminal shows through. Panels, selection and the status line stay opaque.
-The wallpaper costs nothing at runtime: Windows Terminal draws it.
+For images, `set` also writes a Windows Terminal *fragment*
+(`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`) that adds
+a "FACT" profile with the image. Opened with `wt -p FACT`, Windows Terminal draws
+the image at full resolution and FACT stays transparent on top. Your own
+`settings.json` is never edited; FACT only updates its timestamp so Windows
+Terminal reloads at once. Set `FACT_WT_FRAGMENTS_DIR` for a portable Windows
+Terminal.
+
+With `background = "transparent"` (or `--transparent`) FACT paints no wallpaper
+and leaves every default background transparent, so a background image or
+acrylic configured in your terminal shows through. A FACT started inside a
+transparent or wallpapered FACT pane becomes transparent too, so nested
+workspaces never cover the outer wallpaper.
 
 ## Examples
 

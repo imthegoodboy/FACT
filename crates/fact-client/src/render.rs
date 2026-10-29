@@ -54,6 +54,9 @@ impl App {
         if self.overlay.is_some() {
             self.render_overlay(frame, area);
         }
+        if let Some(wallpaper) = &self.wallpaper {
+            wallpaper.borrow_mut().paint(frame.buffer_mut(), area);
+        }
     }
 
     fn render_tabs(&self, frame: &mut Frame, area: Rect) {
@@ -300,6 +303,16 @@ impl App {
             buffer[(x, y)]
                 .set_symbol(glyph)
                 .set_style(style.fg(self.theme.accent));
+        } else if pane.cursor.shape == CursorShape::Block {
+            // Solid explicit colors, not reverse video: over a wallpaper the
+            // host terminal draws reversed default colors as transparent, which
+            // made the cursor disappear.
+            buffer[(x, y)].set_style(
+                style
+                    .bg(self.theme.terminal_fg)
+                    .fg(self.theme.bg)
+                    .remove_modifier(Modifier::REVERSED),
+            );
         } else {
             buffer[(x, y)].set_style(style.add_modifier(modifier));
         }
@@ -319,15 +332,13 @@ impl App {
         if track.width == 0 || track.height == 0 {
             return;
         }
+        // A thin overlay: a faint rail and a solid handle drawn on top of the
+        // pane's own background, so wallpapers and colors stay visible.
         let buffer = frame.buffer_mut();
-        buffer.set_style(
-            track,
-            Style::default()
-                .bg(self.theme.title_bg)
-                .fg(self.theme.gutter),
-        );
         for y in track.y..track.bottom() {
-            buffer[(track.x, y)].set_symbol(" ");
+            let cell = &mut buffer[(track.x, y)];
+            cell.set_char('│');
+            cell.set_fg(self.theme.gutter);
         }
         let thumb_top = geometry.thumb_y.max(geometry.track.y).min(
             geometry
@@ -342,18 +353,23 @@ impl App {
             .min(geometry.track.y.saturating_add(geometry.track.height));
         let start = main.y.saturating_add(thumb_top).max(track.y);
         let end = main.y.saturating_add(thumb_bottom).min(track.bottom());
-        let bell = self.bells.contains(&pane.id);
-        let thumb_fg = if bell {
+        let dragging = self
+            .scroll_drag
+            .as_ref()
+            .is_some_and(|drag| drag.geometry.pane == pane.id);
+        let thumb_fg = if self.bells.contains(&pane.id) {
             self.theme.warning
-        } else if pane.focused {
+        } else if dragging {
             self.theme.accent
-        } else {
+        } else if pane.focused {
             self.theme.title_fg
+        } else {
+            self.theme.muted
         };
         for y in start..end {
-            buffer[(track.x, y)]
-                .set_symbol("▐")
-                .set_style(Style::default().bg(self.theme.terminal_bg).fg(thumb_fg));
+            let cell = &mut buffer[(track.x, y)];
+            cell.set_char('┃');
+            cell.set_fg(thumb_fg);
         }
     }
 
@@ -468,18 +484,7 @@ impl App {
                 }
             }
 
-            let selection_status = self.selection.as_ref().map(|_| {
-                format!(
-                    "Selection paused  {} copy  Esc resume",
-                    self.keys.describe("copy")
-                )
-            });
-            if let Some(message) = self
-                .status
-                .as_ref()
-                .map(|(message, _)| message.as_str())
-                .or(selection_status.as_deref())
-            {
+            if let Some(message) = self.status.as_ref().map(|(message, _)| message.as_str()) {
                 let available = right_edge.saturating_sub(area.x);
                 let message = fit(&format!(" {message} "), usize::from(available));
                 let width = (message.chars().count() as u16).min(available);

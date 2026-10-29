@@ -3,6 +3,34 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.6.0] - 2026-10-30
+
+### Added
+
+- **Wallpaper everywhere.** FACT paints the wallpaper itself, two pixels per
+  cell, so it shows in every terminal (Windows Terminal, the classic console,
+  VS Code), not only in Windows Terminal's FACT profile. Text, the cursor,
+  selections and program colors stay on top.
+- **Video wallpapers.** `fact wallpaper set clip.mp4` (mp4, mkv, webm, mov, avi,
+  m4v, wmv, flv) plays the video in a loop at its own colors, streamed through
+  ffmpeg at the window's cell resolution. Animated GIFs loop too. Playback
+  pauses while the window is unfocused.
+- `fact wallpaper set` and `clear` make Windows Terminal reload at once; no
+  restart is needed.
+
+### Changed
+
+- The "Selection paused" hint is gone; selections use a clearer blue.
+- The hover scrollbar is a thin rail with a solid handle drawn over the pane,
+  instead of an opaque bar.
+- The block cursor uses explicit colors, so it stays visible over wallpapers.
+- A FACT started inside a transparent or wallpapered FACT pane is transparent
+  too, instead of covering the wallpaper with a black block.
+- FACT renders colors even when `NO_COLOR` is set; panes still inherit it.
+- Files left by FACT 0.3 (`sessions.db`, `runtime`, `logs`) are removed on
+  launch. FACT stores no database or history.
+- The GitHub language bar now reflects the Rust code only.
+
 ## [0.5.1] - 2026-10-30
 
 ### Fixed
@@ -380,7 +408,8 @@ All notable changes to FACT are documented here. The format follows
   restart reopens the saved layout with fresh shells and no replay of old output.
   Unsaved work in a lost process cannot be recovered.
 
-[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.6.0
 [0.5.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.5.1
 [0.5.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.5.0
 [0.4.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.4.0
