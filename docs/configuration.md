@@ -29,7 +29,7 @@ against the process working directory.
 | Path | Contents |
 | --- | --- |
 | `config.toml` | This configuration. |
-| `wallpaper\` | FACT's copy of the image from `fact wallpaper set`, if you use one. |
+| `wallpaper\` | Only after `fact wallpaper set`: FACT's copy of an image and its `settings.json`. Videos stay where they are. |
 | No other paths | FACT creates no database, log, runtime identity, saved layout or exports. |
 
 FACT does not accept a `--data-dir` option. The base directory only locates the
@@ -229,8 +229,9 @@ Additional interaction that is not a remappable action:
   mode: `codex --no-alt-screen`, `/tui default` in Claude Code, or
   `OTUI_USE_ALTERNATE_SCREEN=false` for OpenCode.
 - In a window too small for the configured `min_pane_width`/`min_pane_height`,
-  FACT normally shows only the focused pane. `Alt+N` or the `show_all` action
-  keeps the whole grid visible even below those limits; `Alt+M` maximizes again.
+  FACT normally shows only the focused pane. The `show_all` action (prefix then
+  `N`, or `Alt+N` with `alt_shortcuts = true`) keeps the whole grid visible even
+  below those limits; `maximize` (prefix then `M`) focuses one pane again.
 - Drag a split gutter with the mouse to resize; double-click a gutter to
   balance every pane in the tab.
 - `Alt`+drag a pane onto another pane to swap them, or onto a tab in the tab
@@ -290,16 +291,20 @@ fact wallpaper                                       # show the current wallpape
 fact wallpaper clear                                 # remove it again
 ```
 
-- **Images** (png, jpg, jpeg, gif, bmp, webp) are copied to
-  `%LOCALAPPDATA%\FACT\wallpaper\`. Animated GIFs loop.
+- **Images** (png, jpg, jpeg, gif, bmp, webp) are copied to the `wallpaper\`
+  folder next to `config.toml` (normally `%LOCALAPPDATA%\FACT\wallpaper\`).
+  Animated GIFs loop.
 - **Videos** (mp4, mkv, webm, mov, avi, m4v, wmv, flv) play from where they are,
   in a loop, at their own colors. ffmpeg decodes them and streams frames scaled
   to the window's cell grid at 24 fps, the finest detail a terminal can show
   behind text. Install ffmpeg with `winget install ffmpeg`, or point
   `FACT_FFMPEG` at `ffmpeg.exe`.
-- FACT draws two image pixels per cell and darkens them by `--opacity` (5-100
-  or 0.05-1.0) so text stays readable. Only cells at the default background are
-  painted: the cursor, selections, panels and program colors stay on top.
+- Where FACT paints the wallpaper itself it uses four pixels per cell (2x2
+  quadrant block characters) in Windows Terminal, VS Code and WezTerm, and two
+  (`▀` half blocks) in the classic console, whose fonts may lack quadrants. The
+  image fades toward the theme's background by `--opacity` (5-100 or 0.05-1.0)
+  so text stays readable. Only cells at the default background are painted:
+  the cursor, selections, panels and program colors stay on top.
 - Animation pauses while the FACT window is unfocused, so a video costs nothing
   in the background.
 - `--fit` accepts `fill` (default, cover and crop), `fit` (letterbox),
@@ -310,8 +315,11 @@ fact wallpaper clear                                 # remove it again
 
 For images, `set` also writes a Windows Terminal *fragment*
 (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`) that adds
-a "FACT" profile with the image. Opened with `wt -p FACT`, Windows Terminal draws
-the image at full resolution and FACT stays transparent on top. Your own
+a "FACT" profile with the image, where Windows Terminal draws it at full
+resolution and FACT stays transparent on top. A plain `fact` typed in any other
+Windows Terminal tab opens a FACT tab with that profile; `fact --here` starts in
+the current tab instead. `wt -p FACT` and the FACT entry in the tab menu open it
+too. Your own
 `settings.json` is never edited; FACT only updates its timestamp so Windows
 Terminal reloads at once. Set `FACT_WT_FRAGMENTS_DIR` for a portable Windows
 Terminal.

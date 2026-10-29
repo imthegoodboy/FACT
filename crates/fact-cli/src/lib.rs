@@ -147,7 +147,7 @@ pub fn run() -> Result<i32> {
 /// Videos are always painted by FACT (Windows Terminal cannot play them).
 /// Returns `false`, and FACT starts in place, whenever that is not possible.
 fn open_wallpaper_tab(paths: &Paths, cli: &Cli) -> bool {
-    if std::env::var_os("WT_SESSION").is_none()
+    if !fact_client::in_windows_terminal()
         || std::env::var_os("FACT").is_some()
         || wallpaper::in_fact_profile()
     {

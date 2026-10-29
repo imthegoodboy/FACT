@@ -56,8 +56,9 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
   the keyboard with the prefix and `Shift`+arrows.
 - **Wallpaper and video.** `fact wallpaper set sky.jpg` or `fact wallpaper set
   clip.mp4` puts a picture or a looping video behind every pane, in any
-  terminal: Windows Terminal, the classic console, VS Code. Text, the cursor
-  and selections stay readable on top.
+  terminal: Windows Terminal, the classic console, VS Code. In Windows Terminal
+  pictures are full resolution; elsewhere FACT paints them with block
+  characters. Text, the cursor and selections stay readable on top.
 - **Minimal black TUI.** Plain terminal panes with no title rows, buttons or
   permanent status bar. A one-line tab strip appears only when the workspace
   has more than one tab. Panes have a scrollbar on hover in shells, a steady
@@ -307,7 +308,7 @@ FACT adds no scrollbar to alternate-screen or mouse-controlled agent UIs.
 
 | Command | Purpose |
 | --- | --- |
-| `fact [--grid N] [--profile NAME] [--cwd DIR] [--transparent] [--config FILE]` | Start a fresh workspace and open the TUI. |
+| `fact [--grid N] [--profile NAME] [--cwd DIR] [--transparent] [--here] [--config FILE]` | Start a fresh workspace and open the TUI. |
 | `fact doctor` | Report the host terminal, config, duplicate `fact` installs on PATH, agent CLIs, wallpaper and old data. Changes nothing. |
 | `fact wallpaper set FILE [--opacity N] [--fit fill\|fit\|stretch\|center]` | Put an image (png, jpg, jpeg, gif, bmp, webp) or a looping video (mp4, mkv, webm, mov, avi, m4v, wmv, flv; needs ffmpeg) behind every pane. |
 | `fact wallpaper` / `fact wallpaper clear` | Show / remove the wallpaper. |
@@ -324,6 +325,10 @@ Options:
   splits inherit the focused pane's directory.
 - `--transparent` leaves default backgrounds to the host terminal for this
   launch, so its background image shows through (the wallpaper profile uses it).
+- `--here` starts in the current tab. Without it, `fact` typed in a Windows
+  Terminal tab while a picture wallpaper is set opens a new FACT tab where
+  Windows Terminal draws the picture at full resolution. Videos, `--transparent`
+  and `background = "transparent"` always start in place.
 - `--config FILE` overrides the default `config.toml`.
 - `FACT_HOME` changes the base directory used to find `config.toml`. There is no
   `--data-dir` or runtime data directory.

@@ -12,7 +12,7 @@ npm install -g fact-terminal
 fact                  # one shell
 fact --grid 4         # four shells in a grid
 fact doctor           # check the terminal, config, PATH and agent CLIs
-fact wallpaper set C:\Pictures\sky.jpg   # picture behind every pane, any terminal
+fact wallpaper set C:\Pictures\sky.jpg   # picture behind every pane (full resolution in Windows Terminal)
 fact wallpaper set C:\Videos\rain.mp4   # looping video (needs ffmpeg)
 ```
 

@@ -7,10 +7,15 @@ All notable changes to FACT are documented here. The format follows
 
 ### Added
 
-- **Wallpaper everywhere.** FACT paints the wallpaper itself, two pixels per
-  cell, so it shows in every terminal (Windows Terminal, the classic console,
-  VS Code), not only in Windows Terminal's FACT profile. Text, the cursor,
-  selections and program colors stay on top.
+- **Wallpaper everywhere.** FACT paints the wallpaper itself, so it shows in
+  every terminal (Windows Terminal, the classic console, VS Code), not only in
+  Windows Terminal's FACT profile: four pixels per cell with quadrant glyphs
+  where the terminal draws block characters itself, two elsewhere. The image
+  fades toward the theme's background, so light themes stay readable. Text, the
+  cursor, selections and program colors stay on top.
+- **Full-resolution pictures in Windows Terminal.** A plain `fact` typed in a
+  Windows Terminal tab with a picture wallpaper opens a FACT tab where Windows
+  Terminal draws the picture at full resolution; `fact --here` stays put.
 - **Video wallpapers.** `fact wallpaper set clip.mp4` (mp4, mkv, webm, mov, avi,
   m4v, wmv, flv) plays the video in a loop at its own colors, streamed through
   ffmpeg at the window's cell resolution. Animated GIFs loop too. Playback
@@ -30,6 +35,9 @@ All notable changes to FACT are documented here. The format follows
 - Files left by FACT 0.3 (`sessions.db`, `runtime`, `logs`) are removed on
   launch. FACT stores no database or history.
 - The GitHub language bar now reflects the Rust code only.
+- Windows Terminal is detected from the console itself, not only from the
+  inherited `WT_SESSION`, so a classic console started from a Windows
+  Terminal tab is treated as a classic console.
 
 ## [0.5.1] - 2026-10-30
 

@@ -10,7 +10,8 @@ mod theme;
 mod wallpaper;
 
 pub use wallpaper::{
-    find_ffmpeg, is_video as is_video_file, Fit as WallpaperFit, WallpaperSpec, VIDEO_EXTENSIONS,
+    find_ffmpeg, in_windows_terminal, is_video as is_video_file, Fit as WallpaperFit,
+    WallpaperSpec, VIDEO_EXTENSIONS,
 };
 
 use std::cell::RefCell;
@@ -128,6 +129,7 @@ pub fn run(
             Ok(loaded) => {
                 app.theme = app.theme.with_transparency(true);
                 app.wallpaper = Some(RefCell::new(loaded));
+                app.sync_wallpaper_base();
             }
             Err(error) => app.set_status(format!("Wallpaper: {error}")),
         }
@@ -1026,6 +1028,15 @@ impl App {
         }
     }
 
+    /// Let the wallpaper fade toward the current theme's background.
+    fn sync_wallpaper_base(&self) {
+        if let (Some(wallpaper), ratatui::style::Color::Rgb(r, g, b)) =
+            (&self.wallpaper, self.theme.bg)
+        {
+            wallpaper.borrow_mut().set_base([r, g, b]);
+        }
+    }
+
     /// Pane whose hover-only scrollbar is currently shown, if any.
     fn hover_state(&self) -> Option<u64> {
         self.frame
@@ -1110,8 +1121,9 @@ impl App {
             Some(ScrollMode::History) => {
                 self.selection = None;
                 self.scroll_mode = Some(pane_id);
+                let lines = if history == 1 { "line" } else { "lines" };
                 self.set_status(format!(
-                    "Scroll mode: {history} lines. Up/Down, PgUp/PgDn, Home/End, Esc exits."
+                    "Scroll mode: {history} {lines}. Up/Down, PgUp/PgDn, Home/End, Esc exits."
                 ));
             }
             Some(ScrollMode::App) => {
@@ -1629,6 +1641,7 @@ impl App {
             }
             "cycle_theme" => {
                 self.theme = self.theme.next();
+                self.sync_wallpaper_base();
                 self.set_status(format!("Theme: {}", self.theme.name));
             }
             other => self.set_status(format!("Unknown action: {other}")),

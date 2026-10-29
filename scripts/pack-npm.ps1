@@ -3,7 +3,7 @@
   Build the fact-terminal npm package from a release fact.exe.
 
 .DESCRIPTION
-  Copies the binary, README and LICENSE into npm\, sets the package version
+  Copies the binary and LICENSE into npm\ (next to its own README), sets the package version
   from Cargo.toml, checks that the binary reports the same version and runs
   `npm pack`. The tarball lands in -OutDir. Publishing stays a separate,
   explicit step:

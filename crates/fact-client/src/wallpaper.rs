@@ -62,6 +62,37 @@ pub fn is_video(path: &Path) -> bool {
         .is_some_and(|ext| VIDEO_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
 }
 
+/// True when this process is really hosted by Windows Terminal.
+///
+/// `WT_SESSION` alone is not enough: a classic console window started from a
+/// Windows Terminal tab inherits it. Inside Windows Terminal the console
+/// window is a hidden pseudo console; a classic console has a real window.
+pub fn in_windows_terminal() -> bool {
+    std::env::var_os("WT_SESSION").is_some()
+        && !std::env::var("TERM_PROGRAM")
+            .is_ok_and(|program| program.eq_ignore_ascii_case("vscode"))
+        && console_is_pseudo()
+}
+
+#[cfg(windows)]
+fn console_is_pseudo() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
+    let window = unsafe { GetConsoleWindow() };
+    if window.is_null() {
+        return false;
+    }
+    let mut class = [0u16; 64];
+    let length = unsafe { GetClassNameW(window, class.as_mut_ptr(), class.len() as i32) };
+    let length = usize::try_from(length).unwrap_or(0).min(class.len());
+    String::from_utf16_lossy(&class[..length]) == "PseudoConsoleWindow"
+}
+
+#[cfg(not(windows))]
+fn console_is_pseudo() -> bool {
+    false
+}
+
 /// `FACT_FFMPEG`, then `ffmpeg.exe` on PATH, then the usual install folders.
 pub fn find_ffmpeg() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FACT_FFMPEG").map(PathBuf::from) {
@@ -96,6 +127,9 @@ pub struct Wallpaper {
     source: RgbImage,
     /// Image pixels per cell across: 2 with quadrant glyphs, 1 with `▀`.
     across: u16,
+    /// The theme background the image fades toward (black for dark themes,
+    /// near white for light ones), so text stays readable either way.
+    base: [u8; 3],
     animation: Option<Animation>,
     video: Option<Video>,
     opacity: f32,
@@ -282,11 +316,24 @@ impl Wallpaper {
         Self {
             source,
             across: if quadrant_glyphs() { 2 } else { 1 },
+            base: [0, 0, 0],
             animation: None,
             video: None,
             opacity: opacity.clamp(0.05, 1.0),
             fit,
             cache: None,
+        }
+    }
+
+    /// Fade toward this background color. Called when the theme changes.
+    pub fn set_base(&mut self, base: [u8; 3]) {
+        if self.base != base {
+            self.base = base;
+            // Stills are recomputed from the source; video picks it up on
+            // its next frame.
+            if self.video.is_none() {
+                self.cache = None;
+            }
         }
     }
 
@@ -331,12 +378,9 @@ impl Wallpaper {
             return match frames.try_recv() {
                 Ok(frame) => {
                     video.shown_at = now;
-                    let scale = self.opacity;
+                    let (scale, base) = (self.opacity, self.base);
                     let (pixels, _) = frame.as_chunks::<3>();
-                    let pixels = pixels
-                        .iter()
-                        .map(|p| p.map(|channel| dim(channel, scale)))
-                        .collect();
+                    let pixels = pixels.iter().map(|p| blend(*p, base, scale)).collect();
                     self.cache = Some((video.size.0, video.size.1, pixels));
                     true
                 }
@@ -459,10 +503,10 @@ impl Wallpaper {
                 u32::from(rows) * 2,
                 self.fit,
             );
-            let scale = self.opacity;
+            let (scale, base) = (self.opacity, self.base);
             let pixels = fitted
                 .pixels()
-                .map(|Rgb([r, g, b])| [dim(*r, scale), dim(*g, scale), dim(*b, scale)])
+                .map(|pixel| blend(pixel.0, base, scale))
                 .collect();
             self.cache = Some((cols, rows, pixels));
         }
@@ -546,8 +590,12 @@ fn fit_image(source: &RgbImage, width: u32, height: u32, fit: Fit) -> RgbImage {
     }
 }
 
-fn dim(channel: u8, scale: f32) -> u8 {
-    (f32::from(channel) * scale).round() as u8
+/// `pixel` shown at `scale` strength over `base`.
+fn blend(pixel: [u8; 3], base: [u8; 3], scale: f32) -> [u8; 3] {
+    [0, 1, 2].map(|i| {
+        let (p, b) = (f32::from(pixel[i]), f32::from(base[i]));
+        (b + (p - b) * scale).round().clamp(0.0, 255.0) as u8
+    })
 }
 
 fn mean(pixels: &[[u8; 3]]) -> [u8; 3] {
@@ -567,7 +615,7 @@ fn distance(a: [u8; 3], b: [u8; 3]) -> u32 {
 /// Terminals that draw block elements themselves render quadrant glyphs
 /// without gaps; console fonts may lack them.
 fn quadrant_glyphs() -> bool {
-    std::env::var_os("WT_SESSION").is_some()
+    in_windows_terminal()
         || std::env::var("TERM_PROGRAM").is_ok_and(|program| {
             ["vscode", "WezTerm"]
                 .iter()
@@ -667,6 +715,23 @@ mod tests {
         // Cells with their own background are left alone.
         assert_eq!(buffer[(9, 3)].bg, Color::Rgb(1, 2, 3));
         assert_eq!(buffer[(9, 3)].symbol(), " ");
+    }
+
+    #[test]
+    fn light_themes_fade_the_image_toward_white() {
+        assert_eq!(blend([200, 0, 0], [0, 0, 0], 0.5), [100, 0, 0]);
+        assert_eq!(blend([200, 0, 0], [255, 255, 255], 0.5), [228, 128, 128]);
+        let mut wallpaper = Wallpaper::from_image(split_image(), 0.5, Fit::Stretch);
+        wallpaper.across = 1;
+        wallpaper.set_base([255, 255, 255]);
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buffer = Buffer::empty(area);
+        wallpaper.paint(&mut buffer, area);
+        // Faded toward white (every channel bright) and still reddish.
+        let Color::Rgb(r, g, b) = buffer[(0, 0)].fg else {
+            panic!("expected an RGB foreground")
+        };
+        assert!(r > g && g >= 120 && b >= 120, "got {r} {g} {b}");
     }
 
     #[test]

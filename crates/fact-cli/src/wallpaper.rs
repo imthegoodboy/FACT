@@ -451,10 +451,11 @@ pub fn reload_windows_terminal() -> usize {
 
 /// True inside a Windows Terminal tab that uses FACT's wallpaper profile.
 pub fn in_fact_profile() -> bool {
-    std::env::var("WT_PROFILE_ID").is_ok_and(|id| {
-        id.trim_matches(|c| c == '{' || c == '}')
-            .eq_ignore_ascii_case(PROFILE_GUID.trim_matches(|c| c == '{' || c == '}'))
-    })
+    fact_client::in_windows_terminal()
+        && std::env::var("WT_PROFILE_ID").is_ok_and(|id| {
+            id.trim_matches(|c| c == '{' || c == '}')
+                .eq_ignore_ascii_case(PROFILE_GUID.trim_matches(|c| c == '{' || c == '}'))
+        })
 }
 
 /// Arguments for `wt.exe` that open FACT in a new tab of the current window
