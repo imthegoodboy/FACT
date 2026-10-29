@@ -49,6 +49,8 @@ pub(crate) struct SessionManager {
     next_pane_id: u64,
     next_frame_seq: u64,
     shutdown: bool,
+    /// The last publish found a subscriber's channel full.
+    frames_blocked: bool,
     started: Instant,
 }
 
@@ -117,6 +119,7 @@ impl SessionManager {
             next_pane_id: 1,
             next_frame_seq: 1,
             shutdown: false,
+            frames_blocked: false,
             started: Instant::now(),
         };
         manager.create_session(SESSION_NAME.to_string(), grid, profile, cwd)?;
@@ -289,29 +292,34 @@ impl SessionManager {
             }
             Command::BalancePanes => {
                 let key = self.require_bound(bound_session)?;
-                self.edit_layout(&key, |layout| layout.balance())?;
+                self.edit_layout(&key, |layout| layout.balance().map(|()| true))?;
                 Ok(ResponsePayload::Ack)
             }
             Command::MoveTab { tab, index } => {
                 let key = self.require_bound(bound_session)?;
-                self.edit_layout(&key, |layout| layout.move_tab(tab, index))?;
+                self.edit_layout(&key, |layout| layout.move_tab(tab, index).map(|()| true))?;
                 Ok(ResponsePayload::Ack)
             }
         }
     }
 
-    /// Drain output, then publish frames. Returns `true` when output or a
-    /// frame is still waiting, so the owner should come back soon.
+    /// Drain output, then publish frames. Returns `true` when a pane still
+    /// has output queued, so the owner should come back soon.
     pub(crate) fn tick(&mut self) -> bool {
         let backlog = self.drain_output();
-        let blocked = self.publish();
-        backlog || blocked
+        self.publish();
+        backlog
     }
 
-    /// Send every subscriber the frame it needs. Returns `true` when a full
-    /// channel deferred one.
-    pub(crate) fn publish(&mut self) -> bool {
-        self.pump_frames()
+    /// Send every subscriber the frame it needs.
+    pub(crate) fn publish(&mut self) {
+        self.frames_blocked = self.pump_frames();
+    }
+
+    /// A subscriber was too slow to take its last frame. The owner retries
+    /// on a gentle timer rather than rebuilding frames at full rate.
+    pub(crate) fn frames_blocked(&self) -> bool {
+        self.frames_blocked
     }
 
     /// Feed queued PTY output into the terminal models and answer terminal
@@ -1238,35 +1246,36 @@ impl SessionManager {
             FocusDirection::Up => fact_layout::ResizeDirection::Up,
             FocusDirection::Down => fact_layout::ResizeDirection::Down,
         };
-        let mut moved = false;
-        self.edit_layout(key, |layout| {
-            moved = layout.resize_focused(direction, fact_layout::RESIZE_STEP)?;
-            Ok(())
+        let moved = self.edit_layout(key, |layout| {
+            layout.resize_focused(direction, fact_layout::RESIZE_STEP)
         })?;
         if moved {
             Ok(())
         } else {
             Err(ProtocolError::invalid(
-                "no split on that side of the focused pane",
+                "nothing to resize on that side of the focused pane",
             ))
         }
     }
 
-    /// Apply a layout change, then refresh pane sizes and every subscriber.
+    /// Apply a layout change. When `edit` reports a change, refresh pane
+    /// sizes and every subscriber; a no-op costs no frame.
     fn edit_layout(
         &mut self,
         key: &str,
-        edit: impl FnOnce(&mut SessionLayout) -> Result<(), fact_layout::LayoutError>,
-    ) -> Result<(), ProtocolError> {
+        edit: impl FnOnce(&mut SessionLayout) -> Result<bool, fact_layout::LayoutError>,
+    ) -> Result<bool, ProtocolError> {
         let session = self
             .sessions
             .get_mut(key)
             .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
-        edit(&mut session.data.layout).map_err(map_layout_error)?;
+        if !edit(&mut session.data.layout).map_err(map_layout_error)? {
+            return Ok(false);
+        }
         session.layout_epoch = session.layout_epoch.wrapping_add(1);
         session.metadata_epoch = session.metadata_epoch.wrapping_add(1);
         self.resize_session(key);
-        Ok(())
+        Ok(true)
     }
 
     fn end_live_empty(&mut self, key: &str) {
@@ -1296,7 +1305,7 @@ impl SessionManager {
     }
 
     /// Send each subscriber the frame it needs. Returns `true` when a full
-    /// channel deferred a frame, so the owner retries soon.
+    /// channel deferred a frame.
     fn pump_frames(&mut self) -> bool {
         let mut blocked = false;
         let mut index = 0;

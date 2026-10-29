@@ -1321,24 +1321,28 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // The aliases follow their actions: `paste = "none"` or
+        // `copy = "none"` hands these keys to the application as well.
+        let paste = self.keys.binding("paste").is_some();
+        let copy = self.keys.binding("copy").is_some();
         match key.code {
             CKeyCode::Esc if self.selection.is_some() => {
                 self.selection = None;
                 return;
             }
-            CKeyCode::Char('v' | 'V') if control && !shift && !alt => {
+            CKeyCode::Char('v' | 'V') if paste && control && !shift && !alt => {
                 self.paste_or_forward(key);
                 return;
             }
-            CKeyCode::Char('c' | 'C') if control && !shift && self.selection.is_some() => {
+            CKeyCode::Char('c' | 'C') if copy && control && !shift && self.selection.is_some() => {
                 self.copy_selection();
                 return;
             }
-            CKeyCode::Insert if shift => {
+            CKeyCode::Insert if paste && shift => {
                 self.paste_clipboard();
                 return;
             }
-            CKeyCode::Insert if control => {
+            CKeyCode::Insert if copy && control => {
                 self.copy_selection();
                 return;
             }

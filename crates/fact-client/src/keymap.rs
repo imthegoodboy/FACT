@@ -113,10 +113,12 @@ pub fn chord_for(key: KeyEvent) -> Option<KeyChord> {
     Some(KeyChord::new(modifiers, code))
 }
 
-/// Windows reports AltGr as Ctrl+Alt. A Ctrl+Alt chord that produced a
-/// non-letter character (`@`, `{`, `ą`, `€`) is typed text, not a shortcut.
+/// Windows reports AltGr as Ctrl+Alt. On Windows, a Ctrl+Alt chord that
+/// produced a character other than an ASCII letter (`@`, `{`, `ą`, `€`) is
+/// typed text, not a shortcut.
 fn is_altgr_text(key: &KeyEvent) -> bool {
-    matches!(key.code, CKey::Char(c) if !c.is_ascii_alphabetic() && !c.is_control())
+    cfg!(windows)
+        && matches!(key.code, CKey::Char(c) if !c.is_ascii_alphabetic() && !c.is_control())
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.modifiers.contains(KeyModifiers::ALT)
 }

@@ -139,7 +139,7 @@ environment while FACT runs.
 
 The prefix is armed for one command. For example, with the default
 `ctrl+space`, press `Ctrl+Space`, release, then `K` to open the palette.
-The prefix chord itself is not sent to the shell.
+A single prefix press is not sent to the shell; pressing it twice sends it.
 
 Bindings are written as:
 
@@ -208,7 +208,9 @@ Additional interaction that is not a remappable action:
   normal terminal input. `Ctrl+V` pastes clipboard text. When the clipboard
   holds an image or other non-text data, `Ctrl+V` goes to the application
   instead, so agents can attach the image themselves. `Ctrl+Insert` and
-  `Shift+Insert` are accepted as clipboard aliases.
+  `Shift+Insert` are accepted as clipboard aliases. These aliases follow their
+  actions: with `paste = "none"`, `Ctrl+V` and `Shift+Insert` go to the
+  application; with `copy = "none"`, so do `Ctrl+C` and `Ctrl+Insert`.
 - `Esc` with F1 help open reaches the focused pane (help stays open; `F1` or
   `q` closes it), so an agent can always be interrupted.
 - Prefix then `[` enters scroll mode without sending normal keys to the

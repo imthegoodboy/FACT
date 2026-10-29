@@ -185,7 +185,8 @@ impl Win32InputScanner {
             self.apply(&joined);
         }
         self.apply(bytes);
-        self.tail.extend_from_slice(bytes);
+        self.tail
+            .extend_from_slice(&bytes[bytes.len().saturating_sub(keep)..]);
         let excess = self.tail.len().saturating_sub(keep);
         self.tail.drain(..excess);
     }

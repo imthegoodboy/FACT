@@ -150,7 +150,8 @@ A key that is not a FACT binding is encoded for the focused pane in this order:
 
 1. **Kitty keyboard protocol.** When the application pushed kitty flags
    (`CSI > flags u`, tracked by the terminal model, which also answers
-   `CSI ? u`), modified Enter, Tab and Backspace are sent as
+   `CSI ? u`), Enter and Backspace with any modifier and Tab with Ctrl or
+   Alt are sent as
    `CSI code ; mods u`. Everything else keeps its normal encoding, as the
    protocol's disambiguate level allows.
 2. **win32-input-mode.** ConPTY requests it with `CSI ? 9001 h` at startup
@@ -158,7 +159,8 @@ A key that is not a FACT binding is encoded for the focused pane in this order:
    it. Special and modified keys are sent as `CSI Vk;Sc;Uc;Kd;Cs;Rc _` down/up
    records, the same encoding Windows Terminal uses. Plain text stays UTF-8.
 3. **VT.** Otherwise keys are encoded as xterm sequences, honoring application
-   cursor mode. Ctrl+Alt with a non-letter character is AltGr text.
+   cursor mode. On Windows, Ctrl+Alt with a character other than an ASCII
+   letter is AltGr text.
 
 `Ctrl+V` pastes clipboard text (bracketed when the pane enabled it); with no
 text on the clipboard the key itself is forwarded so agents can read images.

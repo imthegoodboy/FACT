@@ -27,6 +27,9 @@ const IDLE_TICK: Duration = Duration::from_millis(250);
 /// Shortest gap between output-driven ticks (~120 frames per second). Bursts
 /// that arrive faster are coalesced into the next frame.
 const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(8);
+/// Retry interval while the UI is too busy to take frames. Slower than the
+/// frame cap so a stalled UI does not keep the engine rebuilding snapshots.
+const BLOCKED_RETRY: Duration = Duration::from_millis(50);
 
 enum Request {
     Command {
@@ -180,11 +183,13 @@ fn engine_loop(
     // echo must not wait behind the frame its own command just produced.
     let mut last_output_frame = Instant::now() - MIN_FRAME_INTERVAL;
     // Output was drained but its frame is held back to cap the frame rate,
-    // a pane still has queued output, or a full channel deferred a frame.
+    // or a pane still has queued output.
     let mut pending = false;
     loop {
         let timeout = if pending {
             MIN_FRAME_INTERVAL.saturating_sub(last_output_frame.elapsed())
+        } else if manager.frames_blocked() {
+            BLOCKED_RETRY
         } else {
             IDLE_TICK
         };
@@ -205,7 +210,8 @@ fn engine_loop(
                 wake_pending.store(false, Ordering::Release);
                 let backlog = manager.drain_output();
                 if last_output_frame.elapsed() >= MIN_FRAME_INTERVAL {
-                    pending = manager.publish() || backlog;
+                    manager.publish();
+                    pending = backlog;
                     last_output_frame = Instant::now();
                 } else {
                     pending = true;

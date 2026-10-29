@@ -70,7 +70,8 @@ npm publish .\dist\fact-terminal-X.Y.Z.tgz --access public
 ```
 
 The release workflow does the same automatically when the repository has an
-`NPM_TOKEN` secret.
+`NPM_TOKEN` secret, before it makes the GitHub release public. It skips a
+version that is already on npm, so re-running a failed release job is safe.
 
 ## Verify a download manually
 
@@ -86,8 +87,8 @@ generates both files in the same job, after the gates pass.
 
 The single-process build removes the daemon, named pipe, session database,
 saved layouts and export/import commands. Commands such as `fact resume`,
-`sessions`, `attach`, `detach`, `doctor`, `save`, `export`, `import` and
-`shutdown` no longer exist. `FACT_HOME` and `--config` still locate the optional
+`sessions`, `attach`, `detach`, `save`, `export`, `import` and `shutdown` no
+longer exist. (`fact doctor` returned in 0.5.0 as a read-only system report.) `FACT_HOME` and `--config` still locate the optional
 configuration file.
 
 Configuration schema is version 2. Files containing removed keys such as

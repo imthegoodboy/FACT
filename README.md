@@ -38,8 +38,9 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
 - **Built for AI agent CLIs.** Claude Code, Codex, OpenCode and Copilot get
   the keys you press: FACT speaks ConPTY's win32-input-mode and the kitty
   keyboard protocol, so `Shift+Enter` adds a line instead of submitting and
-  `Ctrl+Backspace` deletes a word. Nothing outside the prefix is intercepted by
-  default, `Esc` always reaches the agent, and image paste still works.
+  `Ctrl+Backspace` deletes a word. Outside the prefix, FACT only handles F1 and
+  the clipboard keys (each can be set to `none`), `Esc` reaches the agent unless
+  a selection, overlay or scroll mode is open, and image paste still works.
 - **Light.** One ~2.5 MB native `fact.exe`. Idle workspaces use no CPU: the
   screen is redrawn only when something changes, and shell output wakes the
   engine directly instead of a polling timer.
@@ -191,7 +192,7 @@ each.
 ## Keyboard shortcuts
 
 The prefix is armed for one command. With the default `Ctrl+Space`, press and
-release it, then press the command key. The prefix itself is never sent to the
+release it, then press the command key. A single prefix press is never sent to the
 shell. All bindings in the first table are configurable in `[keybinds]`; F1
 help and the palette always show the compiled values.
 
@@ -230,7 +231,7 @@ Direct keys and mouse gestures:
 | Input | What it does |
 | --- | --- |
 | `Alt+M` / `Alt+N` / `Alt+T` | Maximize / show all / close tab, only with `alt_shortcuts = true`. Otherwise they reach the app. |
-| Prefix twice | Send the prefix chord itself to the focused app. |
+| Prefix twice | Send the prefix chord itself to the focused app (a single press is withheld). |
 | `Ctrl+C` | Copy the visible selection. With no selection it is sent to the shell as normal Ctrl+C. |
 | `Ctrl+V`, `Ctrl+Insert`, `Shift+Insert` | Paste clipboard text into the focused pane. With an image on the clipboard, `Ctrl+V` goes to the app. |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Remappable copy / paste bindings. |

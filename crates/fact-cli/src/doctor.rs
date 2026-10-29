@@ -126,7 +126,13 @@ pub fn run(paths: &Paths) -> i32 {
             }
         }
         Ok(None) => row("Wallpaper", "none (fact wallpaper set <image>)"),
-        Err(error) => row("Wallpaper", &format!("unknown: {error}")),
+        Err(error) => {
+            warnings += 1;
+            row(
+                "Wallpaper",
+                &format!("! could not read the profile: {error}"),
+            );
+        }
     }
 
     let legacy: Vec<PathBuf> = LEGACY
@@ -184,9 +190,16 @@ fn on_path(name: &str) -> Vec<PathBuf> {
     let Some(path) = std::env::var_os("PATH") else {
         return Vec::new();
     };
+    // Windows tries extensions in PATHEXT order within each directory.
+    let extensions: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .map(|ext| ext.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|ext| !ext.is_empty())
+        .collect();
     let mut found: Vec<PathBuf> = Vec::new();
     for dir in std::env::split_paths(&path) {
-        for extension in ["exe", "cmd", "bat"] {
+        for extension in &extensions {
             let candidate = dir.join(format!("{name}.{extension}"));
             if candidate.is_file()
                 && !found

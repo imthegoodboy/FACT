@@ -125,10 +125,14 @@ In the running window:
 2. Print `$PID` in two panes and confirm the values differ.
 3. Split with prefix `|` and `-`, move focus with the arrow keys, and close a
    split with prefix `X`.
-4. Press prefix `C`; confirm the one-line tab strip appears and `+` works. Close
-   the tab with `Alt+T`, first cancelling and then confirming.
-5. Press `Alt+M` and `Alt+N`; confirm maximize and full-grid restore. Minimize a
-   pane with prefix `Shift+M` and restore it from the `▾ N` tray.
+4. Press prefix `C`; confirm the one-line tab strip appears and `+` works. Drag
+   a tab along the strip and confirm the order changes. Close the tab with
+   prefix `Shift+X`, first cancelling and then confirming.
+5. Press prefix `M` and prefix `N`; confirm maximize and full-grid restore.
+   Confirm `Alt+M` reaches the shell unless `alt_shortcuts = true`. Minimize a
+   pane with prefix `Shift+M` and restore it from the `▾ N` tray. `Alt`+drag a
+   pane onto another pane and confirm they swap; double-click a divider and
+   confirm the panes balance; prefix `Shift`+arrow moves a divider.
 6. Drag to select text; double-click a word; triple-click a line. Press `Ctrl+C`
    and paste into another pane with `Ctrl+V`.
 7. Right-click with a selection (copy), then right-click with no selection
@@ -143,7 +147,9 @@ In the running window:
     app scroll.
 11. Press `F1`; confirm help lists the compiled bindings. Press prefix `K` and
     filter the palette. Press prefix `/` and search a marker in the focused pane.
-12. Press `F2`; confirm the theme changes for this run and is not written to disk.
+12. Press prefix `T`; confirm the theme changes for this run and is not written
+    to disk. In PowerShell, `Shift+Enter` gives a `>>` continuation; in Claude
+    Code, `Shift+Enter` inserts a new line and `Esc` interrupts.
 13. Note a pane PID, quit with prefix `Shift+Q`, and confirm that process no
     longer exists.
 14. Before launching, record `Get-ChildItem $env:LOCALAPPDATA\FACT -Force`. After

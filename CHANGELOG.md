@@ -26,7 +26,9 @@ All notable changes to FACT are documented here. The format follows
   there; drag tabs to reorder them; double-click a divider to balance the panes.
 - Keyboard resizing (prefix then `Shift`+arrow), `balance` (prefix then `=`)
   and `cycle_theme` (prefix then `T`) actions.
-- Any keybinding can be set to `"none"` to leave its key to the application.
+- Any keybinding can be set to `"none"` to leave its key to the application;
+  `paste = "none"` / `copy = "none"` also free their `Ctrl+V`, `Shift+Insert`,
+  `Ctrl+C` and `Ctrl+Insert` aliases.
 - Pressing the prefix twice sends the prefix chord itself to the application.
 - npm package: `npm install -g fact-terminal` installs the native `fact.exe`.
 
@@ -366,7 +368,8 @@ All notable changes to FACT are documented here. The format follows
   restart reopens the saved layout with fresh shells and no replay of old output.
   Unsaved work in a lost process cannot be recovered.
 
-[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.5.0
 [0.4.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.4.0
 [0.3.3]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.3
 [0.3.2]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.2

@@ -4,12 +4,17 @@
 //! optional configuration file, starts the in-process engine and hands the
 //! terminal to the TUI. No service, daemon or session database is involved.
 
-/// `println!` that tolerates a closed stdout (`fact doctor | Select -First 3`)
-/// instead of panicking.
+/// `println!` that tolerates a closed pipe (`fact doctor | Select -First 3`)
+/// instead of panicking, but still fails on any other write error.
 macro_rules! out {
     ($($arg:tt)*) => {{
         use std::io::Write as _;
-        let _ = writeln!(std::io::stdout().lock(), $($arg)*);
+        if let Err(error) = writeln!(std::io::stdout().lock(), $($arg)*) {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                eprintln!("fact: could not write output: {error}");
+                std::process::exit(1);
+            }
+        }
     }};
 }
 
@@ -71,7 +76,7 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum WallpaperAction {
-    /// Use an image (png, jpg, gif, bmp, webp) as the workspace background.
+    /// Use an image (png, jpg, jpeg, gif, bmp, webp, tif, tiff) as the workspace background.
     Set {
         /// Image file to use. FACT keeps its own copy.
         image: PathBuf,

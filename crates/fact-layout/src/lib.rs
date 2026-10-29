@@ -578,37 +578,51 @@ impl SessionLayout {
         tab.focus
     }
 
-    /// Move the nearest split edge around the focused pane, tmux style: the
-    /// gutter travels in `direction`. Returns `false` when the focused pane has
-    /// no split in that orientation.
+    /// Move a split edge of the focused pane: the gutter travels in
+    /// `direction`, preferring the pane's edge on that side (so Left grows a
+    /// middle pane leftwards) and falling back to its other edge for a pane at
+    /// the border. Returns `false` when nothing moved: no split in that
+    /// orientation, or the ratio is already at its limit.
     pub fn resize_focused(
         &mut self,
         direction: ResizeDirection,
         step: f32,
     ) -> Result<bool, LayoutError> {
+        if !step.is_finite() {
+            return Err(LayoutError::Invalid("resize step is not finite".into()));
+        }
         let active = self.active_tab;
         let tab = self.active_mut().ok_or(LayoutError::MissingTab(active))?;
         let focus = tab.focus.ok_or(LayoutError::InvalidTree)?;
         let root = tab.root.as_mut().ok_or(LayoutError::InvalidTree)?;
         let path = leaf_path(root, focus).ok_or(LayoutError::MissingPane(focus))?;
-        let (wanted, delta) = match direction {
-            ResizeDirection::Left => (SplitOrientation::Horizontal, -step),
-            ResizeDirection::Right => (SplitOrientation::Horizontal, step),
-            ResizeDirection::Up => (SplitOrientation::Vertical, -step),
-            ResizeDirection::Down => (SplitOrientation::Vertical, step),
+        // `side` is the child holding the pane when the gutter lies on the
+        // requested side of it: moving left prefers the pane's left edge,
+        // which is the gutter of a split where the pane is the second child.
+        let (wanted, side, delta) = match direction {
+            ResizeDirection::Left => (SplitOrientation::Horizontal, 1, -step),
+            ResizeDirection::Right => (SplitOrientation::Horizontal, 0, step),
+            ResizeDirection::Up => (SplitOrientation::Vertical, 1, -step),
+            ResizeDirection::Down => (SplitOrientation::Vertical, 0, step),
         };
-        for depth in (0..path.len()).rev() {
-            if let Some(LayoutNode::Split {
-                orientation, ratio, ..
-            }) = node_at_mut(root, &path[..depth])
-            {
-                if *orientation == wanted {
-                    *ratio = (*ratio + delta).clamp(MIN_RATIO, MAX_RATIO);
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
+        let matching = |prefer_side: bool| {
+            (0..path.len()).rev().find(|&depth| {
+                let node = node_at(root, &path[..depth]);
+                matches!(node, Some(LayoutNode::Split { orientation, .. }) if *orientation == wanted)
+                    && (!prefer_side || path[depth] == side)
+            })
+        };
+        // An edge pane has no gutter on that side; move its other edge.
+        let Some(depth) = matching(true).or_else(|| matching(false)) else {
+            return Ok(false);
+        };
+        let Some(LayoutNode::Split { ratio, .. }) = node_at_mut(root, &path[..depth]) else {
+            return Ok(false);
+        };
+        let moved = (*ratio + delta).clamp(MIN_RATIO, MAX_RATIO);
+        let changed = (moved - *ratio).abs() > f32::EPSILON;
+        *ratio = moved;
+        Ok(changed)
     }
 
     /// Give every pane in the active tab an equal share along each split
@@ -1159,6 +1173,20 @@ fn leaf_path(node: &LayoutNode, target: u64) -> Option<Vec<u8>> {
     }
 }
 
+fn node_at<'a>(node: &'a LayoutNode, path: &[u8]) -> Option<&'a LayoutNode> {
+    let Some((&step, rest)) = path.split_first() else {
+        return Some(node);
+    };
+    match node {
+        LayoutNode::Split { first, second, .. } => match step {
+            0 => node_at(first, rest),
+            1 => node_at(second, rest),
+            _ => None,
+        },
+        LayoutNode::Leaf { .. } => None,
+    }
+}
+
 fn node_at_mut<'a>(node: &'a mut LayoutNode, path: &[u8]) -> Option<&'a mut LayoutNode> {
     let Some((&step, rest)) = path.split_first() else {
         return Some(node);
@@ -1198,6 +1226,8 @@ fn balance_node(node: &mut LayoutNode) {
     {
         let a = split_weight(first, *orientation);
         let b = split_weight(second, *orientation);
+        // Ratios stay within the validated range, so a chain of more than ten
+        // panes in one direction is as even as that range allows, not exact.
         *ratio = (a as f32 / (a + b) as f32).clamp(MIN_RATIO, MAX_RATIO);
         balance_node(first);
         balance_node(second);
@@ -1268,6 +1298,35 @@ mod tests {
             .resize_focused(ResizeDirection::Left, RESIZE_STEP)
             .unwrap());
         assert!((root_ratio(&layout) - 0.45).abs() < 1e-4);
+    }
+
+    #[test]
+    fn keyboard_resize_prefers_the_edge_on_the_requested_side() {
+        // A | (B | C): Left on B moves the A/B gutter, Right moves B/C.
+        let mut layout = SessionLayout::new(1, &[1]);
+        layout.split_pane(1, 2, SplitDirection::Right).unwrap();
+        layout.split_pane(2, 3, SplitDirection::Right).unwrap();
+        layout.focus_pane(2).unwrap();
+        let inner = |layout: &SessionLayout| match layout.active().unwrap().root.as_ref().unwrap() {
+            LayoutNode::Split { second, .. } => match second.as_ref() {
+                LayoutNode::Split { ratio, .. } => *ratio,
+                LayoutNode::Leaf { .. } => panic!("expected the inner split"),
+            },
+            LayoutNode::Leaf { .. } => panic!("expected a split"),
+        };
+        assert!(layout
+            .resize_focused(ResizeDirection::Left, RESIZE_STEP)
+            .unwrap());
+        assert!((root_ratio(&layout) - 0.45).abs() < 1e-4);
+        assert!((inner(&layout) - 0.5).abs() < 1e-4);
+        assert!(layout
+            .resize_focused(ResizeDirection::Right, RESIZE_STEP)
+            .unwrap());
+        assert!((root_ratio(&layout) - 0.45).abs() < 1e-4);
+        assert!((inner(&layout) - 0.55).abs() < 1e-4);
+        assert!(layout
+            .resize_focused(ResizeDirection::Left, f32::NAN)
+            .is_err());
     }
 
     #[test]
