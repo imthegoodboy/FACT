@@ -8,3 +8,5 @@
 *.db-shm
 /.fact-dev
 /dist
+/npm/bin
+/npm/LICENSE

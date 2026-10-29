@@ -64,6 +64,9 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
+    env:
+      # Optional. Without this secret the npm step is skipped.
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -184,3 +187,19 @@ jobs:
           gh release edit $tag --repo $env:GITHUB_REPOSITORY --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw "gh release edit failed; the draft was not published" }
           Write-Host "Published $tag with $($uploaded.Count) assets"
+
+      - name: Publish npm package
+        if: env.NPM_TOKEN != ''
+        shell: pwsh
+        run: |
+          ./scripts/pack-npm.ps1 -BinaryPath target/release/fact.exe -OutDir npm-dist
+          $rc = Join-Path $env:RUNNER_TEMP "npmrc"
+          "//registry.npmjs.org/:_authToken=$env:NPM_TOKEN" | Set-Content -LiteralPath $rc -Encoding ascii
+          try {
+            $tarball = Get-ChildItem npm-dist -Filter "fact-terminal-*.tgz" | Select-Object -First 1
+            if (-not $tarball) { throw "npm tarball missing" }
+            npm publish $tarball.FullName --access public --userconfig $rc
+            if ($LASTEXITCODE -ne 0) { throw "npm publish failed" }
+          } finally {
+            Remove-Item -LiteralPath $rc -Force -ErrorAction SilentlyContinue
+          }

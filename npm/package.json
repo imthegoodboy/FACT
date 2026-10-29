@@ -1,0 +1,43 @@
+{
+  "name": "fact-terminal",
+  "version": "0.5.0",
+  "description": "FACT: a lightweight Windows terminal workspace. Real ConPTY shells in tabs, splits and grids, tuned for Claude Code, Codex, OpenCode and other AI agent CLIs.",
+  "license": "MIT",
+  "author": "FACT contributors",
+  "homepage": "https://github.com/imthegoodboy/FACT#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imthegoodboy/FACT.git"
+  },
+  "bugs": {
+    "url": "https://github.com/imthegoodboy/FACT/issues"
+  },
+  "keywords": [
+    "terminal",
+    "multiplexer",
+    "tmux",
+    "windows",
+    "conpty",
+    "tui",
+    "split",
+    "tabs",
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "opencode"
+  ],
+  "bin": {
+    "fact": "bin/fact.exe"
+  },
+  "files": [
+    "bin/fact.exe",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ]
+}
