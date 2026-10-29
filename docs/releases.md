@@ -50,6 +50,28 @@ powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 `
 
 Local builds do not have a release checksum. The script says so explicitly.
 
+## Install with npm
+
+```powershell
+npm install -g fact-terminal
+```
+
+The `fact-terminal` package contains the same release `fact.exe`. npm's `fact`
+command runs it directly; Node.js is not involved at runtime. If you also used
+`install.ps1`, two `fact` commands exist on PATH and the first one wins;
+`fact doctor` lists both.
+
+Maintainers build the package from a release binary:
+
+```powershell
+cargo build --release --locked --bin fact
+.\scripts\pack-npm.ps1                     # checks the version, writes dist\fact-terminal-X.Y.Z.tgz
+npm publish .\dist\fact-terminal-X.Y.Z.tgz --access public
+```
+
+The release workflow does the same automatically when the repository has an
+`NPM_TOKEN` secret.
+
 ## Verify a download manually
 
 ```powershell

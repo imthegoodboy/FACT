@@ -35,6 +35,14 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
 
 ## Highlights
 
+- **Built for AI agent CLIs.** Claude Code, Codex, OpenCode and Copilot get
+  the keys you press: FACT speaks ConPTY's win32-input-mode and the kitty
+  keyboard protocol, so `Shift+Enter` adds a line instead of submitting and
+  `Ctrl+Backspace` deletes a word. Nothing outside the prefix is intercepted by
+  default, `Esc` always reaches the agent, and image paste still works.
+- **Light.** One ~2.5 MB native `fact.exe`. Idle workspaces use no CPU: the
+  screen is redrawn only when something changes, and shell output wakes the
+  engine directly instead of a polling timer.
 - **Real shells, not fake panes.** `fact --grid 8` starts eight independent
   ConPTY processes. Each pane has its own PID, terminal state, exit code and
   scrollback.
@@ -42,8 +50,11 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
   database or saved layout. Shells are children of the FACT process. Closing the
   UI, quitting with the prefix shortcut or closing the last tab ends them all.
 - **Tabs, splits and grids.** Binary split tree, focus, zoom, minimize, move and
-  swap. Tiny terminals temporarily focus one pane, with `Alt+M`/`Alt+N` to
-  maximize or restore the full grid at any size.
+  swap. Drag dividers to resize (double-click to balance), `Alt`+drag a pane
+  onto another pane or tab to move it, drag tabs to reorder them, or resize from
+  the keyboard with the prefix and `Shift`+arrows.
+- **Wallpaper.** `fact wallpaper set image.jpg` puts a background image behind
+  every pane through a Windows Terminal profile, at zero runtime cost.
 - **Minimal black TUI.** Plain terminal panes with no title rows, buttons or
   permanent status bar. A one-line tab strip appears only when the workspace
   has more than one tab. Panes have a scrollbar on hover in shells, a steady
@@ -58,8 +69,15 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
 
 ## Install
 
-Releases ship a single `fact.exe`, SHA-256 checksums and PowerShell install
-scripts:
+With npm (the package contains the native `fact.exe`; Node.js is not used at
+runtime):
+
+```powershell
+npm install -g fact-terminal
+```
+
+Releases also ship a single `fact.exe`, SHA-256 checksums and PowerShell
+install scripts:
 
 ```powershell
 # Downloads the latest release, verifies SHA256SUMS.txt, installs per user.
@@ -103,6 +121,8 @@ fact                              # one shell
 fact --grid 8                     # eight shells in a grid
 fact --profile pwsh --grid 4      # use a configured shell profile
 fact --cwd . --grid 1             # start the initial shells in this directory
+fact doctor                       # check terminal, config, duplicate installs and agent CLIs
+fact wallpaper set C:\Pictures\sky.jpg   # background image (Windows Terminal)
 fact config path                  # print the configuration file in use
 fact config validate              # parse and validate configuration
 fact config init                  # write a documented default config.toml
@@ -118,8 +138,9 @@ remappable keybinding list. `Ctrl+Space k` opens the command palette and
 
 There are no per-pane buttons. Use `Ctrl+Space` then the action from F1 help, or
 `Shift`+right-click a pane for split, maximize/show-all, minimize, restart,
-close, search and copy. `Alt+M` maximizes the focused pane, `Alt+N` restores the
-full grid, and `Alt+T` closes the active tab after confirmation.
+close, search and copy. Set `alt_shortcuts = true` for direct `Alt+M` (maximize),
+`Alt+N` (show all) and `Alt+T` (close tab); they are off by default because
+agents and readline use those chords.
 
 `Ctrl+Space` then `[` enters scroll mode for the focused pane; use arrows,
 PgUp/PgDn or Home/End and press Esc to return. In a shell this browses FACT's
@@ -159,6 +180,14 @@ search, choose an inline/main-screen mode supported by your agent:
 Their output then flows into FACT's scrollback instead of a private alternate
 screen.
 
+Keyboard: FACT forwards keys the way Windows Terminal does (win32-input-mode)
+and answers the kitty keyboard protocol that Claude Code, OpenCode and Copilot
+request, so `Shift+Enter` inserts a new line in their prompts and `Esc`
+interrupts them. `Ctrl+V` pastes text; with an image on the clipboard it goes to
+the agent so it can attach the image. Press the prefix twice to send
+`Ctrl+Space` itself. `fact doctor` lists the agents it finds with a tip for
+each.
+
 ## Keyboard shortcuts
 
 The prefix is armed for one command. With the default `Ctrl+Space`, press and
@@ -171,11 +200,11 @@ help and the palette always show the compiled values.
 | Split right | `Ctrl+Space` then `\|` |
 | Split down | `Ctrl+Space` then `-` |
 | Close pane | `Ctrl+Space` then `X` |
-| Close tab / grid | `Ctrl+Space` then `Shift+X`, or `Alt+T` |
+| Close tab / grid | `Ctrl+Space` then `Shift+X` |
 | Restart pane | `Ctrl+Space` then `Shift+R` |
 | Toggle maximize / full grid | `Ctrl+Space` then `Z` |
-| Maximize focused pane | `Ctrl+Space` then `M`, or `Alt+M` |
-| Show all panes | `Ctrl+Space` then `N`, or `Alt+N` |
+| Maximize focused pane | `Ctrl+Space` then `M` |
+| Show all panes | `Ctrl+Space` then `N` |
 | Minimize pane | `Ctrl+Space` then `Shift+M` |
 | Restore minimized panes | `Ctrl+Space` then `Shift+U` |
 | Focus left / right / up / down | `Ctrl+Space` then the arrow key |
@@ -190,6 +219,9 @@ help and the palette always show the compiled values.
 | Paste clipboard | `Ctrl+Shift+V`, or `Ctrl+V` |
 | Swap with next pane | `Ctrl+Space` then `W` |
 | Move pane to next tab | `Ctrl+Space` then `Shift+O` |
+| Resize: move the focused pane's edge | `Ctrl+Space` then `Shift`+arrow |
+| Balance pane sizes | `Ctrl+Space` then `=` |
+| Cycle color theme | `Ctrl+Space` then `T` |
 | Help | `F1` |
 | Quit FACT and close every shell | `Ctrl+Space` then `Shift+Q` |
 
@@ -197,13 +229,12 @@ Direct keys and mouse gestures:
 
 | Input | What it does |
 | --- | --- |
-| `Alt+M` / `Alt+N` | Maximize the focused pane / show the full grid. |
-| `Alt+T` | Close the active tab and stop its shells; prompts when `confirm_close` is on. |
-| `F2` | Cycle the color theme for this run. |
+| `Alt+M` / `Alt+N` / `Alt+T` | Maximize / show all / close tab, only with `alt_shortcuts = true`. Otherwise they reach the app. |
+| Prefix twice | Send the prefix chord itself to the focused app. |
 | `Ctrl+C` | Copy the visible selection. With no selection it is sent to the shell as normal Ctrl+C. |
-| `Ctrl+V`, `Ctrl+Insert`, `Shift+Insert` | Paste clipboard text into the focused pane. |
+| `Ctrl+V`, `Ctrl+Insert`, `Shift+Insert` | Paste clipboard text into the focused pane. With an image on the clipboard, `Ctrl+V` goes to the app. |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Remappable copy / paste bindings. |
-| `Esc` | Clear a selection overlay, close FACT overlays (help closes with `F1`), or leave scroll mode and return to live output. |
+| `Esc` | Clear a selection overlay, close FACT overlays, or leave scroll mode and return to live output. With F1 help open, `Esc` reaches the focused pane (help closes with `F1` or `q`). |
 | Drag in a pane | Select text. |
 | Double-click / triple-click | Select the word / visual line under the pointer. |
 | `Shift`+drag | Select text even when the application requested mouse reporting. |
@@ -211,8 +242,10 @@ Direct keys and mouse gestures:
 | `Shift`+right-click | Open FACT's pane menu, even in mouse-aware apps. |
 | Wheel | Scroll shell history or forward the wheel to a mouse-aware app. |
 | `Shift`+wheel | Browse FACT history in a main-screen app that captures the mouse. Alternate-screen apps still receive the wheel. |
-| Drag a split gutter | Resize adjacent panes. |
+| Drag a split gutter | Resize adjacent panes. Double-click it to balance every pane in the tab. |
+| `Alt`+drag a pane | Drop it on another pane to swap, or on a tab to move it there. |
 | Click a tab / `+` | Select a tab / open a new tab when the strip is visible. |
+| Drag a tab | Reorder tabs. |
 | Click the `▾ N` tray | Restore minimized panes. |
 
 `Ctrl+Space` then `[` scroll mode: Up/Down scroll one line, PgUp/PgDn scroll one
@@ -250,7 +283,8 @@ FACT adds no scrollbar to alternate-screen or mouse-controlled agent UIs.
 | Try it | What happens |
 | --- | --- |
 | `fact --grid 8` | Start an eight-pane workspace with eight new shells. |
-| `Alt+M`, then `Alt+N` | Focus one pane, then restore the full grid. |
+| Prefix then `M`, then prefix then `N` | Focus one pane, then restore the full grid. |
+| `Alt`+drag one pane onto another | Swap the two panes. |
 | Prefix then `[` | Browse the focused pane's history without sending keys to the shell. |
 | Hold Shift while dragging text | Select a stable snapshot, even while an app keeps streaming. |
 | Right-click with no selection | Paste into the shell, like Windows Terminal. |
@@ -259,7 +293,10 @@ FACT adds no scrollbar to alternate-screen or mouse-controlled agent UIs.
 
 | Command | Purpose |
 | --- | --- |
-| `fact [--grid N] [--profile NAME] [--cwd DIR] [--config FILE]` | Start a fresh workspace and open the TUI. |
+| `fact [--grid N] [--profile NAME] [--cwd DIR] [--transparent] [--config FILE]` | Start a fresh workspace and open the TUI. |
+| `fact doctor` | Report the host terminal, config, duplicate `fact` installs on PATH, agent CLIs, wallpaper and old data. Changes nothing. |
+| `fact wallpaper set IMAGE [--opacity N] [--fit fill\|fit\|stretch\|center]` | Use an image as the background through a Windows Terminal "FACT" profile. |
+| `fact wallpaper` / `fact wallpaper clear` | Show / remove the wallpaper and its profile. |
 | `fact config path` | Print the configuration file path in use. |
 | `fact config validate [--json]` | Parse, validate and compile the configuration. |
 | `fact config init [--force]` | Write a documented default `config.toml`. |
@@ -271,6 +308,8 @@ Options:
   `default_profile`.
 - `--cwd DIR` sets the working directory for the initial shells. New tabs and
   splits inherit the focused pane's directory.
+- `--transparent` leaves default backgrounds to the host terminal for this
+  launch, so its background image shows through (the wallpaper profile uses it).
 - `--config FILE` overrides the default `config.toml`.
 - `FACT_HOME` changes the base directory used to find `config.toml`. There is no
   `--data-dir` or runtime data directory.
@@ -293,9 +332,10 @@ flowchart LR
 
 `fact.exe` starts one engine owner thread and enters the TUI. The engine owns
 every shell, terminal model, tab and split; the UI sends commands and renders
-the frames it receives. A separate small reader thread moves ordered frames
-from the engine channel into the UI without blocking terminal input. Frames are
-built at a 33 ms tick and include only pane cells that changed.
+the frames it receives. Two small reader threads feed one queue: ordered frames
+from the engine and terminal input. The UI sleeps on that queue and redraws only
+when something changed. Shell output wakes the engine immediately; frames are
+capped at about 120 per second and include only pane cells that changed.
 
 There is no persistence layer, no IPC server and no second process. All state is
 in memory and is discarded when the process exits. Full details and crate
@@ -310,10 +350,14 @@ chosen with `--config`. `FACT_HOME` can relocate the default base directory.
 | Path | Contents |
 | --- | --- |
 | `config.toml` | Optional configuration: theme, profiles, keybindings and environment values. |
+| `wallpaper\` | Only after `fact wallpaper set`: FACT's copy of the image. |
 | No other paths | FACT creates no database, log, runtime identity, saved layout or export directory. |
 
 Terminal output, scrollback and process state exist only in memory for the life
-of the FACT process. `fact config init` is the only command that writes a file.
+of the FACT process. Only `fact config init` and `fact wallpaper set` write
+files; `fact wallpaper set` also writes one Windows Terminal fragment
+(`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`), which
+`fact wallpaper clear` removes.
 Closing FACT, closing the last tab, or pressing `Ctrl+Space` then `Shift+Q`
 terminates every shell; the next launch starts fresh shells.
 

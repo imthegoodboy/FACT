@@ -3,12 +3,59 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-29
+
+### Added
+
+- **Agent-ready keyboard.** FACT honors ConPTY's win32-input-mode request, so
+  modified keys reach console programs as complete Windows key events
+  (`Shift+Enter`, `Ctrl+Enter` and `Ctrl+Backspace` now work in PSReadLine and
+  Codex). It also answers the kitty keyboard protocol that Claude Code, OpenCode
+  and GitHub Copilot request: with it enabled, `Shift+Enter` inserts a new line
+  in their prompts instead of submitting.
+- `fact wallpaper set IMAGE [--opacity N] [--fit ...]`, `fact wallpaper` and
+  `fact wallpaper clear`: a background image behind every pane through a
+  Windows Terminal "FACT" profile fragment. The user's `settings.json` is never
+  edited.
+- `background = "transparent"` and `fact --transparent` leave default
+  backgrounds to the host terminal so its image or acrylic shows through.
+- `fact doctor`: a read-only report of the host terminal, configuration,
+  duplicate `fact` installs on PATH, installed agent CLIs, wallpaper and
+  leftover data from FACT 0.3.
+- `Alt`+drag a pane onto another pane to swap them, or onto a tab to move it
+  there; drag tabs to reorder them; double-click a divider to balance the panes.
+- Keyboard resizing (prefix then `Shift`+arrow), `balance` (prefix then `=`)
+  and `cycle_theme` (prefix then `T`) actions.
+- Any keybinding can be set to `"none"` to leave its key to the application.
+- Pressing the prefix twice sends the prefix chord itself to the application.
+- npm package: `npm install -g fact-terminal` installs the native `fact.exe`.
 
 ### Changed
 
-- `Esc` no longer dismisses the `F1` help overlay; press `F1` again to close
-  it, leaving `Esc` for the focused pane rather than FACT help.
+- The direct `Alt+M`, `Alt+N` and `Alt+T` shortcuts are off by default
+  (`alt_shortcuts = true` restores them). Claude Code uses `Alt+M` and `Alt+T`,
+  and readline uses both.
+- Theme cycling moved from `F2` to prefix then `T`; OpenCode and Codex use `F2`.
+- `Esc` with F1 help open reaches the focused pane, so an agent can always be
+  interrupted; `F1` or `q` closes help.
+- `Ctrl+V` with an image (or other non-text data) on the clipboard is sent to
+  the application, so agents can attach images.
+- AltGr characters (`@`, `{`, `€`, `ą` on international layouts) are typed as
+  text instead of being sent as control sequences or dropped.
+- Panes get `FACT=1`, `FACT_VERSION`, `FACT_PANE` and `COLORTERM=truecolor`;
+  `TERM` and `TERM_PROGRAM` stay as inherited so agents recognise the host
+  terminal.
+
+### Performance
+
+- Shell output wakes the engine immediately instead of waiting for a 33 ms
+  poll, and terminal query replies go out within the same pass. Frames are
+  capped at about 120 per second; the idle tick is now 250 ms.
+- The UI sleeps on one queue fed by the engine and terminal input and redraws
+  only when something changed. An idle four-pane workspace measured 0 ms of CPU
+  over 10 s, down from 172 ms.
+- Frame cells are moved into the UI's buffers instead of copied, and ordinary
+  cells are drawn without a string allocation.
 
 ## [0.4.0] - 2026-10-21
 

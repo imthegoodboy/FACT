@@ -64,10 +64,20 @@ a second bounded channel, so a busy shell cannot grow an unbounded queue while
 the renderer is busy. A slow subscriber loses frames rather than blocking the
 owner thread.
 
-The owner loop wakes on a command or after a 33 ms tick. On each turn it reads
-bounded PTY output, updates terminal models, records exits, handles terminal
-responses, advances titles/bells, and produces any needed frames. The first
-frame sequence is `1`; the client discards older or duplicate sequences.
+The owner loop sleeps until a command arrives or a pane's I/O thread posts a
+wake (new output or an exit; one wake is pending at most). A wake drains output
+at once: it feeds the terminal models and writes terminal-query replies in the
+same pass, because some agents only accept a keyboard-protocol reply that
+arrives within a fraction of a millisecond. Frames are published at most about
+every 8 ms; output that arrives sooner is coalesced into the next frame. A
+250 ms idle tick is only a safety net. Commands get an immediate frame. The
+first frame sequence is `1`; the client discards older or duplicate sequences.
+
+The UI has two reader threads, one for engine frames and one for terminal input,
+feeding one bounded queue. The UI thread blocks on that queue, applies
+everything queued (up to 8 ms of work), and redraws only when state changed, so
+an idle workspace does no rendering at all. Pointer motion redraws only when it
+changes a hover state.
 
 ## Workspace model
 
@@ -132,18 +142,36 @@ width.
 ## Input and mouse routing
 
 The client converts crossterm key events to the chord format used by config and
-keybindings. A non-prefix chord that is not a FACT binding is encoded to terminal
-input according to the focused pane's modes (application cursor, bracketed
-paste, mouse reporting). The prefix chord arms a one-shot command state. F1,
-Ctrl+Shift+C/V, clipboard aliases and the direct Alt shortcuts work without the
-prefix.
+keybindings. The prefix chord arms a one-shot command state; pressing it twice
+sends it to the pane. F1, Ctrl+Shift+C/V and the clipboard aliases work without
+the prefix; the direct Alt shortcuts only with `alt_shortcuts = true`.
+
+A key that is not a FACT binding is encoded for the focused pane in this order:
+
+1. **Kitty keyboard protocol.** When the application pushed kitty flags
+   (`CSI > flags u`, tracked by the terminal model, which also answers
+   `CSI ? u`), modified Enter, Tab and Backspace are sent as
+   `CSI code ; mods u`. Everything else keeps its normal encoding, as the
+   protocol's disambiguate level allows.
+2. **win32-input-mode.** ConPTY requests it with `CSI ? 9001 h` at startup
+   (and may switch it off for VT-input clients); the terminal model scans for
+   it. Special and modified keys are sent as `CSI Vk;Sc;Uc;Kd;Cs;Rc _` down/up
+   records, the same encoding Windows Terminal uses. Plain text stays UTF-8.
+3. **VT.** Otherwise keys are encoded as xterm sequences, honoring application
+   cursor mode. Ctrl+Alt with a non-letter character is AltGr text.
+
+`Ctrl+V` pastes clipboard text (bracketed when the pane enabled it); with no
+text on the clipboard the key itself is forwarded so agents can read images.
 
 Mouse events are routed by zone:
 
 - the one-line tab strip (only present with two or more tabs) selects tabs and
   its trailing `+` opens a new tab
 - the minimized-pane tray (only present when panes are minimized) restores them
-- split gutters drag to resize ratios
+- holding the button on a tab and moving along the strip reorders tabs
+- split gutters drag to resize ratios; a double-click balances the tab
+- `Alt`+press grabs a pane; releasing over another pane swaps them and releasing
+  over a tab moves the pane there, with the target outlined during the drag
 - pane content is forwarded as SGR mouse input when the application requested
   mouse reporting; otherwise it starts a text selection
 - drag selects; double-click selects a word; triple-click selects a visual line
