@@ -53,6 +53,10 @@ struct Cli {
     /// Let the host terminal's background image show through (see `fact wallpaper`).
     #[arg(long)]
     transparent: bool,
+    /// Start in this tab. Otherwise, inside Windows Terminal with a picture
+    /// wallpaper, `fact` opens a FACT tab where the picture is full resolution.
+    #[arg(long)]
+    here: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -128,8 +132,69 @@ pub fn run() -> Result<i32> {
     }
 
     doctor::remove_legacy_data(&paths.base);
+    if !cli.here && !cli.transparent && open_wallpaper_tab(&paths, &cli) {
+        out!("Opened FACT in a new Windows Terminal tab with your wallpaper at full resolution.");
+        out!("(Use `fact --here` to start in this tab instead.)");
+        return Ok(0);
+    }
     launch(&paths, cli.grid, cli.profile, cli.cwd, cli.transparent)?;
     Ok(0)
+}
+
+/// FACT can only paint a wallpaper in character cells, which looks soft.
+/// Windows Terminal draws a picture at full resolution in FACT's own profile,
+/// so a `fact` typed in another Windows Terminal tab opens a FACT tab there.
+/// Videos are always painted by FACT (Windows Terminal cannot play them).
+/// Returns `false`, and FACT starts in place, whenever that is not possible.
+fn open_wallpaper_tab(paths: &Paths, cli: &Cli) -> bool {
+    if std::env::var_os("WT_SESSION").is_none()
+        || std::env::var_os("FACT").is_some()
+        || wallpaper::in_fact_profile()
+    {
+        return false;
+    }
+    let Ok(locations) = wallpaper::Locations::resolve(&paths.base) else {
+        return false;
+    };
+    let picture = wallpaper::current(&locations)
+        .ok()
+        .flatten()
+        .is_some_and(|current| !current.video && current.image.is_file());
+    // The profile only exists while FACT's fragment is installed.
+    if !picture || !locations.fragment.is_file() {
+        return false;
+    }
+    if Config::load(paths).is_ok_and(|config| config.transparent_background()) {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let mut fact_args: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(grid) = cli.grid {
+        fact_args.extend(["--grid".into(), grid.to_string().into()]);
+    }
+    if let Some(profile) = &cli.profile {
+        fact_args.extend(["--profile".into(), profile.into()]);
+    }
+    if let Some(cwd) = &cli.cwd {
+        fact_args.extend(["--cwd".into(), cwd.into()]);
+    }
+    if let Some(config) = &cli.config {
+        fact_args.extend(["--config".into(), config.into()]);
+    }
+    let dir = cli
+        .cwd
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    let Some(args) = wallpaper::new_tab_arguments(&exe, dir.as_deref(), &fact_args) else {
+        return false;
+    };
+    std::process::Command::new("wt.exe")
+        .args(args)
+        .spawn()
+        .is_ok()
 }
 
 fn launch(

@@ -1,9 +1,10 @@
 //! A wallpaper FACT paints itself, so it shows in any truecolor terminal:
 //! Windows Terminal, the classic console, VS Code and others.
 //!
-//! Every cell carries two image pixels. A blank cell becomes `▀` with the
-//! upper pixel as foreground and the lower one as background; a cell with text
-//! gets the average of both as its background. Pixels are darkened by the
+//! Every blank cell shows several image pixels through a block character with
+//! two colors: four (a 2x2 quadrant glyph such as `▚` or `▟`) in terminals that
+//! draw block characters themselves, two (`▀`) elsewhere. A cell with text gets
+//! the average of its pixels as its background. Pixels are darkened by the
 //! opacity so text stays readable. Only cells still at the default background
 //! are painted, so panels, the cursor, selections and application colors are
 //! never covered.
@@ -93,6 +94,8 @@ const VIDEO_RETRY: Duration = Duration::from_millis(10);
 
 pub struct Wallpaper {
     source: RgbImage,
+    /// Image pixels per cell across: 2 with quadrant glyphs, 1 with `▀`.
+    across: u16,
     animation: Option<Animation>,
     video: Option<Video>,
     opacity: f32,
@@ -104,6 +107,7 @@ pub struct Wallpaper {
 
 /// A looping video streamed from ffmpeg at the current cell grid size.
 struct Video {
+    across: u16,
     path: PathBuf,
     ffmpeg: PathBuf,
     fit: Fit,
@@ -124,7 +128,10 @@ impl Video {
     fn start(&mut self, cols: u16, rows: u16) {
         self.stop();
         self.size = (cols, rows);
-        let (width, height) = (u32::from(cols), u32::from(rows) * 2);
+        let (width, height) = (
+            u32::from(cols) * u32::from(self.across),
+            u32::from(rows) * 2,
+        );
         let scale = match self.fit {
             Fit::Fill => format!(
                 "scale={width}:{height}:force_original_aspect_ratio=increase:flags=area,crop={width}:{height}"
@@ -225,6 +232,7 @@ impl Wallpaper {
             })?;
             let mut wallpaper = Self::from_image(RgbImage::new(1, 1), spec.opacity, spec.fit);
             wallpaper.video = Some(Video {
+                across: wallpaper.across,
                 path: spec.image.clone(),
                 ffmpeg,
                 fit: spec.fit,
@@ -273,6 +281,7 @@ impl Wallpaper {
     pub fn from_image(source: RgbImage, opacity: f32, fit: Fit) -> Self {
         Self {
             source,
+            across: if quadrant_glyphs() { 2 } else { 1 },
             animation: None,
             video: None,
             opacity: opacity.clamp(0.05, 1.0),
@@ -397,17 +406,24 @@ impl Wallpaper {
                 return;
             }
         }
+        let across = usize::from(self.across);
         let pixels = self.pixels(area.width, area.height);
-        let width = usize::from(area.width);
+        let row_len = usize::from(area.width) * across;
         for y in 0..area.height {
-            let upper = usize::from(y) * 2 * width;
-            let lower = upper + width;
+            let upper = usize::from(y) * 2 * row_len;
+            let lower = upper + row_len;
             // The cell to the right of a double-width character is covered by
             // it; only its background may change.
             let mut covered = false;
             for x in 0..area.width {
-                let top = pixels[upper + usize::from(x)];
-                let bottom = pixels[lower + usize::from(x)];
+                let left = usize::from(x) * across;
+                let right = left + across - 1;
+                let quad = [
+                    pixels[upper + left],
+                    pixels[upper + right],
+                    pixels[lower + left],
+                    pixels[lower + right],
+                ];
                 let cell = &mut buffer[(area.x + x, area.y + y)];
                 let was_covered = covered;
                 covered = cell.symbol().width() > 1;
@@ -416,11 +432,16 @@ impl Wallpaper {
                 }
                 let blank = cell.symbol() == " " && cell.modifier == Modifier::empty();
                 if blank && !was_covered {
-                    cell.set_char('▀');
-                    cell.fg = rgb(top);
-                    cell.bg = rgb(bottom);
+                    let (glyph, fg, bg) = if across == 2 {
+                        quadrant(quad)
+                    } else {
+                        ('▀', quad[0], quad[2])
+                    };
+                    cell.set_char(glyph);
+                    cell.fg = rgb(fg);
+                    cell.bg = rgb(bg);
                 } else {
-                    cell.bg = rgb(average(top, bottom));
+                    cell.bg = rgb(mean(&quad));
                 }
             }
         }
@@ -432,7 +453,12 @@ impl Wallpaper {
             .as_ref()
             .is_none_or(|(c, r, _)| *c != cols || *r != rows);
         if stale {
-            let fitted = fit_image(&self.source, u32::from(cols), u32::from(rows) * 2, self.fit);
+            let fitted = fit_image(
+                &self.source,
+                u32::from(cols) * u32::from(self.across),
+                u32::from(rows) * 2,
+                self.fit,
+            );
             let scale = self.opacity;
             let pixels = fitted
                 .pixels()
@@ -524,8 +550,62 @@ fn dim(channel: u8, scale: f32) -> u8 {
     (f32::from(channel) * scale).round() as u8
 }
 
-fn average(a: [u8; 3], b: [u8; 3]) -> [u8; 3] {
-    [0, 1, 2].map(|i| ((u16::from(a[i]) + u16::from(b[i])) / 2) as u8)
+fn mean(pixels: &[[u8; 3]]) -> [u8; 3] {
+    let count = pixels.len().max(1) as u32;
+    [0, 1, 2].map(|i| (pixels.iter().map(|p| u32::from(p[i])).sum::<u32>() / count) as u8)
+}
+
+fn distance(a: [u8; 3], b: [u8; 3]) -> u32 {
+    (0..3)
+        .map(|i| {
+            let d = i32::from(a[i]) - i32::from(b[i]);
+            (d * d) as u32
+        })
+        .sum()
+}
+
+/// Terminals that draw block elements themselves render quadrant glyphs
+/// without gaps; console fonts may lack them.
+fn quadrant_glyphs() -> bool {
+    std::env::var_os("WT_SESSION").is_some()
+        || std::env::var("TERM_PROGRAM").is_ok_and(|program| {
+            ["vscode", "WezTerm"]
+                .iter()
+                .any(|known| program.eq_ignore_ascii_case(known))
+        })
+}
+
+/// Best two-color approximation of a 2x2 block (top-left, top-right,
+/// bottom-left, bottom-right): split the pixels around the two most different
+/// ones and pick the quadrant glyph whose filled part is the first group.
+fn quadrant(pixels: [[u8; 3]; 4]) -> (char, [u8; 3], [u8; 3]) {
+    let (mut a, mut b, mut spread) = (0, 0, 0);
+    for i in 0..4 {
+        for j in i + 1..4 {
+            let d = distance(pixels[i], pixels[j]);
+            if d > spread {
+                (a, b, spread) = (i, j, d);
+            }
+        }
+    }
+    if spread < 64 {
+        let color = mean(&pixels);
+        return ('█', color, color);
+    }
+    let mut mask = 0u8;
+    let (mut fg, mut bg) = (Vec::with_capacity(4), Vec::with_capacity(4));
+    for (index, pixel) in pixels.iter().enumerate() {
+        if distance(*pixel, pixels[a]) <= distance(*pixel, pixels[b]) {
+            mask |= 0b1000 >> index;
+            fg.push(*pixel);
+        } else {
+            bg.push(*pixel);
+        }
+    }
+    const GLYPHS: [char; 16] = [
+        ' ', '▗', '▖', '▄', '▝', '▐', '▞', '▟', '▘', '▚', '▌', '▙', '▀', '▜', '▛', '█',
+    ];
+    (GLYPHS[usize::from(mask)], mean(&fg), mean(&bg))
 }
 
 fn rgb([r, g, b]: [u8; 3]) -> Color {
@@ -568,6 +648,7 @@ mod tests {
     #[test]
     fn paints_only_default_background_cells() {
         let mut wallpaper = Wallpaper::from_image(split_image(), 0.5, Fit::Stretch);
+        wallpaper.across = 1;
         let area = Rect::new(0, 0, 10, 4);
         let mut buffer = Buffer::empty(area);
         buffer.set_style(area, Style::default().bg(Color::Reset));
@@ -586,6 +667,41 @@ mod tests {
         // Cells with their own background are left alone.
         assert_eq!(buffer[(9, 3)].bg, Color::Rgb(1, 2, 3));
         assert_eq!(buffer[(9, 3)].symbol(), " ");
+    }
+
+    #[test]
+    fn quadrants_split_a_cell_between_two_colors() {
+        let (r, b) = ([200, 0, 0], [0, 0, 200]);
+        // Left column red, right column blue: a left half block.
+        assert_eq!(quadrant([r, b, r, b]), ('▌', r, b));
+        // Only the bottom-right pixel differs.
+        let (glyph, fg, bg) = quadrant([r, r, r, b]);
+        assert_eq!((glyph, fg, bg), ('▛', r, b));
+        // A diagonal.
+        assert_eq!(quadrant([r, b, b, r]).0, '▚');
+        // Nearly uniform cells are one solid color.
+        assert_eq!(quadrant([r, r, [201, 1, 0], r]).0, '█');
+    }
+
+    #[test]
+    fn quadrant_mode_doubles_the_horizontal_detail() {
+        let mut wallpaper = Wallpaper::from_image(split_image(), 1.0, Fit::Stretch);
+        wallpaper.across = 2;
+        // One cell wide over a red/blue split: half of each color.
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buffer = Buffer::empty(area);
+        wallpaper.paint(&mut buffer, area);
+        assert_eq!(buffer[(0, 0)].symbol(), "▌");
+        // Downscaling blends a little across the boundary; each half keeps
+        // its color.
+        let Color::Rgb(r, _, b) = buffer[(0, 0)].fg else {
+            panic!("expected an RGB foreground")
+        };
+        assert!(r > 150 && b < 50, "left half should be red: {r} {b}");
+        let Color::Rgb(r, _, b) = buffer[(0, 0)].bg else {
+            panic!("expected an RGB background")
+        };
+        assert!(b > 150 && r < 50, "right half should be blue: {r} {b}");
     }
 
     #[test]
@@ -633,6 +749,7 @@ mod tests {
     #[test]
     fn the_cell_behind_a_wide_character_is_not_overwritten() {
         let mut wallpaper = Wallpaper::from_image(split_image(), 1.0, Fit::Stretch);
+        wallpaper.across = 1;
         let area = Rect::new(0, 0, 4, 1);
         let mut buffer = Buffer::empty(area);
         buffer.set_string(0, 0, "界", Style::default());

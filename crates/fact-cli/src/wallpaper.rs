@@ -9,6 +9,7 @@
 //! draws at full resolution, with FACT transparent on top. The user's
 //! `settings.json` is never edited, and `fact wallpaper clear` removes it all.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -310,11 +311,15 @@ fn copy_to_fresh_name(source: &Path, dir: &Path, extension: &str) -> Result<Path
 /// FACT's own image names: `wallpaper-<digits>.<ext>`, plus the fixed
 /// `wallpaper.<ext>` and `incoming.<ext>` names used before.
 fn is_fact_image(path: &Path) -> bool {
-    // Only image copies: a video is always the user's own file.
+    // Only image copies: a video is always the user's own file. TIFF copies
+    // made by FACT 0.5 are still FACT's to clean up.
     let image = path
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| {
+            IMAGE_EXTENSIONS.contains(&ext.as_str()) || ext == "tif" || ext == "tiff"
+        });
     let Some(stem) = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -452,6 +457,37 @@ pub fn in_fact_profile() -> bool {
     })
 }
 
+/// Arguments for `wt.exe` that open FACT in a new tab of the current window
+/// with the wallpaper profile. `None` when an argument cannot be passed
+/// safely (Windows Terminal treats `;` as a command separator).
+pub fn new_tab_arguments(
+    exe: &Path,
+    dir: Option<&Path>,
+    fact_args: &[OsString],
+) -> Option<Vec<OsString>> {
+    let mut args: Vec<OsString> = ["-w", "0", "new-tab", "-p", PROFILE_NAME]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    if let Some(dir) = dir {
+        let mut dir = dir.as_os_str().to_os_string();
+        // A trailing backslash would escape the closing quote ("C:\").
+        if dir.to_string_lossy().ends_with('\\') {
+            dir.push(".");
+        }
+        args.push("-d".into());
+        args.push(dir);
+    }
+    args.push("--".into());
+    args.push(exe.as_os_str().to_os_string());
+    args.push("--transparent".into());
+    args.extend(fact_args.iter().cloned());
+    if args.iter().any(|arg| arg.to_string_lossy().contains(';')) {
+        return None;
+    }
+    Some(args)
+}
+
 pub fn describe(wallpaper: &Wallpaper) -> String {
     format!(
         "{} ({}opacity {:.0}%, {})",
@@ -476,6 +512,27 @@ impl From<ImageFit> for fact_client::WallpaperFit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_tab_arguments_keep_paths_intact() {
+        let exe = Path::new(r"C:\Program Files\FACT\fact.exe");
+        let args = new_tab_arguments(exe, Some(Path::new(r"C:\")), &["--grid".into(), "4".into()])
+            .unwrap();
+        let text: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&text[..5], ["-w", "0", "new-tab", "-p", "FACT"]);
+        assert_eq!(text[5..7], ["-d".to_string(), r"C:\.".to_string()]);
+        assert_eq!(text[7], "--");
+        assert_eq!(text[8], exe.display().to_string());
+        assert_eq!(text[9..], ["--transparent", "--grid", "4"]);
+        assert!(new_tab_arguments(exe, Some(Path::new(r"C:\a;b")), &[]).is_none());
+        assert!(
+            is_fact_image(Path::new("wallpaper-1.tiff")),
+            "old TIFF copies"
+        );
+    }
 
     #[test]
     fn verbatim_prefixes_are_removed_without_breaking_shares() {
