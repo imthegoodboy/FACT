@@ -78,6 +78,27 @@ impl PtyError {
     }
 }
 
+/// Called from the pane's I/O threads whenever new output is queued or the
+/// process exits, so the owner can react immediately instead of polling.
+#[derive(Clone)]
+pub struct OutputWaker(Arc<dyn Fn() + Send + Sync>);
+
+impl OutputWaker {
+    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(wake))
+    }
+
+    fn wake(&self) {
+        (self.0)();
+    }
+}
+
+impl std::fmt::Debug for OutputWaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OutputWaker")
+    }
+}
+
 /// Everything needed to start one pane process.
 #[derive(Debug, Clone)]
 pub struct SpawnOptions {
@@ -88,6 +109,7 @@ pub struct SpawnOptions {
     pub env: BTreeMap<String, String>,
     pub cols: u16,
     pub rows: u16,
+    pub waker: Option<OutputWaker>,
 }
 
 impl SpawnOptions {
@@ -99,6 +121,7 @@ impl SpawnOptions {
             env: BTreeMap::new(),
             cols,
             rows,
+            waker: None,
         }
     }
 }
@@ -247,8 +270,13 @@ impl PtyProcess {
         let (output_tx, output_rx) = mpsc::sync_channel::<Vec<u8>>(OUTPUT_QUEUE);
 
         spawn_input_writer(host_input_write, input_rx, shared.clone());
-        spawn_output_reader(host_output_read, output_tx, shared.clone());
-        spawn_exit_monitor(shared.clone());
+        spawn_output_reader(
+            host_output_read,
+            output_tx,
+            shared.clone(),
+            options.waker.clone(),
+        );
+        spawn_exit_monitor(shared.clone(), options.waker.clone());
 
         Ok(Self {
             pid,
@@ -570,7 +598,12 @@ fn spawn_input_writer(handle: usize, receiver: Receiver<Vec<u8>>, shared: Arc<Sh
         .expect("spawn ConPTY input thread");
 }
 
-fn spawn_output_reader(handle: usize, sender: SyncSender<Vec<u8>>, shared: Arc<Shared>) {
+fn spawn_output_reader(
+    handle: usize,
+    sender: SyncSender<Vec<u8>>,
+    shared: Arc<Shared>,
+    waker: Option<OutputWaker>,
+) {
     thread::Builder::new()
         .name("fact-pty-output".into())
         .spawn(move || {
@@ -583,6 +616,9 @@ fn spawn_output_reader(handle: usize, sender: SyncSender<Vec<u8>>, shared: Arc<S
                         if sender.send(buffer[..n].to_vec()).is_err() {
                             break;
                         }
+                        if let Some(waker) = &waker {
+                            waker.wake();
+                        }
                     }
                     Err(error) if error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => break,
                     Err(_) => break,
@@ -592,11 +628,14 @@ fn spawn_output_reader(handle: usize, sender: SyncSender<Vec<u8>>, shared: Arc<S
             if let Ok(mut state) = shared.state.lock() {
                 state.closed = true;
             }
+            if let Some(waker) = &waker {
+                waker.wake();
+            }
         })
         .expect("spawn ConPTY output thread");
 }
 
-fn spawn_exit_monitor(shared: Arc<Shared>) {
+fn spawn_exit_monitor(shared: Arc<Shared>, waker: Option<OutputWaker>) {
     thread::Builder::new()
         .name("fact-pty-exit".into())
         .spawn(move || {
@@ -622,6 +661,9 @@ fn spawn_exit_monitor(shared: Arc<Shared>) {
             shared.alive.store(false, Ordering::Release);
             // EOF for the output pipe depends on closing the pseudo console.
             shared.close_conpty();
+            if let Some(waker) = &waker {
+                waker.wake();
+            }
         })
         .expect("spawn ConPTY exit thread");
 }

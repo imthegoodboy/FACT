@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped when command or frame semantics change. It identifies the message
 /// shape used inside this build and in tests.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
 pub const BRACKETED_PASTE_START: &str = "\x1b[200~";
@@ -46,6 +46,12 @@ pub mod pane_modes {
     pub const MOUSE_DRAG: u32 = 1 << 6;
     pub const MOUSE_MOTION: u32 = 1 << 7;
     pub const SGR_MOUSE: u32 = 1 << 8;
+    /// ConPTY asked for Windows Terminal's win32-input-mode (`CSI ? 9001 h`).
+    /// Keys are then sent as full key events instead of lossy VT bytes.
+    pub const WIN32_INPUT: u32 = 1 << 9;
+    /// The app enabled the kitty keyboard protocol (`CSI > flags u`), so
+    /// modified Enter/Tab/Backspace are sent as `CSI code ; mods u`.
+    pub const KITTY_KEYS: u32 = 1 << 10;
 }
 
 /// Events pushed from the engine to the terminal UI.
@@ -146,6 +152,17 @@ pub enum Command {
     SetScrollOffset {
         pane: u64,
         offset: usize,
+    },
+    /// Move the nearest split edge of the focused pane one step.
+    ResizePane {
+        direction: FocusDirection,
+    },
+    /// Give every pane in the active tab an equal share of its split.
+    BalancePanes,
+    /// Reorder a tab in the tab strip.
+    MoveTab {
+        tab: u32,
+        index: usize,
     },
 }
 

@@ -113,7 +113,37 @@ pub fn chord_for(key: KeyEvent) -> Option<KeyChord> {
     Some(KeyChord::new(modifiers, code))
 }
 
+/// Windows reports AltGr as Ctrl+Alt. A Ctrl+Alt chord that produced a
+/// non-letter character (`@`, `{`, `ą`, `€`) is typed text, not a shortcut.
+fn is_altgr_text(key: &KeyEvent) -> bool {
+    matches!(key.code, CKey::Char(c) if !c.is_ascii_alphabetic() && !c.is_control())
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.modifiers.contains(KeyModifiers::ALT)
+}
+
+fn control_byte(c: char) -> Option<u8> {
+    Some(match c {
+        'a'..='z' => (c as u8) & 0x1f,
+        'A'..='Z' => (c.to_ascii_lowercase() as u8) & 0x1f,
+        '@' | ' ' => 0,
+        '[' => 27,
+        '\\' => 28,
+        ']' => 29,
+        '^' => 30,
+        '_' => 31,
+        '?' => 127,
+        _ => return None,
+    })
+}
+
 pub fn encode_key(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
+    if is_altgr_text(&key) {
+        let CKey::Char(c) = key.code else {
+            return None;
+        };
+        let mut buffer = [0u8; 4];
+        return Some(c.encode_utf8(&mut buffer).as_bytes().to_vec());
+    }
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -122,21 +152,7 @@ pub fn encode_key(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
         out.push(0x1b);
     }
     match key.code {
-        CKey::Char(c) if control => {
-            let byte = match c {
-                'a'..='z' => (c as u8) & 0x1f,
-                'A'..='Z' => (c.to_ascii_lowercase() as u8) & 0x1f,
-                '@' | ' ' => 0,
-                '[' => 27,
-                '\\' => 28,
-                ']' => 29,
-                '^' => 30,
-                '_' => 31,
-                '?' => 127,
-                _ => return None,
-            };
-            out.push(byte);
-        }
+        CKey::Char(c) if control => out.push(control_byte(c)?),
         CKey::Char(c) => {
             let mut buffer = [0u8; 4];
             out.extend_from_slice(c.encode_utf8(&mut buffer).as_bytes());
@@ -160,6 +176,140 @@ pub fn encode_key(key: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
         _ => return None,
     }
     Some(out)
+}
+
+/// Encode the keys that legacy VT bytes cannot express for an app that turned
+/// on the kitty keyboard protocol: Enter, Tab and Backspace with modifiers
+/// become `CSI code ; mods u`, so Shift+Enter inserts a newline in Claude
+/// Code, OpenCode or Copilot instead of submitting. Unmodified keys, Shift+Tab
+/// (`CSI Z`) and everything else keep their usual encoding, as the protocol's
+/// "disambiguate" level allows.
+pub fn encode_key_kitty(key: KeyEvent) -> Option<Vec<u8>> {
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let code = match key.code {
+        CKey::Enter if shift || alt || control => 13,
+        CKey::Backspace if shift || alt || control => 127,
+        CKey::Tab if alt || control => 9,
+        CKey::BackTab if alt || control => 9,
+        _ => return None,
+    };
+    let shift = shift || key.code == CKey::BackTab;
+    let mods = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(control);
+    Some(format!("\x1b[{code};{mods}u").into_bytes())
+}
+
+// Windows virtual-key codes and control-key-state flags used by
+// win32-input-mode (`CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`).
+const VK_BACK: u16 = 0x08;
+const VK_TAB: u16 = 0x09;
+const VK_RETURN: u16 = 0x0d;
+const VK_ESCAPE: u16 = 0x1b;
+const VK_SPACE: u16 = 0x20;
+const VK_PRIOR: u16 = 0x21;
+const VK_NEXT: u16 = 0x22;
+const VK_END: u16 = 0x23;
+const VK_HOME: u16 = 0x24;
+const VK_LEFT: u16 = 0x25;
+const VK_UP: u16 = 0x26;
+const VK_RIGHT: u16 = 0x27;
+const VK_DOWN: u16 = 0x28;
+const VK_INSERT: u16 = 0x2d;
+const VK_DELETE: u16 = 0x2e;
+const VK_F1: u16 = 0x70;
+const LEFT_ALT_PRESSED: u32 = 0x0002;
+const LEFT_CTRL_PRESSED: u32 = 0x0008;
+const SHIFT_PRESSED: u32 = 0x0010;
+const ENHANCED_KEY: u32 = 0x0100;
+
+/// Encode a key press for a pane whose ConPTY enabled win32-input-mode.
+///
+/// Windows Terminal sends every key this way, which is why console programs
+/// there can tell Shift+Enter, Ctrl+Enter or Ctrl+Backspace apart. FACT keeps
+/// ordinary text on the VT path (ConPTY turns it into identical key records)
+/// and sends a down/up record pair for everything VT bytes would flatten.
+pub fn encode_key_win32(key: KeyEvent) -> Option<Vec<u8>> {
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT) || key.code == CKey::BackTab;
+    let (vk, uc, enhanced) = match key.code {
+        CKey::Char(_) if is_altgr_text(&key) || (!control && !alt) => {
+            return encode_key(key, false);
+        }
+        CKey::Char(c) => {
+            let uc = if control {
+                control_byte(c).map_or(0, u16::from)
+            } else {
+                u16::try_from(u32::from(c)).unwrap_or(0)
+            };
+            let vk = if c == ' ' { VK_SPACE } else { vk_for_char(c) };
+            (vk, uc, false)
+        }
+        CKey::Enter => (VK_RETURN, if control { 0x0a } else { 0x0d }, false),
+        CKey::Tab | CKey::BackTab => (VK_TAB, if control { 0 } else { 0x09 }, false),
+        CKey::Backspace => (VK_BACK, if control { 0x7f } else { 0x08 }, false),
+        CKey::Esc => (VK_ESCAPE, 0x1b, false),
+        CKey::Left => (VK_LEFT, 0, true),
+        CKey::Up => (VK_UP, 0, true),
+        CKey::Right => (VK_RIGHT, 0, true),
+        CKey::Down => (VK_DOWN, 0, true),
+        CKey::Home => (VK_HOME, 0, true),
+        CKey::End => (VK_END, 0, true),
+        CKey::PageUp => (VK_PRIOR, 0, true),
+        CKey::PageDown => (VK_NEXT, 0, true),
+        CKey::Insert => (VK_INSERT, 0, true),
+        CKey::Delete => (VK_DELETE, 0, true),
+        CKey::F(n @ 1..=24) => (VK_F1 + u16::from(n) - 1, 0, false),
+        _ => return None,
+    };
+    let state = u32::from(alt) * LEFT_ALT_PRESSED
+        + u32::from(control) * LEFT_CTRL_PRESSED
+        + u32::from(shift) * SHIFT_PRESSED
+        + u32::from(enhanced) * ENHANCED_KEY;
+    let scan = scan_code(vk);
+    Some(
+        format!("\x1b[{vk};{scan};{uc};1;{state};1_\x1b[{vk};{scan};{uc};0;{state};1_")
+            .into_bytes(),
+    )
+}
+
+#[cfg(windows)]
+fn vk_for_char(c: char) -> u16 {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
+    let Ok(unit) = u16::try_from(u32::from(c)) else {
+        return 0;
+    };
+    // Low byte is the virtual key on the active layout; -1 means unmapped.
+    let scanned = unsafe { VkKeyScanW(unit) };
+    if scanned == -1 {
+        0
+    } else {
+        (scanned as u16) & 0xff
+    }
+}
+
+#[cfg(not(windows))]
+fn vk_for_char(c: char) -> u16 {
+    if c.is_ascii_alphanumeric() {
+        c.to_ascii_uppercase() as u16
+    } else {
+        0
+    }
+}
+
+#[cfg(windows)]
+fn scan_code(vk: u16) -> u32 {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, MAPVK_VK_TO_VSC};
+    if vk == 0 {
+        return 0;
+    }
+    unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) }
+}
+
+#[cfg(not(windows))]
+fn scan_code(_vk: u16) -> u32 {
+    0
 }
 
 fn modifier_code(modifiers: KeyModifiers) -> u8 {
@@ -339,6 +489,113 @@ mod tests {
         assert!(encode_key(key(CKey::F(1), KeyModifiers::NONE), false)
             .unwrap()
             .starts_with(b"\x1bOP"));
+    }
+
+    fn records(bytes: &[u8]) -> Vec<Vec<u32>> {
+        let text = std::str::from_utf8(bytes).unwrap();
+        text.split('_')
+            .filter(|part| !part.is_empty())
+            .map(|part| {
+                part.trim_start_matches("\x1b[")
+                    .split(';')
+                    .map(|n| n.parse().unwrap())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn win32_input_keeps_modifiers_that_vt_drops() {
+        let shift_enter = encode_key_win32(key(CKey::Enter, KeyModifiers::SHIFT)).unwrap();
+        let parts = records(&shift_enter);
+        assert_eq!(parts.len(), 2, "a down and an up record");
+        assert_eq!(parts[0][0], 0x0d);
+        assert_eq!(parts[0][2], 13);
+        assert_eq!(parts[0][3], 1);
+        assert_eq!(parts[0][4] & SHIFT_PRESSED, SHIFT_PRESSED);
+        assert_eq!(parts[1][3], 0);
+
+        let ctrl_back = encode_key_win32(key(CKey::Backspace, KeyModifiers::CONTROL)).unwrap();
+        let parts = records(&ctrl_back);
+        assert_eq!((parts[0][0], parts[0][2]), (0x08, 0x7f));
+        assert_eq!(parts[0][4] & LEFT_CTRL_PRESSED, LEFT_CTRL_PRESSED);
+
+        let ctrl_enter = encode_key_win32(key(CKey::Enter, KeyModifiers::CONTROL)).unwrap();
+        assert_eq!(records(&ctrl_enter)[0][2], 0x0a);
+
+        let up = encode_key_win32(key(CKey::Up, KeyModifiers::NONE)).unwrap();
+        assert_eq!(records(&up)[0][4], ENHANCED_KEY);
+
+        let ctrl_a = encode_key_win32(key(CKey::Char('a'), KeyModifiers::CONTROL)).unwrap();
+        let parts = records(&ctrl_a);
+        assert_eq!((parts[0][0], parts[0][2]), (0x41, 1));
+
+        let back_tab = encode_key_win32(key(CKey::BackTab, KeyModifiers::SHIFT)).unwrap();
+        assert_eq!(records(&back_tab)[0][4] & SHIFT_PRESSED, SHIFT_PRESSED);
+    }
+
+    #[test]
+    fn kitty_encodes_only_the_ambiguous_modified_keys() {
+        let encode = |code, modifiers| encode_key_kitty(key(code, modifiers));
+        assert_eq!(
+            encode(CKey::Enter, KeyModifiers::SHIFT).unwrap(),
+            b"\x1b[13;2u"
+        );
+        assert_eq!(
+            encode(CKey::Enter, KeyModifiers::CONTROL).unwrap(),
+            b"\x1b[13;5u"
+        );
+        assert_eq!(
+            encode(CKey::Enter, KeyModifiers::ALT).unwrap(),
+            b"\x1b[13;3u"
+        );
+        assert_eq!(
+            encode(CKey::Backspace, KeyModifiers::CONTROL).unwrap(),
+            b"\x1b[127;5u"
+        );
+        assert_eq!(
+            encode(CKey::Tab, KeyModifiers::CONTROL).unwrap(),
+            b"\x1b[9;5u"
+        );
+        assert_eq!(
+            encode(CKey::BackTab, KeyModifiers::CONTROL | KeyModifiers::SHIFT).unwrap(),
+            b"\x1b[9;6u"
+        );
+        // Plain keys stay legacy so a crashed app cannot break the shell.
+        assert!(encode(CKey::Enter, KeyModifiers::NONE).is_none());
+        assert!(encode(CKey::Backspace, KeyModifiers::NONE).is_none());
+        assert!(encode(CKey::BackTab, KeyModifiers::SHIFT).is_none());
+        assert!(encode(CKey::Char('c'), KeyModifiers::CONTROL).is_none());
+    }
+
+    #[test]
+    fn plain_and_altgr_text_stay_text() {
+        assert_eq!(
+            encode_key_win32(key(CKey::Char('x'), KeyModifiers::NONE)).unwrap(),
+            b"x"
+        );
+        assert_eq!(
+            encode_key_win32(key(CKey::Char('X'), KeyModifiers::SHIFT)).unwrap(),
+            b"X"
+        );
+        let altgr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(
+            encode_key(key(CKey::Char('@'), altgr), false).unwrap(),
+            b"@"
+        );
+        assert_eq!(
+            encode_key(key(CKey::Char('ą'), altgr), false).unwrap(),
+            "ą".as_bytes()
+        );
+        assert_eq!(
+            encode_key_win32(key(CKey::Char('€'), altgr)).unwrap(),
+            "€".as_bytes()
+        );
+        // A real Ctrl+Alt+letter chord is still a control sequence.
+        assert_eq!(
+            encode_key(key(CKey::Char('a'), altgr), false).unwrap(),
+            b"\x1b\x01"
+        );
     }
 
     #[test]

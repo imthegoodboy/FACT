@@ -326,7 +326,16 @@ pub const ACTIONS: &[&str] = &[
     "quit",
     "swap_pane",
     "move_pane",
+    "resize_left",
+    "resize_right",
+    "resize_up",
+    "resize_down",
+    "balance",
+    "cycle_theme",
 ];
+
+/// Binding value that leaves an action without a key.
+pub const UNBOUND: &str = "none";
 
 pub fn default_keybinds() -> BTreeMap<String, String> {
     [
@@ -359,6 +368,12 @@ pub fn default_keybinds() -> BTreeMap<String, String> {
         ("quit", "prefix+shift+q"),
         ("swap_pane", "prefix+w"),
         ("move_pane", "prefix+shift+o"),
+        ("resize_left", "prefix+shift+left"),
+        ("resize_right", "prefix+shift+right"),
+        ("resize_up", "prefix+shift+up"),
+        ("resize_down", "prefix+shift+down"),
+        ("balance", "prefix+="),
+        ("cycle_theme", "prefix+t"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -430,6 +445,9 @@ pub fn compile(
     let mut by_action = BTreeMap::new();
     let mut seen: BTreeMap<(bool, KeyChord), String> = BTreeMap::new();
     for (action, text) in raw {
+        if text.trim().eq_ignore_ascii_case(UNBOUND) {
+            continue;
+        }
         let binding = parse_binding(&text).map_err(|source| KeybindError::InvalidBinding {
             action: action.clone(),
             source,
@@ -475,6 +493,22 @@ mod tests {
         assert_eq!(
             parse_binding("prefix++").unwrap().chord.code,
             KeyCode::Char('+')
+        );
+    }
+
+    #[test]
+    fn none_unbinds_an_action_and_frees_its_key() {
+        let prefix = parse_prefix("ctrl+space").unwrap();
+        let mut overrides = BTreeMap::new();
+        overrides.insert("help".to_string(), "none".to_string());
+        // The freed F1 can now be reused by another action.
+        overrides.insert("palette".to_string(), "F1".to_string());
+        let compiled = compile(prefix, &overrides).unwrap();
+        assert!(compiled.binding("help").is_none());
+        assert_eq!(compiled.describe("help"), "unbound");
+        assert_eq!(
+            compiled.action_for(false, KeyChord::new(Modifiers::NONE, KeyCode::F(1))),
+            Some("palette")
         );
     }
 

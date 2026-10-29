@@ -19,7 +19,7 @@ use fact_protocol::{
     SplitOrientation, TabView, Viewport, BRACKETED_PASTE_END, BRACKETED_PASTE_START,
     MAX_GRID_PANES, MAX_INPUT_CHUNK, MAX_PASTE_BYTES,
 };
-use fact_pty::{PtyProcess, SpawnOptions};
+use fact_pty::{OutputWaker, PtyProcess, SpawnOptions};
 use fact_term::{TerminalEventSink, TerminalModel};
 
 use crate::model::{PaneRecord, SessionData};
@@ -42,6 +42,8 @@ struct PaneSpec<'a> {
 
 pub(crate) struct SessionManager {
     config: Config,
+    /// Shared by every pane so new output wakes the owner thread at once.
+    waker: Option<OutputWaker>,
     sessions: HashMap<String, LiveSession>,
     subscribers: Vec<Subscriber>,
     next_pane_id: u64,
@@ -105,9 +107,11 @@ impl SessionManager {
         grid: u8,
         profile: Option<&str>,
         cwd: Option<&str>,
+        waker: Option<OutputWaker>,
     ) -> Result<Self, ProtocolError> {
         let mut manager = Self {
             config,
+            waker,
             sessions: HashMap::new(),
             subscribers: Vec::new(),
             next_pane_id: 1,
@@ -278,10 +282,45 @@ impl SessionManager {
                 self.drag_split(&key, &path, ratio)?;
                 Ok(ResponsePayload::Ack)
             }
+            Command::ResizePane { direction } => {
+                let key = self.require_bound(bound_session)?;
+                self.resize_focused(&key, direction)?;
+                Ok(ResponsePayload::Ack)
+            }
+            Command::BalancePanes => {
+                let key = self.require_bound(bound_session)?;
+                self.edit_layout(&key, |layout| layout.balance())?;
+                Ok(ResponsePayload::Ack)
+            }
+            Command::MoveTab { tab, index } => {
+                let key = self.require_bound(bound_session)?;
+                self.edit_layout(&key, |layout| layout.move_tab(tab, index))?;
+                Ok(ResponsePayload::Ack)
+            }
         }
     }
 
-    pub(crate) fn tick(&mut self) {
+    /// Drain output, then publish frames. Returns `true` when output or a
+    /// frame is still waiting, so the owner should come back soon.
+    pub(crate) fn tick(&mut self) -> bool {
+        let backlog = self.drain_output();
+        let blocked = self.publish();
+        backlog || blocked
+    }
+
+    /// Send every subscriber the frame it needs. Returns `true` when a full
+    /// channel deferred one.
+    pub(crate) fn publish(&mut self) -> bool {
+        self.pump_frames()
+    }
+
+    /// Feed queued PTY output into the terminal models and answer terminal
+    /// queries. This runs as soon as output arrives: agents such as Claude
+    /// Code only accept a keyboard-protocol reply that comes back within a
+    /// fraction of a millisecond. Returns `true` when a pane still has output
+    /// queued beyond this pass's per-pane budget.
+    pub(crate) fn drain_output(&mut self) -> bool {
+        let mut backlog = false;
         let keys: Vec<String> = self.sessions.keys().cloned().collect();
         for key in keys {
             let mut meta_delta = 0u64;
@@ -292,6 +331,7 @@ impl SessionManager {
                     // race a final chunk arriving just after an empty read.
                     let output_closed = pane.pty.output_closed();
                     let mut output_drained = false;
+                    let mut emptied = false;
                     for _ in 0..OUTPUT_CHUNKS_PER_TICK {
                         match pane.pty.try_read() {
                             Some(bytes) => {
@@ -300,10 +340,12 @@ impl SessionManager {
                             }
                             None => {
                                 output_drained = output_closed;
+                                emptied = true;
                                 break;
                             }
                         }
                     }
+                    backlog |= !emptied;
                     if dirty {
                         pane.version = pane.version.wrapping_add(1);
                     }
@@ -372,7 +414,7 @@ impl SessionManager {
                 }
             }
         }
-        self.pump_frames();
+        backlog
     }
 
     pub(crate) fn shutdown_requested(&self) -> bool {
@@ -446,6 +488,7 @@ impl SessionManager {
             let (cols, rows) = dims.get(id).copied().unwrap_or((80, 24));
             let spawned = spawn_pane(
                 &self.config,
+                self.waker.as_ref(),
                 PaneSpec {
                     pane: *id,
                     profile,
@@ -618,6 +661,7 @@ impl SessionManager {
         let id = self.alloc_pane_id();
         let spawned = spawn_pane(
             &self.config,
+            self.waker.as_ref(),
             PaneSpec {
                 pane: id,
                 profile: profile.as_deref(),
@@ -750,6 +794,7 @@ impl SessionManager {
         };
         let mut spawned = spawn_pane(
             &self.config,
+            self.waker.as_ref(),
             PaneSpec {
                 pane,
                 profile: profile.as_deref(),
@@ -920,6 +965,7 @@ impl SessionManager {
         let id = self.alloc_pane_id();
         let spawned = spawn_pane(
             &self.config,
+            self.waker.as_ref(),
             PaneSpec {
                 pane: id,
                 profile: profile.as_deref(),
@@ -1181,6 +1227,48 @@ impl SessionManager {
         Ok(())
     }
 
+    fn resize_focused(
+        &mut self,
+        key: &str,
+        direction: FocusDirection,
+    ) -> Result<(), ProtocolError> {
+        let direction = match direction {
+            FocusDirection::Left => fact_layout::ResizeDirection::Left,
+            FocusDirection::Right => fact_layout::ResizeDirection::Right,
+            FocusDirection::Up => fact_layout::ResizeDirection::Up,
+            FocusDirection::Down => fact_layout::ResizeDirection::Down,
+        };
+        let mut moved = false;
+        self.edit_layout(key, |layout| {
+            moved = layout.resize_focused(direction, fact_layout::RESIZE_STEP)?;
+            Ok(())
+        })?;
+        if moved {
+            Ok(())
+        } else {
+            Err(ProtocolError::invalid(
+                "no split on that side of the focused pane",
+            ))
+        }
+    }
+
+    /// Apply a layout change, then refresh pane sizes and every subscriber.
+    fn edit_layout(
+        &mut self,
+        key: &str,
+        edit: impl FnOnce(&mut SessionLayout) -> Result<(), fact_layout::LayoutError>,
+    ) -> Result<(), ProtocolError> {
+        let session = self
+            .sessions
+            .get_mut(key)
+            .ok_or_else(|| ProtocolError::not_found("session is not running"))?;
+        edit(&mut session.data.layout).map_err(map_layout_error)?;
+        session.layout_epoch = session.layout_epoch.wrapping_add(1);
+        session.metadata_epoch = session.metadata_epoch.wrapping_add(1);
+        self.resize_session(key);
+        Ok(())
+    }
+
     fn end_live_empty(&mut self, key: &str) {
         if let Some(session) = self.sessions.remove(key) {
             for (_, pane) in session.panes {
@@ -1207,7 +1295,10 @@ impl SessionManager {
         self.subscribers = retained;
     }
 
-    fn pump_frames(&mut self) {
+    /// Send each subscriber the frame it needs. Returns `true` when a full
+    /// channel deferred a frame, so the owner retries soon.
+    fn pump_frames(&mut self) -> bool {
+        let mut blocked = false;
         let mut index = 0;
         while index < self.subscribers.len() {
             let Some(built) = self.build_frame_for(index) else {
@@ -1235,12 +1326,16 @@ impl SessionManager {
                     subscriber.metadata_epoch = metadata_epoch;
                     index += 1;
                 }
-                Err(TrySendError::Full(_)) => index += 1,
+                Err(TrySendError::Full(_)) => {
+                    blocked = true;
+                    index += 1;
+                }
                 Err(TrySendError::Disconnected(_)) => {
                     self.subscribers.remove(index);
                 }
             }
         }
+        blocked
     }
 
     fn build_frame_for(&mut self, index: usize) -> Option<BuiltFrame> {
@@ -1443,7 +1538,11 @@ impl SessionManager {
     }
 }
 
-fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolError> {
+fn spawn_pane(
+    config: &Config,
+    waker: Option<&OutputWaker>,
+    spec: PaneSpec<'_>,
+) -> Result<LivePane, ProtocolError> {
     let PaneSpec {
         pane,
         profile,
@@ -1491,10 +1590,11 @@ fn spawn_pane(config: &Config, spec: PaneSpec<'_>) -> Result<LivePane, ProtocolE
     let mut options = SpawnOptions::new(resolved.command.clone(), cols, rows);
     options.args = resolved.args.clone();
     options.cwd = workdir.clone();
-    options.env = resolved.env.clone();
+    options.env = fact_config::pane_environment(&resolved);
     options
         .env
         .insert(fact_protocol::ENV_PANE.to_string(), pane.to_string());
+    options.waker = waker.cloned();
     let pty = PtyProcess::spawn(options)
         .map_err(|error| ProtocolError::internal(format!("could not start pane: {error}")))?;
 
@@ -1576,7 +1676,7 @@ mod tests {
                 "1..90 | ForEach-Object { [Console]::Write(\"OUTPUT_$_`r`n\"); Start-Sleep -Milliseconds 20 }; [Console]::Write('FACT_FINAL_OUTPUT')".into()],
             ..fact_config::Profile::default()
         });
-        let mut manager = SessionManager::new(config, 1, Some("tail-output"), None).unwrap();
+        let mut manager = SessionManager::new(config, 1, Some("tail-output"), None, None).unwrap();
         let key = key_of(SESSION_NAME);
         let pane_id = *manager.sessions[&key].panes.keys().next().unwrap();
         // Delay the owner tick until the process has exited and its output is

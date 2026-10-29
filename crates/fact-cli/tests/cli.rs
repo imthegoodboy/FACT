@@ -40,8 +40,10 @@ impl TestHome {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        // Never touch the real Windows Terminal fragments folder.
         Command::new(fact_exe())
             .env("FACT_HOME", &self.path)
+            .env("FACT_WT_FRAGMENTS_DIR", self.fragments_dir())
             .args(args)
             .output()
             .expect("run fact")
@@ -66,6 +68,10 @@ impl TestHome {
     fn config_file(&self) -> PathBuf {
         self.path.join("config.toml")
     }
+
+    fn fragments_dir(&self) -> PathBuf {
+        self.path.join("wt-fragments")
+    }
 }
 
 impl Drop for TestHome {
@@ -87,7 +93,10 @@ fn help_describes_the_single_process_workspace() {
         "--profile",
         "--cwd",
         "--config",
+        "--transparent",
         "config",
+        "wallpaper",
+        "doctor",
         "workspace",
     ] {
         assert!(
@@ -128,6 +137,8 @@ fn config_validate_reports_built_in_defaults() {
     assert_eq!(value["prefix"], "ctrl+space");
     assert!(value["keybind_count"].as_u64().unwrap() >= 20);
     assert!(!value["default_shell"].as_str().unwrap_or("").is_empty());
+    assert_eq!(value["background"], "theme");
+    assert_eq!(value["alt_shortcuts"], false);
 
     let text = home.ok(["config", "validate"]);
     assert!(
@@ -198,4 +209,70 @@ fn obsolete_daemon_settings_are_rejected() {
         "unexpected error: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn wallpaper_set_show_and_clear_use_a_windows_terminal_fragment() {
+    let home = TestHome::new("wallpaper");
+    let none = home.ok(["wallpaper"]);
+    assert!(none.contains("No wallpaper set"), "unexpected: {none}");
+
+    let image = home.path.join("beach.png");
+    fs::write(&image, b"png bytes").expect("write image");
+    let set = home.ok([
+        "wallpaper".as_ref(),
+        "set".as_ref(),
+        image.as_os_str(),
+        "--opacity".as_ref(),
+        "25%".as_ref(),
+        "--fit".as_ref(),
+        "fit".as_ref(),
+    ]);
+    assert!(set.contains("wt -p FACT"), "unexpected: {set}");
+
+    let fragment = home.fragments_dir().join("FACT").join("fact.json");
+    let profile = &json(&fs::read_to_string(&fragment).expect("fragment"))["profiles"][0];
+    assert_eq!(profile["name"], "FACT");
+    assert_eq!(profile["backgroundImageOpacity"], 0.25);
+    assert_eq!(profile["backgroundImageStretchMode"], "uniform");
+    let copied = PathBuf::from(profile["backgroundImage"].as_str().unwrap());
+    assert!(
+        copied.starts_with(&home.path),
+        "image copy is outside FACT_HOME"
+    );
+    assert!(copied.is_file());
+    let commandline = profile["commandline"].as_str().unwrap();
+    assert!(commandline.contains("fact") && commandline.ends_with("--transparent"));
+
+    let shown = home.ok(["wallpaper"]);
+    assert!(
+        shown.contains("25%") && shown.contains("fit"),
+        "unexpected: {shown}"
+    );
+
+    let bad = home.run(["wallpaper", "set", "missing.png"]);
+    assert!(!bad.status.success());
+
+    let cleared = home.ok(["wallpaper", "clear"]);
+    assert!(cleared.contains("removed"), "unexpected: {cleared}");
+    assert!(!fragment.exists());
+    assert!(!copied.exists());
+}
+
+#[test]
+fn doctor_reports_without_changing_anything() {
+    let home = TestHome::new("doctor");
+    fs::create_dir_all(home.path.join("runtime")).expect("legacy dir");
+    let report = home.ok(["doctor"]);
+    for expected in ["FACT", "Terminal", "Config", "Wallpaper", "runtime"] {
+        assert!(
+            report.contains(expected),
+            "doctor did not mention {expected}:\n{report}"
+        );
+    }
+    assert!(
+        home.path.join("runtime").is_dir(),
+        "doctor must not delete files"
+    );
+    assert!(!home.config_file().exists(), "doctor must not write config");
 }
