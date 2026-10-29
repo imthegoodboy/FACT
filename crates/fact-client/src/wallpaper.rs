@@ -312,9 +312,10 @@ impl Wallpaper {
                 Ok(frame) => {
                     video.shown_at = now;
                     let scale = self.opacity;
-                    let pixels = frame
-                        .chunks_exact(3)
-                        .map(|p| [dim(p[0], scale), dim(p[1], scale), dim(p[2], scale)])
+                    let (pixels, _) = frame.as_chunks::<3>();
+                    let pixels = pixels
+                        .iter()
+                        .map(|p| p.map(|channel| dim(channel, scale)))
                         .collect();
                     self.cache = Some((video.size.0, video.size.1, pixels));
                     true
