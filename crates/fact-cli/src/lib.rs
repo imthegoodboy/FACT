@@ -76,8 +76,8 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum WallpaperAction {
-    /// Use an image (png, jpg, gif, bmp, webp, tif) or a video (mp4, mkv, webm,
-    /// mov, avi; needs ffmpeg) as the workspace background.
+    /// Use an image (png, jpg, jpeg, gif, bmp, webp) or a video (mp4, mkv, webm,
+    /// mov, avi, m4v, wmv, flv; needs ffmpeg) as the workspace background.
     Set {
         /// Image or video file. Images are copied; videos play from where they are.
         image: PathBuf,
@@ -149,10 +149,13 @@ fn launch(
         .filter(|current| current.image.is_file());
     // In Windows Terminal's FACT profile the terminal draws an image itself.
     let native = wallpaper::in_fact_profile() && current.as_ref().is_some_and(|w| !w.video);
-    if transparent || inherited || native {
+    // `background = "transparent"` in config.toml means the same as the flag:
+    // the terminal's own background shows, so FACT paints nothing.
+    let leave_background = transparent || config.transparent_background() || inherited || native;
+    if leave_background {
         config.background = "transparent".to_string();
     }
-    let painted = if transparent || inherited || native {
+    let painted = if leave_background {
         None
     } else {
         current.map(|current| fact_client::WallpaperSpec {

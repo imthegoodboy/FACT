@@ -37,6 +37,8 @@ pub enum Fit {
     Fit,
     /// Stretch to the screen, ignoring the aspect ratio.
     Stretch,
+    /// Keep a small image at its own size, centered; shrink a large one to fit.
+    Center,
 }
 
 /// What to paint behind the panes.
@@ -86,6 +88,8 @@ const MAX_FRAME: u32 = 320;
 const MIN_FRAME_TIME: Duration = Duration::from_millis(66);
 const MAX_FRAME_TIME: Duration = Duration::from_secs(2);
 const DEFAULT_FRAME_TIME: Duration = Duration::from_millis(100);
+/// How soon to look again when ffmpeg has not delivered the next frame yet.
+const VIDEO_RETRY: Duration = Duration::from_millis(10);
 
 pub struct Wallpaper {
     source: RgbImage,
@@ -129,6 +133,9 @@ impl Video {
                 "scale={width}:{height}:force_original_aspect_ratio=decrease:flags=area,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
             ),
             Fit::Stretch => format!("scale={width}:{height}:flags=area"),
+            Fit::Center => format!(
+                "scale='min(iw,{width})':'min(ih,{height})':force_original_aspect_ratio=decrease:flags=area,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
+            ),
         };
         let mut command = Command::new(&self.ffmpeg);
         command
@@ -256,7 +263,11 @@ impl Wallpaper {
         } else {
             image
         };
-        Ok(Self::from_image(image.to_rgb8(), spec.opacity, spec.fit))
+        Ok(Self::from_image(
+            over_black(image.to_rgba8()),
+            spec.opacity,
+            spec.fit,
+        ))
     }
 
     pub fn from_image(source: RgbImage, opacity: f32, fit: Fit) -> Self {
@@ -320,8 +331,14 @@ impl Wallpaper {
                     self.cache = Some((video.size.0, video.size.1, pixels));
                     true
                 }
-                // Not decoded yet; try again on the next frame tick.
-                Err(TryRecvError::Empty) => false,
+                // Not decoded yet: look again shortly instead of spinning on
+                // a deadline that has already passed.
+                Err(TryRecvError::Empty) => {
+                    video.shown_at = (now + VIDEO_RETRY)
+                        .checked_sub(Video::frame_time())
+                        .unwrap_or(now);
+                    false
+                }
                 Err(TryRecvError::Disconnected) => {
                     // ffmpeg stopped (unreadable file); keep the last frame.
                     video.stop();
@@ -452,6 +469,11 @@ fn frame_image(frame: image::Frame) -> RgbImage {
         let height = ((f64::from(rgba.height()) * scale).round() as u32).max(1);
         rgba = imageops::thumbnail(&rgba, width, height);
     }
+    over_black(rgba)
+}
+
+/// Composite transparent pixels over black, the color behind the wallpaper.
+fn over_black(rgba: image::RgbaImage) -> RgbImage {
     RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
         let [r, g, b, a] = rgba.get_pixel(x, y).0;
         let alpha = u16::from(a);
@@ -477,8 +499,12 @@ fn fit_image(source: &RgbImage, width: u32, height: u32, fit: Fit) -> RgbImage {
                     .to_image();
             imageops::resize(&cropped, width, height, FilterType::Triangle)
         }
-        Fit::Fit => {
-            let scale = (f64::from(width) / f64::from(sw)).min(f64::from(height) / f64::from(sh));
+        Fit::Fit | Fit::Center => {
+            let mut scale =
+                (f64::from(width) / f64::from(sw)).min(f64::from(height) / f64::from(sh));
+            if fit == Fit::Center {
+                scale = scale.min(1.0);
+            }
             let fit_w = ((f64::from(sw) * scale).round() as u32).clamp(1, width);
             let fit_h = ((f64::from(sh) * scale).round() as u32).clamp(1, height);
             let resized = imageops::resize(source, fit_w, fit_h, FilterType::Triangle);
@@ -525,13 +551,18 @@ mod tests {
     #[test]
     fn fit_modes_produce_the_requested_size() {
         let source = split_image();
-        for fit in [Fit::Fill, Fit::Fit, Fit::Stretch] {
+        for fit in [Fit::Fill, Fit::Fit, Fit::Stretch, Fit::Center] {
             let image = fit_image(&source, 30, 24, fit);
             assert_eq!(image.dimensions(), (30, 24), "{fit:?}");
         }
         // Letterboxing leaves black bars above and below a wide image.
         let boxed = fit_image(&source, 30, 30, Fit::Fit);
         assert_eq!(boxed.get_pixel(15, 0), &Rgb([0, 0, 0]));
+        // Center never enlarges: a 40x20 image keeps its size on a big screen.
+        let centered = fit_image(&source, 100, 60, Fit::Center);
+        assert_eq!(centered.get_pixel(29, 30), &Rgb([0, 0, 0]));
+        assert_eq!(centered.get_pixel(31, 30), &Rgb([200, 0, 0]));
+        assert_eq!(centered.get_pixel(30, 19), &Rgb([0, 0, 0]));
     }
 
     #[test]

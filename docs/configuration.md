@@ -285,12 +285,12 @@ in any terminal: Windows Terminal, the classic console, VS Code and others.
 ```powershell
 fact wallpaper set C:\Pictures\sky.jpg               # 35% strength, cover the window
 fact wallpaper set .\forest.png --opacity 20 --fit fit
-fact wallpaper set C:\Videos\rain.mp4                # loops; needs ffmpeg on PATH
+fact wallpaper set C:\Videos\rain.mp4                # loops; needs ffmpeg
 fact wallpaper                                       # show the current wallpaper
 fact wallpaper clear                                 # remove it again
 ```
 
-- **Images** (png, jpg, gif, bmp, webp, tif) are copied to
+- **Images** (png, jpg, jpeg, gif, bmp, webp) are copied to
   `%LOCALAPPDATA%\FACT\wallpaper\`. Animated GIFs loop.
 - **Videos** (mp4, mkv, webm, mov, avi, m4v, wmv, flv) play from where they are,
   in a loop, at their own colors. ffmpeg decodes them and streams frames scaled
@@ -303,7 +303,10 @@ fact wallpaper clear                                 # remove it again
 - Animation pauses while the FACT window is unfocused, so a video costs nothing
   in the background.
 - `--fit` accepts `fill` (default, cover and crop), `fit` (letterbox),
-  `stretch` and `center`.
+  `stretch` and `center` (a small image keeps its size, centered; a large one
+  is shrunk to fit).
+- `background = "transparent"` or `--transparent` turns the painted wallpaper
+  off so the terminal's own background shows.
 
 For images, `set` also writes a Windows Terminal *fragment*
 (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`) that adds

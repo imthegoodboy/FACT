@@ -82,9 +82,9 @@ npm uninstall -g fact-terminal    # remove
 fact --version
 ```
 
-Requirements: Windows 10 1809+ (Windows 11 recommended), any terminal. Video
-wallpapers additionally need [ffmpeg](https://ffmpeg.org) on PATH
-(`winget install ffmpeg`).
+Requirements: Windows 11 x64 (Windows 10 1809+ is expected to work but is not
+verified; see [Compatibility](#compatibility)), any terminal. Video wallpapers
+also need [ffmpeg](https://ffmpeg.org) (`winget install ffmpeg`).
 
 **PowerShell installer.** Releases also ship a single `fact.exe`, SHA-256
 checksums and PowerShell install scripts:
@@ -136,7 +136,7 @@ fact --cwd . --grid 1             # start the initial shells in this directory
 fact doctor                       # check terminal, config, duplicate installs and agent CLIs
 fact wallpaper set C:\Pictures\sky.jpg   # background picture, in every terminal
 fact wallpaper set C:\Videos\rain.mp4   # looping video background (needs ffmpeg)
-fact wallpaper clear              # back to plain black
+fact wallpaper clear              # back to the theme background
 fact config path                  # print the configuration file in use
 fact config validate              # parse and validate configuration
 fact config init                  # write a documented default config.toml
@@ -309,7 +309,7 @@ FACT adds no scrollbar to alternate-screen or mouse-controlled agent UIs.
 | --- | --- |
 | `fact [--grid N] [--profile NAME] [--cwd DIR] [--transparent] [--config FILE]` | Start a fresh workspace and open the TUI. |
 | `fact doctor` | Report the host terminal, config, duplicate `fact` installs on PATH, agent CLIs, wallpaper and old data. Changes nothing. |
-| `fact wallpaper set FILE [--opacity N] [--fit fill\|fit\|stretch\|center]` | Put an image (png, jpg, gif, bmp, webp, tif) or a looping video (mp4, mkv, webm, mov, avi; needs ffmpeg) behind every pane. |
+| `fact wallpaper set FILE [--opacity N] [--fit fill\|fit\|stretch\|center]` | Put an image (png, jpg, jpeg, gif, bmp, webp) or a looping video (mp4, mkv, webm, mov, avi, m4v, wmv, flv; needs ffmpeg) behind every pane. |
 | `fact wallpaper` / `fact wallpaper clear` | Show / remove the wallpaper. |
 | `fact config path` | Print the configuration file path in use. |
 | `fact config validate [--json]` | Parse, validate and compile the configuration. |

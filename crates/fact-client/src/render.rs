@@ -339,6 +339,8 @@ impl App {
             let cell = &mut buffer[(track.x, y)];
             cell.set_char('│');
             cell.set_fg(self.theme.gutter);
+            // Bold or underlined text underneath must not restyle the rail.
+            cell.modifier = Modifier::empty();
         }
         let thumb_top = geometry.thumb_y.max(geometry.track.y).min(
             geometry
@@ -370,6 +372,7 @@ impl App {
             let cell = &mut buffer[(track.x, y)];
             cell.set_char('┃');
             cell.set_fg(thumb_fg);
+            cell.modifier = Modifier::empty();
         }
     }
 

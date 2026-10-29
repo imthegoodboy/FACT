@@ -74,8 +74,8 @@ impl Theme {
         Self {
             name: "fact-dark",
             transparent: false,
-            // The default workspace is intentionally monochrome: black chrome,
-            // white type and only the warning/error accents carry color.
+            // The default workspace is intentionally monochrome: black chrome and
+            // white type; only selection and the warning/error accents carry color.
             bg: Color::Rgb(0, 0, 0),
             fg: Color::Rgb(231, 233, 237),
             muted: Color::Rgb(132, 138, 148),

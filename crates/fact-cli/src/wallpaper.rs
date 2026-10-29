@@ -19,7 +19,7 @@ use serde_json::{json, Value};
 pub const PROFILE_GUID: &str = "{4c8f3a1d-6b2e-4f9a-8d71-3e5c0b9a2f64}";
 pub const PROFILE_NAME: &str = "FACT";
 const FRAGMENT_FILE: &str = "fact.json";
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff"];
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
 const RECORD_FILE: &str = "settings.json";
 pub const DEFAULT_OPACITY: f64 = 0.35;
 
@@ -230,13 +230,16 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
         fit,
         video,
     };
-    let committed = write_fragment(
-        locations,
-        (!video).then_some(wallpaper.image.as_path()),
-        opacity,
-        fit,
-    )
-    .and_then(|()| write_record(locations, &wallpaper));
+    // The record is FACT's source of truth, so it is written first; the
+    // Windows Terminal profile follows it.
+    let committed = write_record(locations, &wallpaper).and_then(|()| {
+        write_fragment(
+            locations,
+            (!video).then_some(wallpaper.image.as_path()),
+            opacity,
+            fit,
+        )
+    });
     if let Err(error) = committed {
         if !video {
             let _ = fs::remove_file(&wallpaper.image);
@@ -245,14 +248,17 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
     }
     // The new wallpaper is committed. Old copies are only clutter, so a
     // failure to delete one must not turn this success into an error.
-    let keep = (!video).then_some(wallpaper.image.as_path());
-    let _ = remove_images(&locations.image_dir, keep);
+    let _ = remove_images(&locations.image_dir, Some(wallpaper.image.as_path()));
     Ok(wallpaper)
 }
 
 /// `canonicalize` returns `\\?\C:\...`; keep the familiar form.
 fn strip_verbatim(path: &Path) -> PathBuf {
     let text = path.display().to_string();
+    // `\\?\UNC\server\share\...` is the verbatim form of `\\server\share\...`.
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{share}"));
+    }
     PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
 }
 
@@ -304,7 +310,16 @@ fn copy_to_fresh_name(source: &Path, dir: &Path, extension: &str) -> Result<Path
 /// FACT's own image names: `wallpaper-<digits>.<ext>`, plus the fixed
 /// `wallpaper.<ext>` and `incoming.<ext>` names used before.
 fn is_fact_image(path: &Path) -> bool {
-    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+    // Only image copies: a video is always the user's own file.
+    let image = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+    let Some(stem) = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|_| image)
+    else {
         return false;
     };
     let stem = stem.to_ascii_lowercase();
@@ -451,7 +466,8 @@ impl From<ImageFit> for fact_client::WallpaperFit {
     fn from(fit: ImageFit) -> Self {
         match fit {
             ImageFit::Fill => Self::Fill,
-            ImageFit::Fit | ImageFit::Center => Self::Fit,
+            ImageFit::Fit => Self::Fit,
+            ImageFit::Center => Self::Center,
             ImageFit::Stretch => Self::Stretch,
         }
     }
@@ -460,6 +476,19 @@ impl From<ImageFit> for fact_client::WallpaperFit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_prefixes_are_removed_without_breaking_shares() {
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\Videos\a.mp4")),
+            PathBuf::from(r"C:\Videos\a.mp4")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\server\share\a.mp4")),
+            PathBuf::from(r"\\server\share\a.mp4")
+        );
+        assert!(!is_fact_image(Path::new("wallpaper-123.mp4")));
+    }
 
     #[test]
     fn opacity_accepts_percent_and_fraction() {
