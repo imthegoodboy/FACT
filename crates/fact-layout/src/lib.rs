@@ -29,6 +29,18 @@ pub enum SplitDirection {
     Down,
 }
 
+/// Direction in which a keyboard resize moves the focused pane's split edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResizeDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Ratio change for one keyboard resize step.
+pub const RESIZE_STEP: f32 = 0.05;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LayoutNode {
@@ -566,6 +578,77 @@ impl SessionLayout {
         tab.focus
     }
 
+    /// Move a split edge of the focused pane: the gutter travels in
+    /// `direction`, preferring the pane's edge on that side (so Left grows a
+    /// middle pane leftwards) and falling back to its other edge for a pane at
+    /// the border. Returns `false` when nothing moved: no split in that
+    /// orientation, or the ratio is already at its limit.
+    pub fn resize_focused(
+        &mut self,
+        direction: ResizeDirection,
+        step: f32,
+    ) -> Result<bool, LayoutError> {
+        if !step.is_finite() {
+            return Err(LayoutError::Invalid("resize step is not finite".into()));
+        }
+        let active = self.active_tab;
+        let tab = self.active_mut().ok_or(LayoutError::MissingTab(active))?;
+        let focus = tab.focus.ok_or(LayoutError::InvalidTree)?;
+        let root = tab.root.as_mut().ok_or(LayoutError::InvalidTree)?;
+        let path = leaf_path(root, focus).ok_or(LayoutError::MissingPane(focus))?;
+        // `side` is the child holding the pane when the gutter lies on the
+        // requested side of it: moving left prefers the pane's left edge,
+        // which is the gutter of a split where the pane is the second child.
+        let (wanted, side, delta) = match direction {
+            ResizeDirection::Left => (SplitOrientation::Horizontal, 1, -step),
+            ResizeDirection::Right => (SplitOrientation::Horizontal, 0, step),
+            ResizeDirection::Up => (SplitOrientation::Vertical, 1, -step),
+            ResizeDirection::Down => (SplitOrientation::Vertical, 0, step),
+        };
+        let matching = |prefer_side: bool| {
+            (0..path.len()).rev().find(|&depth| {
+                let node = node_at(root, &path[..depth]);
+                matches!(node, Some(LayoutNode::Split { orientation, .. }) if *orientation == wanted)
+                    && (!prefer_side || path[depth] == side)
+            })
+        };
+        // An edge pane has no gutter on that side; move its other edge.
+        let Some(depth) = matching(true).or_else(|| matching(false)) else {
+            return Ok(false);
+        };
+        let Some(LayoutNode::Split { ratio, .. }) = node_at_mut(root, &path[..depth]) else {
+            return Ok(false);
+        };
+        let moved = (*ratio + delta).clamp(MIN_RATIO, MAX_RATIO);
+        let changed = (moved - *ratio).abs() > f32::EPSILON;
+        *ratio = moved;
+        Ok(changed)
+    }
+
+    /// Give every pane in the active tab an equal share along each split
+    /// direction, so `A | (B | C)` becomes three equal columns.
+    pub fn balance(&mut self) -> Result<(), LayoutError> {
+        let active = self.active_tab;
+        let tab = self.active_mut().ok_or(LayoutError::MissingTab(active))?;
+        if let Some(root) = tab.root.as_mut() {
+            balance_node(root);
+        }
+        Ok(())
+    }
+
+    /// Move a tab to `index` in the strip (clamped to the end).
+    pub fn move_tab(&mut self, tab_id: u32, index: usize) -> Result<(), LayoutError> {
+        let from = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+            .ok_or(LayoutError::MissingTab(tab_id))?;
+        let tab = self.tabs.remove(from);
+        let index = index.min(self.tabs.len());
+        self.tabs.insert(index, tab);
+        Ok(())
+    }
+
     pub fn set_split_ratio(&mut self, path: &[u8], ratio: f32) -> Result<(), LayoutError> {
         let active = self.active_tab;
         let tab = self.active_mut().ok_or(LayoutError::MissingTab(active))?;
@@ -1074,6 +1157,83 @@ impl<'a> Iterator for Leaves<'a> {
     }
 }
 
+/// Child steps (0 = first, 1 = second) from `node` down to the leaf `target`.
+fn leaf_path(node: &LayoutNode, target: u64) -> Option<Vec<u8>> {
+    match node {
+        LayoutNode::Leaf { pane } => (*pane == target).then(Vec::new),
+        LayoutNode::Split { first, second, .. } => {
+            for (step, child) in [(0u8, first), (1u8, second)] {
+                if let Some(mut rest) = leaf_path(child, target) {
+                    rest.insert(0, step);
+                    return Some(rest);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn node_at<'a>(node: &'a LayoutNode, path: &[u8]) -> Option<&'a LayoutNode> {
+    let Some((&step, rest)) = path.split_first() else {
+        return Some(node);
+    };
+    match node {
+        LayoutNode::Split { first, second, .. } => match step {
+            0 => node_at(first, rest),
+            1 => node_at(second, rest),
+            _ => None,
+        },
+        LayoutNode::Leaf { .. } => None,
+    }
+}
+
+fn node_at_mut<'a>(node: &'a mut LayoutNode, path: &[u8]) -> Option<&'a mut LayoutNode> {
+    let Some((&step, rest)) = path.split_first() else {
+        return Some(node);
+    };
+    match node {
+        LayoutNode::Split { first, second, .. } => match step {
+            0 => node_at_mut(first, rest),
+            1 => node_at_mut(second, rest),
+            _ => None,
+        },
+        LayoutNode::Leaf { .. } => None,
+    }
+}
+
+/// Number of slots a subtree occupies along `orientation`.
+fn split_weight(node: &LayoutNode, orientation: SplitOrientation) -> usize {
+    match node {
+        LayoutNode::Split {
+            orientation: own,
+            first,
+            second,
+            ..
+        } if *own == orientation => {
+            split_weight(first, orientation) + split_weight(second, orientation)
+        }
+        _ => 1,
+    }
+}
+
+fn balance_node(node: &mut LayoutNode) {
+    if let LayoutNode::Split {
+        orientation,
+        ratio,
+        first,
+        second,
+    } = node
+    {
+        let a = split_weight(first, *orientation);
+        let b = split_weight(second, *orientation);
+        // Ratios stay within the validated range, so a chain of more than ten
+        // panes in one direction is as even as that range allows, not exact.
+        *ratio = (a as f32 / (a + b) as f32).clamp(MIN_RATIO, MAX_RATIO);
+        balance_node(first);
+        balance_node(second);
+    }
+}
+
 fn first_leaf(node: &LayoutNode) -> Option<u64> {
     leaves(node).next()
 }
@@ -1093,6 +1253,110 @@ mod tests {
             min_content_cols: 20,
             min_content_rows: 4,
         }
+    }
+
+    fn root_ratio(layout: &SessionLayout) -> f32 {
+        match layout.active().unwrap().root.as_ref().unwrap() {
+            LayoutNode::Split { ratio, .. } => *ratio,
+            LayoutNode::Leaf { .. } => panic!("expected a split"),
+        }
+    }
+
+    #[test]
+    fn keyboard_resize_moves_the_nearest_matching_gutter() {
+        let mut layout = SessionLayout::new(1, &[1]);
+        layout.split_pane(1, 2, SplitDirection::Right).unwrap();
+        layout.focus_pane(1).unwrap();
+        assert!(layout
+            .resize_focused(ResizeDirection::Right, RESIZE_STEP)
+            .unwrap());
+        assert!((root_ratio(&layout) - 0.55).abs() < 1e-4);
+        layout.focus_pane(2).unwrap();
+        assert!(layout
+            .resize_focused(ResizeDirection::Left, RESIZE_STEP)
+            .unwrap());
+        assert!((root_ratio(&layout) - 0.5).abs() < 1e-4);
+        // No vertical split exists, so up/down report that nothing changed.
+        assert!(!layout
+            .resize_focused(ResizeDirection::Up, RESIZE_STEP)
+            .unwrap());
+        for _ in 0..40 {
+            layout
+                .resize_focused(ResizeDirection::Left, RESIZE_STEP)
+                .unwrap();
+        }
+        assert!((root_ratio(&layout) - MIN_RATIO).abs() < 1e-4);
+    }
+
+    #[test]
+    fn keyboard_resize_skips_splits_in_the_other_orientation() {
+        let mut layout = SessionLayout::new(1, &[1]);
+        layout.split_pane(1, 2, SplitDirection::Right).unwrap();
+        layout.split_pane(2, 3, SplitDirection::Down).unwrap();
+        layout.focus_pane(3).unwrap();
+        assert!(layout
+            .resize_focused(ResizeDirection::Left, RESIZE_STEP)
+            .unwrap());
+        assert!((root_ratio(&layout) - 0.45).abs() < 1e-4);
+    }
+
+    #[test]
+    fn keyboard_resize_prefers_the_edge_on_the_requested_side() {
+        // A | (B | C): Left on B moves the A/B gutter, Right moves B/C.
+        let mut layout = SessionLayout::new(1, &[1]);
+        layout.split_pane(1, 2, SplitDirection::Right).unwrap();
+        layout.split_pane(2, 3, SplitDirection::Right).unwrap();
+        layout.focus_pane(2).unwrap();
+        let inner = |layout: &SessionLayout| match layout.active().unwrap().root.as_ref().unwrap() {
+            LayoutNode::Split { second, .. } => match second.as_ref() {
+                LayoutNode::Split { ratio, .. } => *ratio,
+                LayoutNode::Leaf { .. } => panic!("expected the inner split"),
+            },
+            LayoutNode::Leaf { .. } => panic!("expected a split"),
+        };
+        assert!(layout
+            .resize_focused(ResizeDirection::Left, RESIZE_STEP)
+            .unwrap());
+        assert!((root_ratio(&layout) - 0.45).abs() < 1e-4);
+        assert!((inner(&layout) - 0.5).abs() < 1e-4);
+        assert!(layout
+            .resize_focused(ResizeDirection::Right, RESIZE_STEP)
+            .unwrap());
+        assert!((root_ratio(&layout) - 0.45).abs() < 1e-4);
+        assert!((inner(&layout) - 0.55).abs() < 1e-4);
+        assert!(layout
+            .resize_focused(ResizeDirection::Left, f32::NAN)
+            .is_err());
+    }
+
+    #[test]
+    fn balance_gives_chained_splits_equal_shares() {
+        let mut layout = SessionLayout::new(1, &[1]);
+        layout.split_pane(1, 2, SplitDirection::Right).unwrap();
+        layout.split_pane(2, 3, SplitDirection::Right).unwrap();
+        layout.set_split_ratio(&[], 0.8).unwrap();
+        layout.balance().unwrap();
+        assert!((root_ratio(&layout) - 1.0 / 3.0).abs() < 1e-4);
+        let result = layout.layout(opts(91, 20));
+        let widths: Vec<u16> = result.panes.iter().map(|p| p.content.width).collect();
+        assert_eq!(widths.len(), 3);
+        let spread = widths.iter().max().unwrap() - widths.iter().min().unwrap();
+        assert!(spread <= 1, "unequal widths {widths:?}");
+    }
+
+    #[test]
+    fn tabs_can_be_reordered() {
+        let mut layout = SessionLayout::new(1, &[1]);
+        layout.add_tab(2, &[2], "two");
+        layout.add_tab(3, &[3], "three");
+        layout.move_tab(3, 0).unwrap();
+        let order: Vec<u32> = layout.tabs.iter().map(|t| t.id).collect();
+        assert_eq!(order, vec![3, 1, 2]);
+        layout.move_tab(3, 99).unwrap();
+        let order: Vec<u32> = layout.tabs.iter().map(|t| t.id).collect();
+        assert_eq!(order, vec![1, 2, 3]);
+        assert_eq!(layout.move_tab(9, 0), Err(LayoutError::MissingTab(9)));
+        layout.validate().unwrap();
     }
 
     #[test]

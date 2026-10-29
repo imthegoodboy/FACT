@@ -152,6 +152,35 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Publish npm package
+        shell: pwsh
+        env:
+          # Optional. Scoped to this step only; without it the step is a no-op.
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if (-not $env:NPM_TOKEN) {
+            Write-Host "NPM_TOKEN is not set; skipping npm publish"
+            exit 0
+          }
+          ./scripts/pack-npm.ps1 -BinaryPath target/release/fact.exe -OutDir npm-dist
+          $tarball = Get-ChildItem npm-dist -Filter "fact-terminal-*.tgz" | Select-Object -First 1
+          if (-not $tarball) { throw "npm tarball missing" }
+          $version = $tarball.BaseName.Substring("fact-terminal-".Length)
+          # Re-runs after a later failure must not fail here: npm versions are immutable.
+          $published = npm view "fact-terminal@$version" version 2>$null
+          if ($published -eq $version) {
+            Write-Host "fact-terminal@$version is already on npm"
+            exit 0
+          }
+          $rc = Join-Path $env:RUNNER_TEMP "npmrc"
+          "//registry.npmjs.org/:_authToken=$env:NPM_TOKEN" | Set-Content -LiteralPath $rc -Encoding ascii
+          try {
+            npm publish $tarball.FullName --access public --userconfig $rc
+            if ($LASTEXITCODE -ne 0) { throw "npm publish failed" }
+          } finally {
+            Remove-Item -LiteralPath $rc -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Publish GitHub release
         shell: pwsh
         env:

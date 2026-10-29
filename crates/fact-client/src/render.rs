@@ -12,7 +12,7 @@ use ratatui::layout::Position;
 use crate::{
     action_label, filtered_palette, fit_text as fit, help_lines, minimized_tray_rect, new_tab_rect,
     palette_items, pane_scroll_mode, tab_ranges, App, ContextState, HelpState, Overlay,
-    PaletteState, PromptKind, PromptState, ScrollMode, SearchState,
+    PaletteState, PaneDropTarget, PromptKind, PromptState, ScrollMode, SearchState,
 };
 
 impl App {
@@ -23,7 +23,12 @@ impl App {
         }
         {
             let buffer = frame.buffer_mut();
-            buffer.set_style(area, Style::default().bg(self.theme.bg).fg(self.theme.fg));
+            buffer.set_style(
+                area,
+                Style::default()
+                    .bg(self.theme.screen_bg())
+                    .fg(self.theme.fg),
+            );
         }
 
         // The tab strip is the only persistent chrome, and it appears only when
@@ -69,7 +74,15 @@ impl App {
                 .panes
                 .iter()
                 .any(|pane| pane.tab == tab.id && self.bells.contains(&pane.id));
-            let style = if tab.active {
+            let drop_target = self
+                .pane_drag
+                .is_some_and(|drag| drag.target == Some(PaneDropTarget::Tab(tab.id)));
+            let style = if drop_target {
+                Style::default()
+                    .bg(self.theme.accent)
+                    .fg(self.theme.bg)
+                    .add_modifier(Modifier::BOLD)
+            } else if tab.active {
                 Style::default()
                     .bg(self.theme.title_focus_bg)
                     .fg(self.theme.title_focus_fg)
@@ -113,6 +126,45 @@ impl App {
             self.render_pane(frame, main, pane);
         }
         self.render_splits(frame, main, frame_data);
+        self.render_drop_target(frame, main, frame_data);
+    }
+
+    /// Outline the pane an Alt+dragged pane would swap with.
+    fn render_drop_target(&self, frame: &mut Frame, main: Rect, frame_data: &fact_protocol::Frame) {
+        let Some(PaneDropTarget::Pane(target)) = self.pane_drag.and_then(|drag| drag.target) else {
+            return;
+        };
+        let Some(pane) = frame_data.panes.iter().find(|pane| pane.id == target) else {
+            return;
+        };
+        let rect = Rect::new(
+            main.x.saturating_add(pane.slot.x),
+            main.y.saturating_add(pane.slot.y),
+            pane.slot.width,
+            pane.slot.height,
+        )
+        .intersection(main);
+        if rect.width < 2 || rect.height < 2 {
+            return;
+        }
+        let style = Style::default()
+            .fg(self.theme.accent)
+            .add_modifier(Modifier::BOLD);
+        let buffer = frame.buffer_mut();
+        let (right, bottom) = (rect.right() - 1, rect.bottom() - 1);
+        for x in rect.x..=right {
+            let (top, low) = match x {
+                _ if x == rect.x => ("┏", "┗"),
+                _ if x == right => ("┓", "┛"),
+                _ => ("━", "━"),
+            };
+            buffer[(x, rect.y)].set_symbol(top).set_style(style);
+            buffer[(x, bottom)].set_symbol(low).set_style(style);
+        }
+        for y in rect.y + 1..bottom {
+            buffer[(rect.x, y)].set_symbol("┃").set_style(style);
+            buffer[(right, y)].set_symbol("┃").set_style(style);
+        }
     }
 
     fn render_pane(&self, frame: &mut Frame, main: Rect, pane: &PaneView) {
@@ -144,7 +196,7 @@ impl App {
             );
             for y in slot.y..slot.bottom() {
                 for x in slot.x..slot.right() {
-                    buffer[(x, y)].set_symbol(" ");
+                    buffer[(x, y)].set_char(' ');
                 }
             }
         }
@@ -176,12 +228,16 @@ impl App {
                         buf[(sx, sy)].set_style(style);
                         continue;
                     }
-                    let symbol = if cell.flags & cell_flags::HIDDEN != 0 {
-                        " ".to_string()
+                    let target = &mut buf[(sx, sy)];
+                    if cell.flags & cell_flags::HIDDEN != 0 {
+                        target.set_char(' ');
+                    } else if cell.zero.is_empty() {
+                        // The common case: one char, no allocation.
+                        target.set_char(cell.ch);
                     } else {
-                        cell.symbol()
-                    };
-                    buf[(sx, sy)].set_symbol(&symbol).set_style(style);
+                        target.set_symbol(&cell.symbol());
+                    }
+                    target.set_style(style);
                 }
             }
         }
@@ -507,13 +563,9 @@ impl App {
             body,
         );
         let footer = if max_scroll > 0 {
-            format!(
-                "↑↓ scroll ({}/{}) · Esc or F1 closes",
-                scroll + 1,
-                max_scroll + 1
-            )
+            format!("↑↓ scroll ({}/{}) · F1 closes", scroll + 1, max_scroll + 1)
         } else {
-            "Esc or F1 closes".to_string()
+            "F1 closes".to_string()
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(

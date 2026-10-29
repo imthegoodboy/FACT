@@ -11,7 +11,7 @@ mod theme;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -38,10 +38,13 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use theme::Theme;
 
-const FRAME_POLL: Duration = Duration::from_millis(30);
-const EVENT_POLL: Duration = Duration::from_millis(10);
+/// How often the reader threads check whether the UI is shutting down. They
+/// block in the kernel in between, so this costs nothing while idle.
+const READER_POLL: Duration = Duration::from_millis(100);
 const STATUS_LIFETIME: Duration = Duration::from_secs(2);
-const MAX_EVENTS_PER_TURN: usize = 64;
+/// Upper bound on one batch of queued events before the screen is redrawn.
+const MAX_BATCH: Duration = Duration::from_millis(8);
+const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 /// Width of the new-tab button in the tab strip.
 const NEW_TAB_WIDTH: u16 = 3;
@@ -78,6 +81,12 @@ pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("quit", "Exit FACT (closes shells)"),
     ("swap_pane", "Swap with next pane"),
     ("move_pane", "Move pane to next tab"),
+    ("resize_left", "Resize: move edge left"),
+    ("resize_right", "Resize: move edge right"),
+    ("resize_up", "Resize: move edge up"),
+    ("resize_down", "Resize: move edge down"),
+    ("balance", "Balance pane sizes"),
+    ("cycle_theme", "Cycle color theme"),
 ];
 
 pub(crate) fn action_label(action: &str) -> &'static str {
@@ -96,10 +105,9 @@ pub fn run(client: EngineClient, events: EventStream, config: Config) -> Result<
         .context("could not compile keyboard bindings")?;
     let mut terminal = TerminalGuard::enter(config.mouse)?;
     let size = terminal.size().context("could not read terminal size")?;
-    let events = spawn_reader(events);
+    let events = spawn_readers(events);
 
     let mut app = App::new(client, config, keys, events, size.width, size.height);
-    app.resize_session();
     let result = app.event_loop(&mut terminal);
     app.stop_events();
     let message = app.exit_message.clone();
@@ -121,38 +129,58 @@ struct UiEvents {
     cancel: Arc<AtomicBool>,
 }
 
-fn spawn_reader(mut stream: EventStream) -> UiEvents {
-    // Preserve ordered delta frames without letting a busy agent grow an
-    // unbounded queue when drawing or clipboard work temporarily falls behind.
-    let (tx, rx) = mpsc::sync_channel(8);
+/// Merge engine frames and terminal input into one queue so the UI thread can
+/// sleep until something actually happens, then redraw once.
+fn spawn_readers(mut stream: EventStream) -> UiEvents {
+    // Bounded: a busy agent cannot grow an unbounded queue while drawing or
+    // clipboard work falls behind. The engine drops and resends frames instead.
+    let (tx, rx) = mpsc::sync_channel(64);
     let cancel = Arc::new(AtomicBool::new(false));
-    let thread_cancel = Arc::clone(&cancel);
+
+    let frames_tx = tx.clone();
+    let frames_cancel = Arc::clone(&cancel);
     thread::Builder::new()
-        .name("fact-ui-events".into())
-        .spawn(move || loop {
-            if thread_cancel.load(Ordering::Acquire) {
-                break;
-            }
-            match stream.available() {
-                Ok(false) => thread::sleep(EVENT_POLL),
-                Ok(true) => match stream.recv() {
-                    Ok(message) => {
-                        if tx.send(UiEvent::Message(Box::new(message))).is_err() {
+        .name("fact-ui-frames".into())
+        .spawn(move || {
+            while !frames_cancel.load(Ordering::Acquire) {
+                match stream.recv_timeout(READER_POLL) {
+                    Ok(None) => {}
+                    Ok(Some(message)) => {
+                        if frames_tx.send(UiEvent::Message(Box::new(message))).is_err() {
                             break;
                         }
                     }
                     Err(error) => {
-                        let _ = tx.send(UiEvent::Closed(error.to_string()));
+                        let _ = frames_tx.send(UiEvent::Closed(error.to_string()));
                         break;
                     }
-                },
-                Err(error) => {
-                    let _ = tx.send(UiEvent::Closed(error.to_string()));
+                }
+            }
+        })
+        .expect("spawning the frame reader thread cannot fail");
+
+    let input_cancel = Arc::clone(&cancel);
+    thread::Builder::new()
+        .name("fact-ui-input".into())
+        .spawn(move || {
+            while !input_cancel.load(Ordering::Acquire) {
+                let event = match event::poll(READER_POLL) {
+                    Ok(false) => continue,
+                    Ok(true) => event::read(),
+                    Err(error) => Err(error),
+                };
+                let message = match event {
+                    Ok(event) => UiEvent::Input(event),
+                    Err(error) => UiEvent::InputFailed(error.to_string()),
+                };
+                let failed = matches!(message, UiEvent::InputFailed(_));
+                if tx.send(message).is_err() || failed {
                     break;
                 }
             }
         })
-        .expect("spawning the event reader thread cannot fail");
+        .expect("spawning the input reader thread cannot fail");
+
     UiEvents {
         receiver: rx,
         cancel,
@@ -162,6 +190,8 @@ fn spawn_reader(mut stream: EventStream) -> UiEvents {
 enum UiEvent {
     Message(Box<fact_protocol::ServerMessage>),
     Closed(String),
+    Input(Event),
+    InputFailed(String),
 }
 
 struct TerminalGuard {
@@ -423,6 +453,20 @@ struct DragSplit {
     orientation: SplitOrientation,
     region: RectDto,
     last_sent: Instant,
+}
+
+/// Where an Alt+dragged pane would land if released now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneDropTarget {
+    Pane(u64),
+    Tab(u32),
+}
+
+/// Alt+drag moves a pane: drop it on another pane to swap, or on a tab.
+#[derive(Debug, Clone, Copy)]
+struct PaneDrag {
+    pane: u64,
+    target: Option<PaneDropTarget>,
 }
 
 struct TabRange {
@@ -770,13 +814,20 @@ struct App {
     selection: Option<Selection>,
     last_click: Option<ClickTracker>,
     drag_split: Option<DragSplit>,
+    /// Previous gutter press, for double-click-to-balance.
+    last_gutter_click: Option<(Vec<u8>, Instant)>,
     scroll_drag: Option<ScrollDrag>,
+    /// Tab being dragged along the tab strip.
+    tab_drag: Option<u32>,
+    pane_drag: Option<PaneDrag>,
     mouse_position: Option<(u16, u16)>,
     scroll_mode: Option<u64>,
     app_mouse_down: AppMouseCapture,
     status: Option<(String, Instant)>,
     exit_message: Option<String>,
     fatal: Option<anyhow::Error>,
+    /// The screen no longer matches the state; draw before sleeping again.
+    dirty: bool,
 }
 
 impl App {
@@ -788,7 +839,8 @@ impl App {
         width: u16,
         height: u16,
     ) -> Self {
-        let theme = Theme::by_name(&config.theme);
+        let theme =
+            Theme::by_name(&config.theme).with_transparency(config.transparent_background());
         Self {
             client,
             config,
@@ -807,79 +859,63 @@ impl App {
             selection: None,
             last_click: None,
             drag_split: None,
+            last_gutter_click: None,
             scroll_drag: None,
+            tab_drag: None,
+            pane_drag: None,
             mouse_position: None,
             scroll_mode: None,
             app_mouse_down: AppMouseCapture::default(),
             status: None,
             exit_message: None,
             fatal: None,
+            dirty: true,
         }
     }
 
+    /// Sleep until input or a frame arrives, apply everything queued, then
+    /// draw once. An idle workspace does no rendering work at all.
     fn event_loop(&mut self, terminal: &mut TerminalGuard) -> Result<()> {
         self.resize_session();
-        loop {
-            self.drain_events();
-            if self.fatal.is_some() || self.exit_message.is_some() {
-                break;
+        while self.fatal.is_none() && self.exit_message.is_none() {
+            if self.dirty {
+                self.dirty = false;
+                terminal
+                    .terminal()
+                    .draw(|frame| self.render(frame))
+                    .context("could not draw the FACT UI")?;
             }
-
-            let input_started = Instant::now();
-            for index in 0..MAX_EVENTS_PER_TURN {
-                let timeout = if index == 0 {
-                    FRAME_POLL
-                } else {
-                    Duration::ZERO
-                };
-                if !event::poll(timeout).context("could not poll terminal input")? {
-                    break;
-                }
-                match event::read().context("could not read terminal input")? {
-                    Event::Key(key) if key.kind != KeyEventKind::Release => {
-                        self.handle_key(key);
-                    }
-                    Event::Mouse(mouse) if self.config.mouse => {
-                        self.handle_mouse(mouse);
-                    }
-                    Event::Paste(text) => {
-                        self.paste_text(text);
-                    }
-                    Event::FocusLost => {
-                        self.mouse_position = None;
-                        self.scroll_drag = None;
-                        self.drag_split = None;
-                    }
-                    Event::Resize(cols, rows) => {
-                        self.selection = None;
-                        self.width = cols;
-                        self.height = rows;
-                        self.resize_session();
-                    }
-                    _ => {}
-                }
-                if self.fatal.is_some()
-                    || self.exit_message.is_some()
-                    || input_started.elapsed() >= Duration::from_millis(8)
-                {
-                    break;
+            let wait = self
+                .status
+                .as_ref()
+                .map(|(_, at)| STATUS_LIFETIME.saturating_sub(at.elapsed()))
+                .unwrap_or(Duration::from_secs(60));
+            match self.events.receiver.recv_timeout(wait) {
+                Ok(event) => self.handle_ui_event(event),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.fatal = Some(anyhow!("FACT event readers stopped unexpectedly"));
                 }
             }
-
-            if self.fatal.is_some() || self.exit_message.is_some() {
-                break;
+            let batch = Instant::now();
+            while self.fatal.is_none() && self.exit_message.is_none() && batch.elapsed() < MAX_BATCH
+            {
+                match self.events.receiver.try_recv() {
+                    Ok(event) => self.handle_ui_event(event),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.fatal = Some(anyhow!("FACT event readers stopped unexpectedly"));
+                    }
+                }
             }
             if self
                 .status
                 .as_ref()
-                .is_some_and(|(_, at)| at.elapsed() > STATUS_LIFETIME)
+                .is_some_and(|(_, at)| at.elapsed() >= STATUS_LIFETIME)
             {
                 self.status = None;
+                self.dirty = true;
             }
-            terminal
-                .terminal()
-                .draw(|frame| self.render(frame))
-                .context("could not draw the FACT UI")?;
         }
 
         if let Some(error) = self.fatal.take() {
@@ -888,21 +924,68 @@ impl App {
         Ok(())
     }
 
-    fn drain_events(&mut self) {
-        for _ in 0..MAX_EVENTS_PER_TURN {
-            match self.events.receiver.try_recv() {
-                Ok(UiEvent::Message(message)) => self.handle_message(*message),
-                Ok(UiEvent::Closed(reason)) => {
-                    self.fatal = Some(anyhow!("FACT engine event stream closed: {reason}"));
-                    return;
-                }
-                Err(TryRecvError::Empty) => return,
-                Err(TryRecvError::Disconnected) => {
-                    self.fatal = Some(anyhow!("FACT engine event stream stopped unexpectedly"));
-                    return;
+    fn handle_ui_event(&mut self, event: UiEvent) {
+        match event {
+            UiEvent::Message(message) => {
+                self.handle_message(*message);
+                self.dirty = true;
+            }
+            UiEvent::Closed(reason) => {
+                self.fatal = Some(anyhow!("FACT engine event stream closed: {reason}"));
+            }
+            UiEvent::InputFailed(reason) => {
+                self.fatal = Some(anyhow!("could not read terminal input: {reason}"));
+            }
+            UiEvent::Input(event) => self.handle_input(event),
+        }
+    }
+
+    fn handle_input(&mut self, event: Event) {
+        match event {
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                self.handle_key(key);
+                self.dirty = true;
+            }
+            Event::Mouse(mouse) if self.config.mouse => {
+                // Pointer motion only matters to the screen while it changes
+                // a hover state or a drag; skip redraws for idle movement.
+                let before = self.hover_state();
+                let motion = matches!(mouse.kind, MouseEventKind::Moved);
+                self.handle_mouse(mouse);
+                if !motion || before != self.hover_state() {
+                    self.dirty = true;
                 }
             }
+            Event::Paste(text) => {
+                self.paste_text(text);
+                self.dirty = true;
+            }
+            Event::FocusLost => {
+                self.mouse_position = None;
+                self.scroll_drag = None;
+                self.drag_split = None;
+                self.tab_drag = None;
+                self.pane_drag = None;
+                self.dirty = true;
+            }
+            Event::Resize(cols, rows) => {
+                self.selection = None;
+                self.width = cols;
+                self.height = rows;
+                self.resize_session();
+                self.dirty = true;
+            }
+            _ => {}
         }
+    }
+
+    /// Pane whose hover-only scrollbar is currently shown, if any.
+    fn hover_state(&self) -> Option<u64> {
+        self.frame
+            .as_ref()?
+            .panes
+            .iter()
+            .find_map(|pane| self.visible_scrollbar(pane).map(|geometry| geometry.pane))
     }
 
     fn handle_message(&mut self, message: fact_protocol::ServerMessage) {
@@ -914,7 +997,7 @@ impl App {
         }
     }
 
-    fn handle_frame(&mut self, frame: Frame) {
+    fn handle_frame(&mut self, mut frame: Frame) {
         if frame.seq <= self.last_seq {
             return;
         }
@@ -928,8 +1011,10 @@ impl App {
         }) {
             self.selection = None;
         }
-        for pane in &frame.panes {
-            if let Some(cells) = &pane.cells {
+        for pane in &mut frame.panes {
+            // Move the cells into the pane buffer; rendering only reads buffers,
+            // so the frame does not need to keep a second copy.
+            if let Some(cells) = pane.cells.take() {
                 let expected = usize::from(pane.content_cols) * usize::from(pane.content_rows);
                 if expected == cells.len() {
                     self.buffers.insert(
@@ -937,7 +1022,7 @@ impl App {
                         PaneBuffer {
                             cols: pane.content_cols,
                             rows: pane.content_rows,
-                            cells: cells.clone(),
+                            cells,
                         },
                     );
                 }
@@ -1201,6 +1286,9 @@ impl App {
         if self.prefix_armed {
             self.prefix_armed = false;
             if chord == self.keys.prefix {
+                // Prefix twice sends the chord itself, so apps that bind it
+                // (PSReadLine's Ctrl+Space menu, for one) still receive it.
+                self.forward_key(key);
                 return;
             }
             if let Some(action) = self.keys.action_for(true, chord).map(str::to_string) {
@@ -1221,42 +1309,44 @@ impl App {
             return;
         }
 
-        if let Some(action) = direct_grid_action(key) {
-            self.do_action(action);
-            return;
+        if self.config.alt_shortcuts {
+            if let Some(action) = direct_grid_action(key) {
+                self.do_action(action);
+                return;
+            }
         }
 
         // Windows-terminal muscle memory: Ctrl+C copies a visible selection,
         // Ctrl+V pastes, and Ctrl/Shift+Insert are accepted as aliases.
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // The aliases follow their actions: `paste = "none"` or
+        // `copy = "none"` hands these keys to the application as well.
+        let paste = self.keys.binding("paste").is_some();
+        let copy = self.keys.binding("copy").is_some();
         match key.code {
             CKeyCode::Esc if self.selection.is_some() => {
                 self.selection = None;
                 return;
             }
-            CKeyCode::Char('v' | 'V') if control && !shift => {
-                self.paste_clipboard();
+            CKeyCode::Char('v' | 'V') if paste && control && !shift && !alt => {
+                self.paste_or_forward(key);
                 return;
             }
-            CKeyCode::Char('c' | 'C') if control && !shift && self.selection.is_some() => {
+            CKeyCode::Char('c' | 'C') if copy && control && !shift && self.selection.is_some() => {
                 self.copy_selection();
                 return;
             }
-            CKeyCode::Insert if shift => {
+            CKeyCode::Insert if paste && shift => {
                 self.paste_clipboard();
                 return;
             }
-            CKeyCode::Insert if control => {
+            CKeyCode::Insert if copy && control => {
                 self.copy_selection();
                 return;
             }
             _ => {}
-        }
-
-        if key.code == CKeyCode::F(2) {
-            self.theme = self.theme.next();
-            return;
         }
 
         self.forward_key(key);
@@ -1272,8 +1362,15 @@ impl App {
             return;
         }
         let app_cursor = pane.modes & pane_modes::APP_CURSOR != 0;
+        let win32 = pane.modes & pane_modes::WIN32_INPUT != 0;
         let pane_id = pane.id;
-        let Some(bytes) = keymap::encode_key(key, app_cursor) else {
+        let kitty = pane.modes & pane_modes::KITTY_KEYS != 0;
+        let encoded = match kitty.then(|| keymap::encode_key_kitty(key)).flatten() {
+            Some(bytes) => Some(bytes),
+            None if win32 => keymap::encode_key_win32(key),
+            None => keymap::encode_key(key, app_cursor),
+        };
+        let Some(bytes) = encoded else {
             return;
         };
         if bytes.is_empty() {
@@ -1469,6 +1566,24 @@ impl App {
                     _ => self.set_status("There is no other tab to move this pane to."),
                 }
             }
+            "resize_left" | "resize_right" | "resize_up" | "resize_down" => {
+                let direction = match action {
+                    "resize_left" => fact_protocol::FocusDirection::Left,
+                    "resize_right" => fact_protocol::FocusDirection::Right,
+                    "resize_up" => fact_protocol::FocusDirection::Up,
+                    _ => fact_protocol::FocusDirection::Down,
+                };
+                let _ = self.send(Command::ResizePane { direction });
+            }
+            "balance" => {
+                if self.send(Command::BalancePanes).is_some() {
+                    self.set_status("Panes balanced.");
+                }
+            }
+            "cycle_theme" => {
+                self.theme = self.theme.next();
+                self.set_status(format!("Theme: {}", self.theme.name));
+            }
             other => self.set_status(format!("Unknown action: {other}")),
         }
     }
@@ -1513,7 +1628,7 @@ impl App {
                 if previous.pane == pane
                     && previous.x == x
                     && previous.y == y
-                    && now.duration_since(previous.at) <= Duration::from_millis(450) =>
+                    && now.duration_since(previous.at) <= DOUBLE_CLICK =>
             {
                 (previous.count + 1).min(3)
             }
@@ -1580,6 +1695,17 @@ impl App {
         }));
     }
 
+    /// Ctrl+V pastes clipboard text. When the clipboard holds no text (an
+    /// image or a file), the key goes to the app instead, so agents such as
+    /// Claude Code and Codex can attach the image themselves.
+    fn paste_or_forward(&mut self, key: KeyEvent) {
+        match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
+            Ok(text) if !text.is_empty() => self.paste_text(text),
+            Ok(_) | Err(arboard::Error::ContentNotAvailable) => self.forward_key(key),
+            Err(error) => self.set_status(format!("Clipboard paste failed: {error}")),
+        }
+    }
+
     fn paste_clipboard(&mut self) {
         match arboard::Clipboard::new().and_then(|mut clipboard| clipboard.get_text()) {
             Ok(text) => {
@@ -1604,8 +1730,18 @@ impl App {
         match overlay {
             Overlay::Help(mut help) => {
                 let total = help_lines(&self.keys).len();
+                let closes = matches!(key.code, CKeyCode::F(1) | CKeyCode::Char('q'))
+                    || keymap::chord_for(key)
+                        .is_some_and(|chord| self.keys.action_for(false, chord) == Some("help"));
                 match key.code {
-                    CKeyCode::Esc | CKeyCode::F(1) => {}
+                    // Esc is reserved for stopping agent CLIs in the focused
+                    // pane: it reaches the pane and help stays open. The help
+                    // key (F1 by default) closes it.
+                    _ if closes => {}
+                    CKeyCode::Esc => {
+                        self.overlay = Some(Overlay::Help(help));
+                        self.forward_key(key);
+                    }
                     CKeyCode::Up => {
                         help.scroll = help.scroll.saturating_sub(1);
                         self.overlay = Some(Overlay::Help(help));
@@ -1652,12 +1788,7 @@ impl App {
                         let filtered = filtered_palette(&items, &palette.query);
                         if let Some(item) = filtered.get(palette.selected) {
                             let action = item.action;
-                            if action == "__theme" {
-                                self.theme = self.theme.next();
-                                self.set_status(format!("Theme: {}", self.theme.name));
-                            } else {
-                                self.do_action(action);
-                            }
+                            self.do_action(action);
                         }
                     }
                     CKeyCode::Backspace => {
@@ -1843,7 +1974,24 @@ impl App {
             self.handle_overlay_mouse(mouse);
             return;
         }
+        if matches!(mouse.kind, MouseEventKind::Drag(MouseButton::Left)) {
+            if self.tab_drag.is_some() {
+                self.drag_tab_to(mouse.column);
+                return;
+            }
+            if self.pane_drag.is_some() {
+                self.update_pane_drop(mouse.column, mouse.row);
+                return;
+            }
+        }
         if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left)) {
+            if let Some(drag) = self.pane_drag.take() {
+                self.drop_pane(drag);
+                return;
+            }
+            if self.tab_drag.take().is_some() {
+                return;
+            }
             if let Some(drag) = self.scroll_drag.take() {
                 if let Some(content_y) = self.content_row(mouse.row) {
                     self.scroll_drag_to(&drag, content_y);
@@ -1865,6 +2013,8 @@ impl App {
                 }
                 if let Some(tab) = self.tab_at(mouse.column) {
                     let _ = self.send(Command::SelectTab { tab });
+                    // Holding the button and moving along the strip reorders.
+                    self.tab_drag = Some(tab);
                 }
             }
             return;
@@ -1888,6 +2038,18 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.selection = None;
                 self.app_mouse_down.release(MouseButton::Left);
+                // Alt+drag grabs the whole pane, like moving a window.
+                if mouse.modifiers.contains(KeyModifiers::ALT)
+                    && !mouse.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    if let Some(pane) = self.pane_slot_at(mouse.column, content_y) {
+                        let _ = self.send(Command::FocusPane { pane });
+                        self.bells.remove(&pane);
+                        self.pane_drag = Some(PaneDrag { pane, target: None });
+                        self.set_status("Move pane: drop it on another pane to swap, or on a tab.");
+                    }
+                    return;
+                }
                 if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
                     let _ = self.send(Command::FocusPane {
                         pane: geometry.pane,
@@ -1914,6 +2076,18 @@ impl App {
                     return;
                 }
                 if let Some(handle) = self.split_at(mouse.column, content_y) {
+                    let now = Instant::now();
+                    let double = self.last_gutter_click.as_ref().is_some_and(|(path, at)| {
+                        *path == handle.path && now.duration_since(*at) <= DOUBLE_CLICK
+                    });
+                    if double {
+                        self.last_gutter_click = None;
+                        if self.send(Command::BalancePanes).is_some() {
+                            self.set_status("Panes balanced.");
+                        }
+                        return;
+                    }
+                    self.last_gutter_click = Some((handle.path.clone(), now));
                     self.drag_split = Some(handle);
                     return;
                 }
@@ -2386,6 +2560,78 @@ impl App {
         None
     }
 
+    /// Move the dragged tab to the position of the tab under the pointer.
+    fn drag_tab_to(&mut self, column: u16) {
+        let Some(tab) = self.tab_drag else {
+            return;
+        };
+        let Some(hovered) = self.tab_at(column).filter(|hovered| *hovered != tab) else {
+            return;
+        };
+        let Some(index) = self
+            .frame
+            .as_ref()
+            .and_then(|frame| frame.tabs.iter().position(|view| view.id == hovered))
+        else {
+            return;
+        };
+        let _ = self.send(Command::MoveTab { tab, index });
+    }
+
+    fn pane_tab(&self, pane: u64) -> Option<u32> {
+        self.frame
+            .as_ref()?
+            .panes
+            .iter()
+            .find(|view| view.id == pane)
+            .map(|view| view.tab)
+    }
+
+    fn update_pane_drop(&mut self, column: u16, row: u16) {
+        let Some(drag) = self.pane_drag else {
+            return;
+        };
+        let target = if self.tabs_visible() && row == 0 {
+            self.tab_at(column)
+                .filter(|tab| Some(*tab) != self.pane_tab(drag.pane))
+                .map(PaneDropTarget::Tab)
+        } else {
+            self.content_row(row)
+                .and_then(|y| self.pane_slot_at(column, y))
+                .filter(|pane| *pane != drag.pane)
+                .map(PaneDropTarget::Pane)
+        };
+        self.pane_drag = Some(PaneDrag { target, ..drag });
+    }
+
+    fn drop_pane(&mut self, drag: PaneDrag) {
+        match drag.target {
+            Some(PaneDropTarget::Pane(other)) => {
+                if self
+                    .send(Command::SwapPanes {
+                        a: drag.pane,
+                        b: other,
+                    })
+                    .is_some()
+                {
+                    self.set_status("Panes swapped.");
+                }
+            }
+            Some(PaneDropTarget::Tab(target_tab)) => {
+                if self
+                    .send(Command::MovePaneToTab {
+                        pane: drag.pane,
+                        target_tab,
+                    })
+                    .is_some()
+                {
+                    self.set_status("Pane moved to the tab.");
+                }
+            }
+            None => self.status = None,
+        }
+    }
+
     fn drag_split_to(&mut self, mut drag: DragSplit, column: u16, content_y: u16) {
         let ratio = match drag.orientation {
             SplitOrientation::Horizontal => {
@@ -2410,20 +2656,14 @@ impl App {
 }
 
 fn palette_items(keys: &CompiledKeybinds) -> Vec<PaletteItem> {
-    let mut items: Vec<PaletteItem> = ACTION_INFO
+    ACTION_INFO
         .iter()
         .map(|(action, label)| PaletteItem {
             action,
             label,
             shortcut: keys.describe(action),
         })
-        .collect();
-    items.push(PaletteItem {
-        action: "__theme",
-        label: "Cycle color theme",
-        shortcut: "F2".into(),
-    });
-    items
+        .collect()
 }
 
 fn filtered_palette<'a>(items: &'a [PaletteItem], query: &str) -> Vec<&'a PaletteItem> {
@@ -2458,8 +2698,19 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
         .iter()
         .map(|(action, label)| (label.to_string(), keys.describe(action)))
         .collect();
-    lines.push(("Cycle theme".into(), "F2".into()));
-    lines.push(("Resize split".into(), "drag the gutter".into()));
+    lines.push((
+        "Resize split".into(),
+        "drag the gutter; double-click it to balance".into(),
+    ));
+    lines.push((
+        "Move a pane".into(),
+        "Alt+drag it onto another pane (swap) or a tab".into(),
+    ));
+    lines.push(("Reorder tabs".into(), "drag a tab along the strip".into()));
+    lines.push((
+        "Send the prefix itself".into(),
+        format!("{} twice", keys.prefix),
+    ));
     lines.push((
         "New tab".into(),
         "prefix+C, or click + when the tab strip is visible".into(),
@@ -2487,8 +2738,10 @@ pub(crate) fn help_lines(keys: &CompiledKeybinds) -> Vec<(String, String)> {
         "Context menu".into(),
         "Shift+right-click (right-click otherwise copies or pastes)".into(),
     ));
-    lines.push(("Direct maximize / show all".into(), "Alt+M / Alt+N".into()));
-    lines.push(("Terminate active grid".into(), "Alt+T".into()));
+    lines.push((
+        "Direct maximize / show all / close tab".into(),
+        "Alt+M / Alt+N / Alt+T with alt_shortcuts = true".into(),
+    ));
     lines.push(("Prefix".into(), keys.prefix.to_string()));
     lines
 }

@@ -31,9 +31,11 @@ FACT has no such state. The ConPTY tests terminate their shells during cleanup.
 | Layout | Grid construction, full-width content, focused-pane fallback at tiny sizes, zoom, show-all, serialization, split/close symmetry, minimize/restore, focus cycling, ratio clamping, move/swap and moving panes between tabs. |
 | Terminal model | Plain text and cursor, ANSI colors and bold, wide/combining characters, alternate screen and modes, scrollback and search, tiny resizes, malformed escapes, title callbacks and mouse mode bits. |
 | ConPTY | Real `cmd.exe` processes: output and exit, propagated exit codes, interactive input, resize, eight independent shells, more than 100 KB of output without truncation, kill cleanup and a no-deadlock shutdown regression with unread output. |
-| Engine | A real grid of two shells is resized, receives typed input, returns output through the ordered frame stream and shuts down with its shells. |
+| Engine | A real grid of two shells is resized, receives typed input, returns output through the ordered frame stream and shuts down with its shells. A real Windows PowerShell pane must report ConPTY's win32-input-mode, echo a keystroke within two seconds, and treat a win32-encoded `Shift+Enter` as PSReadLine's AddLine (a `>>` continuation). |
+| Keyboard | win32-input-mode records keep Shift/Ctrl/Alt on Enter, Backspace, Tab and arrows; kitty `CSI u` encoding covers only the ambiguous modified keys; AltGr characters stay text; the terminal model tracks `CSI ? 9001 h/l` across split reads and answers kitty `CSI ? u` queries with the pushed flags. |
+| Layout | Keyboard resize moves the nearest matching gutter and clamps, balance gives chained splits equal widths, and tabs can be reordered. |
 | Client | Selection extraction and snapshot copy, wide-spacer handling, overlapping mouse buttons, direct Alt shortcuts, action labels, word selection, tab/new-tab geometry, the minimized tray, hover-only scrollbar hit testing, app scroll routing and theme/render helpers. |
-| CLI | Help surface (including the absence of removed session commands), `FACT_HOME` path resolution, `config validate` with built-in defaults and JSON, `config init` and overwrite refusal, invalid-prefix diagnostics and rejection of obsolete daemon settings. |
+| CLI | Help surface (including the absence of removed session commands), `FACT_HOME` path resolution, `config validate` with built-in defaults and JSON, `config init` and overwrite refusal, invalid-prefix diagnostics and rejection of obsolete daemon settings. `wallpaper set/show/clear` against a temporary fragments folder (`FACT_WT_FRAGMENTS_DIR`), and a read-only `doctor` report. CLI tests never touch the real Windows Terminal folder. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and the installed `--version`. |
 | Windows CI | `.github/workflows/ci.yml` runs format, Clippy, the full suite and the offline installer test on `windows-latest` for every push to `main` and every pull request. |
 
@@ -67,7 +69,13 @@ cargo test -p fact-cli --test cli -- --nocapture
 
 The TUI itself is verified manually; there is no scripted TUI harness in this
 tree. The manual checklist below is the release gate for rendering, mouse and
-clipboard behavior.
+clipboard behavior. For 0.5.0 the UI was also driven end to end by injecting
+real console key and mouse records into a hidden FACT window and reading its
+screen buffer back: typing, splits, keyboard resize, balance, Alt+drag swap and
+move-to-tab, tab reordering, help with `Esc` passthrough, theme cycling, and
+Claude Code inside a pane (`Shift+Tab`, `Shift+Enter` new line, `Ctrl+C`,
+double `Esc`, exit). OpenCode and GitHub Copilot were confirmed to enable the
+kitty protocol inside FACT.
 
 ## CI
 
@@ -117,10 +125,14 @@ In the running window:
 2. Print `$PID` in two panes and confirm the values differ.
 3. Split with prefix `|` and `-`, move focus with the arrow keys, and close a
    split with prefix `X`.
-4. Press prefix `C`; confirm the one-line tab strip appears and `+` works. Close
-   the tab with `Alt+T`, first cancelling and then confirming.
-5. Press `Alt+M` and `Alt+N`; confirm maximize and full-grid restore. Minimize a
-   pane with prefix `Shift+M` and restore it from the `▾ N` tray.
+4. Press prefix `C`; confirm the one-line tab strip appears and `+` works. Drag
+   a tab along the strip and confirm the order changes. Close the tab with
+   prefix `Shift+X`, first cancelling and then confirming.
+5. Press prefix `M` and prefix `N`; confirm maximize and full-grid restore.
+   Confirm `Alt+M` reaches the shell unless `alt_shortcuts = true`. Minimize a
+   pane with prefix `Shift+M` and restore it from the `▾ N` tray. `Alt`+drag a
+   pane onto another pane and confirm they swap; double-click a divider and
+   confirm the panes balance; prefix `Shift`+arrow moves a divider.
 6. Drag to select text; double-click a word; triple-click a line. Press `Ctrl+C`
    and paste into another pane with `Ctrl+V`.
 7. Right-click with a selection (copy), then right-click with no selection
@@ -135,7 +147,9 @@ In the running window:
     app scroll.
 11. Press `F1`; confirm help lists the compiled bindings. Press prefix `K` and
     filter the palette. Press prefix `/` and search a marker in the focused pane.
-12. Press `F2`; confirm the theme changes for this run and is not written to disk.
+12. Press prefix `T`; confirm the theme changes for this run and is not written
+    to disk. In PowerShell, `Shift+Enter` gives a `>>` continuation; in Claude
+    Code, `Shift+Enter` inserts a new line and `Esc` interrupts.
 13. Note a pane PID, quit with prefix `Shift+Q`, and confirm that process no
     longer exists.
 14. Before launching, record `Get-ChildItem $env:LOCALAPPDATA\FACT -Force`. After

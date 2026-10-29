@@ -29,6 +29,7 @@ against the process working directory.
 | Path | Contents |
 | --- | --- |
 | `config.toml` | This configuration. |
+| `wallpaper\` | FACT's copy of the image from `fact wallpaper set`, if you use one. |
 | No other paths | FACT creates no database, log, runtime identity, saved layout or exports. |
 
 FACT does not accept a `--data-dir` option. The base directory only locates the
@@ -47,6 +48,8 @@ min_pane_height = 5
 mouse = true
 confirm_close = true
 copy_on_select = false
+alt_shortcuts = false
+background = "theme"
 
 default_profile = "auto"
 ```
@@ -62,11 +65,12 @@ default_profile = "auto"
 | `mouse` | `true` | Enable mouse capture, clicks, selection and split dragging. |
 | `confirm_close` | `true` | Ask before closing a pane or tab. Quitting FACT never prompts and closes every shell. |
 | `copy_on_select` | `false` | Copy a completed mouse selection automatically. |
+| `alt_shortcuts` | `false` | `true` enables the direct `Alt+M` / `Alt+N` / `Alt+T` shortcuts. Off by default because Claude Code, readline and other apps use those chords. |
+| `background` | `theme` | `theme` paints the theme background. `transparent` leaves default backgrounds to the host terminal so its background image or acrylic shows through. `fact --transparent` does the same for one launch. |
 | `default_profile` | `auto` | `auto` or a key from `[profiles]`. |
 
-`F2` cycles themes for the current UI run without writing the config. The next
-launch uses the `theme` value again. The command palette also has a "Cycle color
-theme" action.
+Prefix then `T` (the `cycle_theme` action) cycles themes for the current run
+without writing the config. The next launch uses the `theme` value again.
 
 There are no persistence, session-limit or daemon-log settings. Old v0.3 keys
 such as `max_sessions`, `persist_interval_secs` and `daemon_log_level` are
@@ -112,9 +116,10 @@ Profile names are 1-64 ASCII letters, digits, `-`, `_` or `.`. Select one with
 is an error. `--profile` applies to the initial shells in a `--grid`; new tabs
 use `default_profile`.
 
-FACT also sets `TERM=xterm-256color`, `COLORTERM=truecolor`,
-`TERM_PROGRAM=FACT`, `TERM_PROGRAM_VERSION`, `FACT=1` and an informational
-`FACT_PANE` unless your profile or environment already defines them.
+FACT sets `FACT=1`, `FACT_VERSION`, an informational `FACT_PANE` and, unless
+already defined, `COLORTERM=truecolor`. It deliberately leaves `TERM` and
+`TERM_PROGRAM` as inherited: agent CLIs choose their keyboard protocol from
+them (see [Agent CLIs and keyboard protocols](#agent-clis-and-keyboard-protocols)).
 
 ## Environment
 
@@ -134,11 +139,12 @@ environment while FACT runs.
 
 The prefix is armed for one command. For example, with the default
 `ctrl+space`, press `Ctrl+Space`, release, then `K` to open the palette.
-The prefix chord itself is not sent to the shell.
+A single prefix press is not sent to the shell; pressing it twice sends it.
 
 Bindings are written as:
 
 - `prefix+KEY` - requires the prefix, e.g. `prefix+k`.
+- `none` - no key at all, which frees the default chord for the application.
 - `ctrl+shift+c`, `alt+enter`, `f1` - direct chords.
 - `prefix++` or `ctrl+shift++` - the literal plus key.
 - Key names: single characters, `enter`, `tab`, `esc`, `backspace`, `delete`,
@@ -149,10 +155,10 @@ Bindings are written as:
 [keybinds]
 split_right = "prefix+|"
 palette = "ctrl+p"
-help = "f1"
+help = "none"          # F1 now reaches the focused app
 ```
 
-Every action must have exactly one binding after overrides are applied. Direct
+Every action has at most one binding after overrides are applied. Direct
 bindings cannot collide with each other or with prefix bindings. A direct key
 that is not a FACT binding is sent to the focused shell. F1 help and the palette
 show the bindings currently compiled from this file.
@@ -164,11 +170,11 @@ show the bindings currently compiled from this file.
 | Split right | `split_right` | Prefix then `\|` |
 | Split down | `split_down` | Prefix then `-` |
 | Close pane | `close_pane` | Prefix then `X` |
-| Close tab / grid | `close_tab` | Prefix then `Shift+X`, or `Alt+T` |
+| Close tab / grid | `close_tab` | Prefix then `Shift+X` |
 | Restart pane | `restart_pane` | Prefix then `Shift+R` |
 | Toggle maximize / full grid | `zoom` | Prefix then `Z` |
-| Maximize focused pane | `maximize` | Prefix then `M`, or `Alt+M` |
-| Show all panes | `show_all` | Prefix then `N`, or `Alt+N` |
+| Maximize focused pane | `maximize` | Prefix then `M` |
+| Show all panes | `show_all` | Prefix then `N` |
 | Minimize pane | `minimize` | Prefix then `Shift+M` |
 | Restore minimized panes | `restore` | Prefix then `Shift+U` |
 | Focus left/right/up/down | `focus_left`, `focus_right`, `focus_up`, `focus_down` | Prefix then arrow key |
@@ -187,16 +193,26 @@ show the bindings currently compiled from this file.
 | Quit FACT, close shells | `quit` | Prefix then `Shift+Q` |
 | Swap with next pane | `swap_pane` | Prefix then `W` |
 | Move pane to next tab | `move_pane` | Prefix then `Shift+O` |
+| Move the focused pane's edge left/right/up/down | `resize_left`, `resize_right`, `resize_up`, `resize_down` | Prefix then `Shift`+arrow key |
+| Balance pane sizes in the tab | `balance` | Prefix then `=` |
+| Cycle color theme | `cycle_theme` | Prefix then `T` |
 
 Additional interaction that is not a remappable action:
 
-- `Alt+M` maximizes the focused pane and `Alt+N` shows the full grid without
-  using the prefix. `Alt+T` closes the active tab and all of its panes after
-  confirmation. A configured direct binding takes precedence over these aliases.
-- `F2` cycles themes unless you bind `F2` to another action.
+- With `alt_shortcuts = true`, `Alt+M` maximizes the focused pane, `Alt+N`
+  shows the full grid and `Alt+T` closes the active tab after confirmation. They
+  are off by default, so those chords reach the application.
+- Press the prefix twice to send the prefix chord itself to the application
+  (for example PSReadLine's `Ctrl+Space` completion menu).
 - `Ctrl+C` copies a selection; with no selection it is sent to the shell as
-  normal terminal input. `Ctrl+V` pastes. `Ctrl+Insert` and `Shift+Insert` are
-  accepted as clipboard aliases.
+  normal terminal input. `Ctrl+V` pastes clipboard text. When the clipboard
+  holds an image or other non-text data, `Ctrl+V` goes to the application
+  instead, so agents can attach the image themselves. `Ctrl+Insert` and
+  `Shift+Insert` are accepted as clipboard aliases. These aliases follow their
+  actions: with `paste = "none"`, `Ctrl+V` and `Shift+Insert` go to the
+  application; with `copy = "none"`, so do `Ctrl+C` and `Ctrl+Insert`.
+- `Esc` with F1 help open reaches the focused pane (help stays open; `F1` or
+  `q` closes it), so an agent can always be interrupted.
 - Prefix then `[` enters scroll mode without sending normal keys to the
   application. Up/Down scroll one line, PgUp/PgDn scroll one page, Home/End jump
   to the top or bottom, and Esc or `q` exits. In a shell this browses FACT's
@@ -215,7 +231,11 @@ Additional interaction that is not a remappable action:
 - In a window too small for the configured `min_pane_width`/`min_pane_height`,
   FACT normally shows only the focused pane. `Alt+N` or the `show_all` action
   keeps the whole grid visible even below those limits; `Alt+M` maximizes again.
-- Drag a split gutter with the mouse to resize.
+- Drag a split gutter with the mouse to resize; double-click a gutter to
+  balance every pane in the tab.
+- `Alt`+drag a pane onto another pane to swap them, or onto a tab in the tab
+  strip to move it there. The drop target is outlined while you drag.
+- Drag a tab along the tab strip to reorder tabs.
 - Drag in pane content to select text; `Shift`+drag selects even when the
   application has requested mouse reporting. Double-click selects a word and
   triple-click selects a visual line. The selected pane's display pauses while
@@ -234,6 +254,55 @@ Additional interaction that is not a remappable action:
   page-key fallback for keyboard-only full-screen apps.
 - When panes are minimized, a small `▾ N` tray appears at the bottom-right; the
   same tray is clickable to restore them.
+
+## Agent CLIs and keyboard protocols
+
+FACT speaks the same keyboard protocols as modern terminals, so agent CLIs see
+the keys you press:
+
+- **win32-input-mode.** Windows' ConPTY asks its host for Windows Terminal's
+  win32-input-mode. FACT honors it: modified keys travel as complete Windows
+  key events, so console programs (PowerShell's PSReadLine, Codex) can tell
+  `Shift+Enter`, `Ctrl+Enter` and `Ctrl+Backspace` apart from their plain
+  versions. Ordinary text is unchanged.
+- **Kitty keyboard protocol.** Claude Code, OpenCode and GitHub Copilot ask for
+  it. FACT answers the query and, while an app has it enabled, sends modified
+  `Enter`, `Tab` and `Backspace` as `CSI code ; modifiers u`. `Shift+Enter`
+  then inserts a new line instead of submitting the prompt.
+- FACT intercepts nothing outside the prefix by default except `F1` help and the
+  clipboard keys above, and each of those can be set to `none`.
+
+Inside Windows Terminal, Claude Code recognises the host from the inherited
+environment and enables the kitty protocol immediately. Under other hosts it
+probes for it; `Ctrl+J`, `Alt+Enter` or `\` then `Enter` also insert a new
+line there.
+
+## Wallpaper
+
+A console program cannot paint images, but Windows Terminal can, and FACT can
+leave its background to Windows Terminal:
+
+```powershell
+fact wallpaper set C:\Pictures\sky.jpg               # 35% strength, cover the window
+fact wallpaper set .\forest.png --opacity 20 --fit fit
+fact wallpaper                                       # show the current wallpaper
+fact wallpaper clear                                 # remove it again
+wt -p FACT                                           # open FACT with the wallpaper
+```
+
+`set` copies the image to `%LOCALAPPDATA%\FACT\wallpaper\` and writes a Windows
+Terminal *fragment* (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`)
+that adds a "FACT" profile with the image and starts `fact --transparent`. Your
+own `settings.json` is never edited. Restart Windows Terminal once after the
+first `set` so it loads the new profile. `--fit` accepts `fill` (default),
+`fit`, `stretch` and `center`; `--opacity` accepts 5-100 or 0.05-1.0. Set
+`FACT_WT_FRAGMENTS_DIR` to use another fragments folder (portable Windows
+Terminal).
+
+With `background = "transparent"` (or `--transparent`) every pane's default
+background is transparent, so any background image or acrylic configured in
+your terminal shows through. Panels, selection and the status line stay opaque.
+The wallpaper costs nothing at runtime: Windows Terminal draws it.
 
 ## Examples
 

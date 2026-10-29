@@ -16,3 +16,6 @@ fact-engine = { path = "../fact-engine" }
 fact-layout = { path = "../fact-layout" }
 fact-protocol = { path = "../fact-protocol" }
 ratatui.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }

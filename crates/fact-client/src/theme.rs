@@ -23,6 +23,8 @@ pub struct Theme {
     pub error: Color,
     pub terminal_bg: Color,
     pub terminal_fg: Color,
+    /// Default backgrounds are left to the host terminal (see `background`).
+    pub transparent: bool,
 }
 
 pub const THEME_NAMES: &[&str] = &["fact-dark", "fact-light", "dracula", "nord", "gruvbox"];
@@ -44,11 +46,34 @@ impl Theme {
             .position(|name| *name == self.name)
             .unwrap_or(0);
         Self::by_name(THEME_NAMES[(index + 1) % THEME_NAMES.len()])
+            .with_transparency(self.transparent)
+    }
+
+    /// Leave terminal and screen backgrounds to the host so its background
+    /// image or acrylic shows through. Panels, selection and status keep their
+    /// opaque colors so they stay readable over any wallpaper.
+    pub fn with_transparency(mut self, transparent: bool) -> Self {
+        self.transparent = transparent;
+        if transparent {
+            self.terminal_bg = Color::Reset;
+            self.tab_bg = Color::Reset;
+        }
+        self
+    }
+
+    /// Background for screen areas outside panels and overlays.
+    pub fn screen_bg(&self) -> Color {
+        if self.transparent {
+            Color::Reset
+        } else {
+            self.bg
+        }
     }
 
     pub fn fact_dark() -> Self {
         Self {
             name: "fact-dark",
+            transparent: false,
             // The default workspace is intentionally monochrome: black chrome,
             // white type and only the warning/error accents carry color.
             bg: Color::Rgb(0, 0, 0),
@@ -75,6 +100,7 @@ impl Theme {
     pub fn fact_light() -> Self {
         Self {
             name: "fact-light",
+            transparent: false,
             bg: Color::Rgb(246, 247, 249),
             fg: Color::Rgb(31, 35, 40),
             muted: Color::Rgb(102, 112, 133),
@@ -99,6 +125,7 @@ impl Theme {
     pub fn dracula() -> Self {
         Self {
             name: "dracula",
+            transparent: false,
             bg: Color::Rgb(40, 42, 54),
             fg: Color::Rgb(248, 248, 242),
             muted: Color::Rgb(139, 145, 173),
@@ -123,6 +150,7 @@ impl Theme {
     pub fn nord() -> Self {
         Self {
             name: "nord",
+            transparent: false,
             bg: Color::Rgb(46, 52, 64),
             fg: Color::Rgb(216, 222, 233),
             muted: Color::Rgb(143, 154, 173),
@@ -147,6 +175,7 @@ impl Theme {
     pub fn gruvbox() -> Self {
         Self {
             name: "gruvbox",
+            transparent: false,
             bg: Color::Rgb(40, 40, 40),
             fg: Color::Rgb(235, 219, 178),
             muted: Color::Rgb(168, 153, 132),
@@ -180,6 +209,18 @@ mod tests {
             assert_eq!(theme.name, *name);
             assert_ne!(theme.next().name, theme.name);
         }
+    }
+
+    #[test]
+    fn transparency_survives_theme_cycling() {
+        let theme = Theme::fact_dark().with_transparency(true);
+        assert_eq!(theme.terminal_bg, Color::Reset);
+        assert_eq!(theme.screen_bg(), Color::Reset);
+        assert_ne!(theme.bg, Color::Reset, "panels stay opaque");
+        let next = theme.next();
+        assert!(next.transparent);
+        assert_eq!(next.terminal_bg, Color::Reset);
+        assert_ne!(Theme::nord().screen_bg(), Color::Reset);
     }
 
     #[test]

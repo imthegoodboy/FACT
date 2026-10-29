@@ -93,6 +93,12 @@ pub struct Config {
     pub mouse: bool,
     pub confirm_close: bool,
     pub copy_on_select: bool,
+    /// Direct `Alt+M` / `Alt+N` / `Alt+T` shortcuts. Off by default because
+    /// agent CLIs and readline use those chords themselves.
+    pub alt_shortcuts: bool,
+    /// `theme` paints the theme background; `transparent` leaves default
+    /// backgrounds to the host terminal so its background image shows through.
+    pub background: String,
     pub default_profile: String,
     pub keybinds: BTreeMap<String, String>,
     pub profiles: BTreeMap<String, Profile>,
@@ -113,6 +119,8 @@ impl Default for Config {
             mouse: true,
             confirm_close: true,
             copy_on_select: false,
+            alt_shortcuts: false,
+            background: "theme".to_string(),
             default_profile: "auto".to_string(),
             keybinds: BTreeMap::new(),
             profiles: BTreeMap::new(),
@@ -204,6 +212,12 @@ impl Config {
             issues.push(format!(
                 "theme '{}' is unknown (expected fact-dark, fact-light, dracula, nord or gruvbox)",
                 self.theme
+            ));
+        }
+        if !BACKGROUNDS.contains(&self.background.as_str()) {
+            issues.push(format!(
+                "background '{}' is unknown (expected theme or transparent)",
+                self.background
             ));
         }
         if self.default_profile.trim().is_empty() {
@@ -332,6 +346,10 @@ impl Config {
         })
     }
 
+    pub fn transparent_background(&self) -> bool {
+        self.background == "transparent"
+    }
+
     pub fn has_profile(&self, name: &str) -> bool {
         name.eq_ignore_ascii_case("auto") || self.profiles.contains_key(name)
     }
@@ -452,13 +470,22 @@ mouse = true
 confirm_close = true
 copy_on_select = false
 
+# Alt+M / Alt+N / Alt+T maximize, show all and close the tab without the
+# prefix. Off by default: Claude Code, readline and other apps use these chords.
+alt_shortcuts = false
+
+# "theme" paints the theme background. "transparent" lets the host terminal's
+# background image or acrylic show through (see `fact wallpaper`).
+background = "theme"
+
 # "auto" chooses pwsh.exe, then powershell.exe, then cmd.exe.
 default_profile = "auto"
 
 [keybinds]
-# Override any documented action, for example:
+# Override any documented action, or set it to "none" to free the key, e.g.:
 # split_right = "prefix+\\"
 # palette = "prefix+k"
+# help = "none"
 
 # [profiles.pwsh]
 # command = "pwsh.exe"
@@ -473,7 +500,7 @@ default_profile = "auto"
 # command = "cmd.exe"
 
 [env]
-# TERM_PROGRAM is set by FACT itself. Add per-user defaults here if desired.
+# FACT sets FACT, FACT_PANE, FACT_VERSION and (if unset) COLORTERM itself.
 "#;
 
 pub fn write_default_config(path: &Path, force: bool) -> Result<(), ConfigError> {
@@ -506,6 +533,9 @@ pub fn write_default_config(path: &Path, force: bool) -> Result<(), ConfigError>
     Ok(())
 }
 
+/// Accepted `background` values.
+pub const BACKGROUNDS: &[&str] = &["theme", "transparent"];
+
 /// Stable theme names accepted by the client.
 pub const THEMES: &[&str] = &["fact-dark", "fact-light", "dracula", "nord", "gruvbox"];
 
@@ -513,19 +543,20 @@ pub fn is_valid_theme(name: &str) -> bool {
     THEMES.contains(&name)
 }
 
-/// A profile's environment merged with process defaults for a pane.
+/// A profile's environment merged with FACT's own values.
+///
+/// `TERM` and `TERM_PROGRAM` are deliberately inherited, not replaced. Agent
+/// CLIs pick their keyboard protocol from them: Claude Code turns on the kitty
+/// protocol at once inside Windows Terminal, which FACT now understands, but
+/// falls back to a fragile timing probe for an unknown `TERM_PROGRAM`.
 pub fn pane_environment(profile: &ResolvedProfile) -> BTreeMap<String, String> {
     let mut env = profile.env.clone();
-    env.entry("TERM".to_string())
-        .or_insert_with(|| "xterm-256color".to_string());
     env.entry("COLORTERM".to_string())
         .or_insert_with(|| "truecolor".to_string());
-    env.entry("TERM_PROGRAM".to_string())
-        .or_insert_with(|| "FACT".to_string());
-    env.entry("TERM_PROGRAM_VERSION".to_string())
-        .or_insert_with(|| env!("CARGO_PKG_VERSION").to_string());
     env.entry("FACT".to_string())
         .or_insert_with(|| "1".to_string());
+    env.entry("FACT_VERSION".to_string())
+        .or_insert_with(|| env!("CARGO_PKG_VERSION").to_string());
     env
 }
 
@@ -560,6 +591,36 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn background_must_be_known() {
+        let config = Config {
+            background: "image".to_string(),
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+        let config = Config {
+            background: "transparent".to_string(),
+            ..Config::default()
+        };
+        config.validate().unwrap();
+        assert!(config.transparent_background());
+        assert!(!Config::default().transparent_background());
+        assert!(!Config::default().alt_shortcuts);
+    }
+
+    #[test]
+    fn pane_environment_marks_fact_and_keeps_the_host_terminal() {
+        let mut profile = Config::default().resolve_profile(None).unwrap();
+        profile
+            .env
+            .insert("COLORTERM".to_string(), "24bit".to_string());
+        let env = pane_environment(&profile);
+        assert_eq!(env.get("COLORTERM").map(String::as_str), Some("24bit"));
+        assert_eq!(env.get("FACT").map(String::as_str), Some("1"));
+        assert!(!env.contains_key("TERM"));
+        assert!(!env.contains_key("TERM_PROGRAM"));
     }
 
     #[test]

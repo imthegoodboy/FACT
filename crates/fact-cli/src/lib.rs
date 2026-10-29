@@ -4,6 +4,23 @@
 //! optional configuration file, starts the in-process engine and hands the
 //! terminal to the TUI. No service, daemon or session database is involved.
 
+/// `println!` that tolerates a closed pipe (`fact doctor | Select -First 3`)
+/// instead of panicking, but still fails on any other write error.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        if let Err(error) = writeln!(std::io::stdout().lock(), $($arg)*) {
+            if error.kind() != std::io::ErrorKind::BrokenPipe {
+                eprintln!("fact: could not write output: {error}");
+                std::process::exit(1);
+            }
+        }
+    }};
+}
+
+mod doctor;
+mod wallpaper;
+
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
@@ -33,6 +50,9 @@ struct Cli {
     /// Working directory for the initial shells.
     #[arg(long, value_name = "DIR")]
     cwd: Option<String>,
+    /// Let the host terminal's background image show through (see `fact wallpaper`).
+    #[arg(long)]
+    transparent: bool,
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -44,6 +64,31 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Show, set or clear a background image behind the workspace.
+    Wallpaper {
+        #[command(subcommand)]
+        action: Option<WallpaperAction>,
+    },
+    /// Check this machine for anything that affects FACT: terminal, config,
+    /// duplicate installs on PATH, agent CLIs and old data.
+    Doctor,
+}
+
+#[derive(Debug, Subcommand)]
+enum WallpaperAction {
+    /// Use an image (png, jpg, jpeg, gif, bmp, webp, tif, tiff) as the workspace background.
+    Set {
+        /// Image file to use. FACT keeps its own copy.
+        image: PathBuf,
+        /// Image strength: 5-100 (percent) or 0.05-1.0. Lower keeps text easier to read.
+        #[arg(long, value_parser = wallpaper::parse_opacity, default_value = "35")]
+        opacity: f64,
+        /// How the image fills the window.
+        #[arg(long, value_enum, default_value_t = wallpaper::ImageFit::Fill)]
+        fit: wallpaper::ImageFit,
+    },
+    /// Remove the background image and FACT's Windows Terminal profile.
+    Clear,
 }
 
 #[derive(Debug, Subcommand)]
@@ -68,12 +113,20 @@ pub fn run() -> Result<i32> {
     let cli = Cli::parse();
     let paths = Paths::resolve(cli.config.clone())?;
 
-    if let Some(Commands::Config { action }) = cli.command {
-        run_config(&paths, cli.config.is_some(), action)?;
-        return Ok(0);
+    match cli.command {
+        Some(Commands::Config { action }) => {
+            run_config(&paths, cli.config.is_some(), action)?;
+            return Ok(0);
+        }
+        Some(Commands::Wallpaper { action }) => {
+            run_wallpaper(&paths, action)?;
+            return Ok(0);
+        }
+        Some(Commands::Doctor) => return Ok(doctor::run(&paths)),
+        None => {}
     }
 
-    launch(&paths, cli.grid, cli.profile, cli.cwd)?;
+    launch(&paths, cli.grid, cli.profile, cli.cwd, cli.transparent)?;
     Ok(0)
 }
 
@@ -82,8 +135,12 @@ fn launch(
     grid: Option<u8>,
     profile: Option<String>,
     cwd: Option<String>,
+    transparent: bool,
 ) -> Result<()> {
-    let config = Config::load(paths).context("could not load the FACT configuration")?;
+    let mut config = Config::load(paths).context("could not load the FACT configuration")?;
+    if transparent {
+        config.background = "transparent".to_string();
+    }
     let cwd = cwd.or_else(|| {
         std::env::current_dir()
             .ok()
@@ -98,9 +155,48 @@ fn launch(
     result
 }
 
+fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
+    let locations = wallpaper::Locations::resolve(&paths.base)?;
+    match action {
+        None => match wallpaper::current(&locations)? {
+            Some(current) => {
+                out!("Wallpaper: {}", wallpaper::describe(&current));
+                out!("Profile:   {}", locations.fragment.display());
+                out!("Open it:   wt -p {}", wallpaper::PROFILE_NAME);
+            }
+            None => out!("No wallpaper set. Use: fact wallpaper set <image>"),
+        },
+        Some(WallpaperAction::Set {
+            image,
+            opacity,
+            fit,
+        }) => {
+            let current = wallpaper::set(&locations, &image, opacity, fit)?;
+            out!("Wallpaper set: {}", wallpaper::describe(&current));
+            out!(
+                "Windows Terminal profile \"{}\": {}",
+                wallpaper::PROFILE_NAME,
+                locations.fragment.display()
+            );
+            out!();
+            out!("Open it with:  wt -p {}", wallpaper::PROFILE_NAME);
+            out!("               (or pick FACT from the Windows Terminal tab menu)");
+            out!("New profile?   Restart Windows Terminal once so it loads.");
+        }
+        Some(WallpaperAction::Clear) => {
+            if wallpaper::clear(&locations)? {
+                out!("Wallpaper and the FACT Windows Terminal profile were removed.");
+            } else {
+                out!("No wallpaper was set.");
+            }
+        }
+    }
+    Ok(())
+}
+
 fn run_config(paths: &Paths, explicit: bool, action: ConfigAction) -> Result<()> {
     match action {
-        ConfigAction::Path => println!("{}", paths.config_file.display()),
+        ConfigAction::Path => out!("{}", paths.config_file.display()),
         ConfigAction::Validate { json } => {
             if explicit && !paths.config_file.is_file() {
                 bail!(
@@ -119,25 +215,32 @@ fn run_config(paths: &Paths, explicit: bool, action: ConfigAction) -> Result<()>
                     "version": config.config_version,
                     "prefix": config.prefix,
                     "theme": config.theme,
+                    "background": config.background,
+                    "alt_shortcuts": config.alt_shortcuts,
                     "keybind_count": keybinds.by_action.len(),
                     "profiles": config.profile_names(),
                     "default_shell": profile.as_ref().ok().map(|profile| profile.command.clone()),
                     "scrollback_lines": config.scrollback_lines,
                 });
-                println!("{}", serde_json::to_string_pretty(&value)?);
+                out!("{}", serde_json::to_string_pretty(&value)?);
             } else {
-                println!("Configuration is valid: {}", paths.config_file.display());
+                out!("Configuration is valid: {}", paths.config_file.display());
                 if !paths.config_file.is_file() {
-                    println!("  (file not present; built-in defaults are in use)");
+                    out!("  (file not present; built-in defaults are in use)");
                 }
-                println!("  version      {}", config.config_version);
-                println!("  prefix       {}", config.prefix);
-                println!("  theme        {}", config.theme);
-                println!("  keybindings  {} actions", keybinds.by_action.len());
-                println!("  profiles     {}", config.profile_names().join(", "));
+                out!("  version      {}", config.config_version);
+                out!("  prefix       {}", config.prefix);
+                out!("  theme        {}", config.theme);
+                out!("  background   {}", config.background);
+                out!(
+                    "  alt keys     {}",
+                    if config.alt_shortcuts { "on" } else { "off" }
+                );
+                out!("  keybindings  {} actions", keybinds.by_action.len());
+                out!("  profiles     {}", config.profile_names().join(", "));
                 match profile {
-                    Ok(profile) => println!("  default shell {}", profile.command),
-                    Err(error) => println!("  default shell <unresolved: {error}>"),
+                    Ok(profile) => out!("  default shell {}", profile.command),
+                    Err(error) => out!("  default shell <unresolved: {error}>"),
                 }
             }
         }
@@ -151,7 +254,7 @@ fn run_config(paths: &Paths, explicit: bool, action: ConfigAction) -> Result<()>
             fact_config::write_default_config(&paths.config_file, force)?;
             Config::load_file(&paths.config_file)
                 .context("the generated configuration failed validation")?;
-            println!("Wrote {}", paths.config_file.display());
+            out!("Wrote {}", paths.config_file.display());
         }
     }
     Ok(())

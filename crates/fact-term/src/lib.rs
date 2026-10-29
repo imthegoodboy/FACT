@@ -157,6 +157,56 @@ pub struct TerminalModel {
     sink: TerminalEventSink,
     cols: u16,
     rows: u16,
+    win32_input: Win32InputScanner,
+}
+
+const WIN32_INPUT_ON: &[u8] = b"\x1b[?9001h";
+const WIN32_INPUT_OFF: &[u8] = b"\x1b[?9001l";
+
+/// Tracks ConPTY's request for Windows Terminal's win32-input-mode.
+///
+/// Alacritty does not know private mode 9001 and ignores it, so the raw output
+/// is scanned instead. A short tail carries a sequence split across reads.
+#[derive(Default)]
+struct Win32InputScanner {
+    enabled: bool,
+    tail: Vec<u8>,
+}
+
+impl Win32InputScanner {
+    fn scan(&mut self, bytes: &[u8]) {
+        let keep = WIN32_INPUT_ON.len() - 1;
+        if !self.tail.is_empty() {
+            // Only sequences that start in the tail can match here: neither the
+            // tail nor the chunk prefix is long enough to hold one alone, so
+            // nothing is counted twice.
+            let mut joined = self.tail.clone();
+            joined.extend_from_slice(&bytes[..bytes.len().min(keep)]);
+            self.apply(&joined);
+        }
+        self.apply(bytes);
+        self.tail
+            .extend_from_slice(&bytes[bytes.len().saturating_sub(keep)..]);
+        let excess = self.tail.len().saturating_sub(keep);
+        self.tail.drain(..excess);
+    }
+
+    fn apply(&mut self, bytes: &[u8]) {
+        let mut last = None;
+        for (index, window) in bytes.windows(WIN32_INPUT_ON.len()).enumerate() {
+            if window[0] != 0x1b {
+                continue;
+            }
+            if window == WIN32_INPUT_ON {
+                last = Some((index, true));
+            } else if window == WIN32_INPUT_OFF {
+                last = Some((index, false));
+            }
+        }
+        if let Some((_, enabled)) = last {
+            self.enabled = enabled;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -183,7 +233,10 @@ impl TerminalModel {
         let rows = rows.max(1);
         let config = TermConfig {
             scrolling_history: history,
-            kitty_keyboard: false,
+            // Agent CLIs (Claude Code, OpenCode, Copilot) query and push kitty
+            // keyboard flags to tell Shift+Enter from Enter. The queries pass
+            // through ConPTY, so answering them is what makes that work.
+            kitty_keyboard: true,
             ..Default::default()
         };
         sink.set_dimensions(cols, rows);
@@ -202,6 +255,7 @@ impl TerminalModel {
             sink,
             cols,
             rows,
+            win32_input: Win32InputScanner::default(),
         }
     }
 
@@ -224,6 +278,7 @@ impl TerminalModel {
     /// Feed bytes from the ConPTY. Parser panics are contained so a malformed
     /// escape sequence can never take down the engine.
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.win32_input.scan(bytes);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.parser.advance(&mut self.term, bytes);
         }));
@@ -327,6 +382,12 @@ impl TerminalModel {
         }
         if mode.contains(TermMode::BRACKETED_PASTE) {
             out |= pane_modes::BRACKETED_PASTE;
+        }
+        if self.win32_input.enabled {
+            out |= pane_modes::WIN32_INPUT;
+        }
+        if mode.intersects(TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC) {
+            out |= pane_modes::KITTY_KEYS;
         }
         out
     }
@@ -720,6 +781,40 @@ mod tests {
         let mut t = term(10, 2);
         t.feed(b"\x1b]0;my-title\x07");
         assert_eq!(t.title(), "my-title");
+    }
+
+    #[test]
+    fn win32_input_mode_is_tracked_across_reads() {
+        let mut model = term(20, 4);
+        assert_eq!(model.modes() & pane_modes::WIN32_INPUT, 0);
+        model.feed(b"\x1b[?90");
+        model.feed(b"01h\x1b[?1004h");
+        assert_ne!(model.modes() & pane_modes::WIN32_INPUT, 0);
+        model.feed(b"text \x1b[?9001l more");
+        assert_eq!(model.modes() & pane_modes::WIN32_INPUT, 0);
+        for byte in b"\x1b[?9001h" {
+            model.feed(&[*byte]);
+        }
+        assert_ne!(model.modes() & pane_modes::WIN32_INPUT, 0);
+        // The sequence is not rendered as text.
+        assert!(!model.plain_text().contains("9001"));
+    }
+
+    #[test]
+    fn kitty_keyboard_flags_are_reported_and_tracked() {
+        let sink = TerminalEventSink::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        sink.attach_writer(tx);
+        let mut model = TerminalModel::new(20, 4, 100, sink);
+        model.feed(b"\x1b[?u");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b[?0u");
+        assert_eq!(model.modes() & pane_modes::KITTY_KEYS, 0);
+        model.feed(b"\x1b[>5u");
+        assert_ne!(model.modes() & pane_modes::KITTY_KEYS, 0);
+        model.feed(b"\x1b[?u");
+        assert_eq!(rx.try_recv().unwrap(), b"\x1b[?5u");
+        model.feed(b"\x1b[<u");
+        assert_eq!(model.modes() & pane_modes::KITTY_KEYS, 0);
     }
 
     #[test]
