@@ -54,8 +54,10 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
   swap. Drag dividers to resize (double-click to balance), `Alt`+drag a pane
   onto another pane or tab to move it, drag tabs to reorder them, or resize from
   the keyboard with the prefix and `Shift`+arrows.
-- **Wallpaper.** `fact wallpaper set image.jpg` puts a background image behind
-  every pane through a Windows Terminal profile, at zero runtime cost.
+- **Wallpaper and video.** `fact wallpaper set sky.jpg` or `fact wallpaper set
+  clip.mp4` puts a picture or a looping video behind every pane, in any
+  terminal: Windows Terminal, the classic console, VS Code. Text, the cursor
+  and selections stay readable on top.
 - **Minimal black TUI.** Plain terminal panes with no title rows, buttons or
   permanent status bar. A one-line tab strip appears only when the workspace
   has more than one tab. Panes have a scrollbar on hover in shells, a steady
@@ -70,15 +72,22 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
 
 ## Install
 
-With npm (the package contains the native `fact.exe`; Node.js is not used at
-runtime):
+**npm (recommended).** The package contains the native `fact.exe`; Node.js is
+only used to install it, never at runtime.
 
 ```powershell
-npm install -g fact-terminal
+npm install -g fact-terminal      # install
+npm install -g fact-terminal@latest   # update
+npm uninstall -g fact-terminal    # remove
+fact --version
 ```
 
-Releases also ship a single `fact.exe`, SHA-256 checksums and PowerShell
-install scripts:
+Requirements: Windows 11 x64 (Windows 10 1809+ is expected to work but is not
+verified; see [Compatibility](#compatibility)), any terminal. Video wallpapers
+also need [ffmpeg](https://ffmpeg.org) (`winget install ffmpeg`).
+
+**PowerShell installer.** Releases also ship a single `fact.exe`, SHA-256
+checksums and PowerShell install scripts:
 
 ```powershell
 # Downloads the latest release, verifies SHA256SUMS.txt, installs per user.
@@ -99,8 +108,10 @@ cargo build --release --bin fact
 .\scripts\install.ps1 -BinaryPath .\target\release\fact.exe -Force
 ```
 
-Close every running FACT window before replacing the executable. Because there
-is no background process, a new window always starts with fresh shells.
+Use one install method. If both npm and the PowerShell installer put a `fact`
+on PATH, the first one wins; `fact doctor` lists every copy. Close every running
+FACT window before replacing the executable. Because there is no background
+process, a new window always starts with fresh shells.
 
 ## Build from source
 
@@ -123,7 +134,9 @@ fact --grid 8                     # eight shells in a grid
 fact --profile pwsh --grid 4      # use a configured shell profile
 fact --cwd . --grid 1             # start the initial shells in this directory
 fact doctor                       # check terminal, config, duplicate installs and agent CLIs
-fact wallpaper set C:\Pictures\sky.jpg   # background image (Windows Terminal)
+fact wallpaper set C:\Pictures\sky.jpg   # background picture, in every terminal
+fact wallpaper set C:\Videos\rain.mp4   # looping video background (needs ffmpeg)
+fact wallpaper clear              # back to the theme background
 fact config path                  # print the configuration file in use
 fact config validate              # parse and validate configuration
 fact config init                  # write a documented default config.toml
@@ -296,8 +309,8 @@ FACT adds no scrollbar to alternate-screen or mouse-controlled agent UIs.
 | --- | --- |
 | `fact [--grid N] [--profile NAME] [--cwd DIR] [--transparent] [--config FILE]` | Start a fresh workspace and open the TUI. |
 | `fact doctor` | Report the host terminal, config, duplicate `fact` installs on PATH, agent CLIs, wallpaper and old data. Changes nothing. |
-| `fact wallpaper set IMAGE [--opacity N] [--fit fill\|fit\|stretch\|center]` | Use an image as the background through a Windows Terminal "FACT" profile. |
-| `fact wallpaper` / `fact wallpaper clear` | Show / remove the wallpaper and its profile. |
+| `fact wallpaper set FILE [--opacity N] [--fit fill\|fit\|stretch\|center]` | Put an image (png, jpg, jpeg, gif, bmp, webp) or a looping video (mp4, mkv, webm, mov, avi, m4v, wmv, flv; needs ffmpeg) behind every pane. |
+| `fact wallpaper` / `fact wallpaper clear` | Show / remove the wallpaper. |
 | `fact config path` | Print the configuration file path in use. |
 | `fact config validate [--json]` | Parse, validate and compile the configuration. |
 | `fact config init [--force]` | Write a documented default `config.toml`. |
@@ -351,12 +364,14 @@ chosen with `--config`. `FACT_HOME` can relocate the default base directory.
 | Path | Contents |
 | --- | --- |
 | `config.toml` | Optional configuration: theme, profiles, keybindings and environment values. |
-| `wallpaper\` | Only after `fact wallpaper set`: FACT's copy of the image. |
+| `wallpaper\` | Only after `fact wallpaper set`: FACT's copy of an image and a small `settings.json`. Videos are played from where they are. |
 | No other paths | FACT creates no database, log, runtime identity, saved layout or export directory. |
 
 Terminal output, scrollback and process state exist only in memory for the life
-of the FACT process. Only `fact config init` and `fact wallpaper set` write
-files; `fact wallpaper set` also writes one Windows Terminal fragment
+of the FACT process. There is no database, history file or saved session;
+files left by FACT 0.3 (`sessions.db`, `runtime`, `logs`) are deleted on the
+next launch. Only `fact config init` and `fact wallpaper set` write files;
+`fact wallpaper set` also writes one Windows Terminal fragment
 (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`), which
 `fact wallpaper clear` removes.
 Closing FACT, closing the last tab, or pressing `Ctrl+Space` then `Shift+Q`

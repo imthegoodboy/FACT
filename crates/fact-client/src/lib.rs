@@ -7,7 +7,13 @@
 mod keymap;
 mod render;
 mod theme;
+mod wallpaper;
 
+pub use wallpaper::{
+    find_ffmpeg, is_video as is_video_file, Fit as WallpaperFit, WallpaperSpec, VIDEO_EXTENSIONS,
+};
+
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -98,16 +104,34 @@ pub(crate) fn action_label(action: &str) -> &'static str {
 }
 
 /// Run the interactive terminal UI. Terminal state is always restored before
-/// returning, including on errors.
-pub fn run(client: EngineClient, events: EventStream, config: Config) -> Result<()> {
+/// returning, including on errors. `wallpaper` is painted behind the panes.
+pub fn run(
+    client: EngineClient,
+    events: EventStream,
+    config: Config,
+    wallpaper: Option<WallpaperSpec>,
+) -> Result<()> {
     let keys = config
         .compiled_keybinds()
         .context("could not compile keyboard bindings")?;
+    // FACT is a terminal: it shows the colors its programs produce. NO_COLOR
+    // is for programs that emit color, and the panes still inherit it, so
+    // crossterm must not strip every color from FACT's own drawing.
+    crossterm::style::Colored::set_ansi_color_disabled(false);
     let mut terminal = TerminalGuard::enter(config.mouse)?;
     let size = terminal.size().context("could not read terminal size")?;
     let events = spawn_readers(events);
 
     let mut app = App::new(client, config, keys, events, size.width, size.height);
+    if let Some(spec) = wallpaper {
+        match wallpaper::Wallpaper::load(&spec) {
+            Ok(loaded) => {
+                app.theme = app.theme.with_transparency(true);
+                app.wallpaper = Some(RefCell::new(loaded));
+            }
+            Err(error) => app.set_status(format!("Wallpaper: {error}")),
+        }
+    }
     let result = app.event_loop(&mut terminal);
     app.stop_events();
     let message = app.exit_message.clone();
@@ -828,6 +852,8 @@ struct App {
     fatal: Option<anyhow::Error>,
     /// The screen no longer matches the state; draw before sleeping again.
     dirty: bool,
+    /// Painted behind the panes; `RefCell` because drawing advances its cache.
+    wallpaper: Option<RefCell<wallpaper::Wallpaper>>,
 }
 
 impl App {
@@ -870,6 +896,7 @@ impl App {
             exit_message: None,
             fatal: None,
             dirty: true,
+            wallpaper: None,
         }
     }
 
@@ -885,11 +912,17 @@ impl App {
                     .draw(|frame| self.render(frame))
                     .context("could not draw the FACT UI")?;
             }
-            let wait = self
+            let status_wait = self
                 .status
                 .as_ref()
                 .map(|(_, at)| STATUS_LIFETIME.saturating_sub(at.elapsed()))
                 .unwrap_or(Duration::from_secs(60));
+            let frame_wait = self
+                .wallpaper
+                .as_ref()
+                .and_then(|wallpaper| wallpaper.borrow().next_frame_at())
+                .map(|at| at.saturating_duration_since(Instant::now()));
+            let wait = frame_wait.map_or(status_wait, |frame| frame.min(status_wait));
             match self.events.receiver.recv_timeout(wait) {
                 Ok(event) => self.handle_ui_event(event),
                 Err(RecvTimeoutError::Timeout) => {}
@@ -915,6 +948,11 @@ impl App {
             {
                 self.status = None;
                 self.dirty = true;
+            }
+            if let Some(wallpaper) = &self.wallpaper {
+                if wallpaper.borrow_mut().tick(Instant::now()) {
+                    self.dirty = true;
+                }
             }
         }
 
@@ -960,7 +998,16 @@ impl App {
                 self.paste_text(text);
                 self.dirty = true;
             }
+            Event::FocusGained => {
+                if let Some(wallpaper) = &self.wallpaper {
+                    wallpaper.borrow_mut().set_paused(false);
+                }
+            }
             Event::FocusLost => {
+                // An animated wallpaper costs nothing while nobody watches.
+                if let Some(wallpaper) = &self.wallpaper {
+                    wallpaper.borrow_mut().set_paused(true);
+                }
                 self.mouse_position = None;
                 self.scroll_drag = None;
                 self.drag_split = None;

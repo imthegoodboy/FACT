@@ -1,0 +1,4 @@
+# Keep the GitHub language bar about FACT itself: the PowerShell install
+# scripts and the Python screenshot helper are tooling, not the product.
+*.ps1 linguist-detectable=false
+*.py linguist-detectable=false

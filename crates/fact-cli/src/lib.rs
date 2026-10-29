@@ -76,9 +76,10 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum WallpaperAction {
-    /// Use an image (png, jpg, jpeg, gif, bmp, webp, tif, tiff) as the workspace background.
+    /// Use an image (png, jpg, jpeg, gif, bmp, webp) or a video (mp4, mkv, webm,
+    /// mov, avi, m4v, wmv, flv; needs ffmpeg) as the workspace background.
     Set {
-        /// Image file to use. FACT keeps its own copy.
+        /// Image or video file. Images are copied; videos play from where they are.
         image: PathBuf,
         /// Image strength: 5-100 (percent) or 0.05-1.0. Lower keeps text easier to read.
         #[arg(long, value_parser = wallpaper::parse_opacity, default_value = "35")]
@@ -126,6 +127,7 @@ pub fn run() -> Result<i32> {
         None => {}
     }
 
+    doctor::remove_legacy_data(&paths.base);
     launch(&paths, cli.grid, cli.profile, cli.cwd, cli.transparent)?;
     Ok(0)
 }
@@ -138,8 +140,35 @@ fn launch(
     transparent: bool,
 ) -> Result<()> {
     let mut config = Config::load(paths).context("could not load the FACT configuration")?;
-    if transparent {
+    // A FACT started inside a transparent FACT pane inherits the mode, so it
+    // does not paint a solid block over the outer wallpaper.
+    let inherited = std::env::var("FACT_BACKGROUND").is_ok_and(|value| value == "transparent");
+    let current = wallpaper::Locations::resolve(&paths.base)
+        .ok()
+        .and_then(|locations| wallpaper::current(&locations).ok().flatten())
+        .filter(|current| current.image.is_file());
+    // In Windows Terminal's FACT profile the terminal draws an image itself.
+    let native = wallpaper::in_fact_profile() && current.as_ref().is_some_and(|w| !w.video);
+    // `background = "transparent"` in config.toml means the same as the flag:
+    // the terminal's own background shows, so FACT paints nothing.
+    let leave_background = transparent || config.transparent_background() || inherited || native;
+    if leave_background {
         config.background = "transparent".to_string();
+    }
+    let painted = if leave_background {
+        None
+    } else {
+        current.map(|current| fact_client::WallpaperSpec {
+            image: current.image,
+            opacity: current.opacity as f32,
+            fit: current.fit.into(),
+        })
+    };
+    if config.transparent_background() || painted.is_some() {
+        config
+            .env
+            .entry("FACT_BACKGROUND".to_string())
+            .or_insert_with(|| "transparent".to_string());
     }
     let cwd = cwd.or_else(|| {
         std::env::current_dir()
@@ -149,7 +178,7 @@ fn launch(
 
     let started = fact_engine::start(config.clone(), grid.unwrap_or(1), profile, cwd)
         .context("could not start the FACT workspace")?;
-    let result = fact_client::run(started.client, started.events, config)
+    let result = fact_client::run(started.client, started.events, config, painted)
         .context("terminal user interface stopped with an error");
     drop(started.engine);
     result
@@ -161,8 +190,13 @@ fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
         None => match wallpaper::current(&locations)? {
             Some(current) => {
                 out!("Wallpaper: {}", wallpaper::describe(&current));
-                out!("Profile:   {}", locations.fragment.display());
-                out!("Open it:   wt -p {}", wallpaper::PROFILE_NAME);
+                out!("It shows behind FACT in every terminal.");
+                if !current.video {
+                    out!(
+                        "Full resolution in Windows Terminal: wt -p {}",
+                        wallpaper::PROFILE_NAME
+                    );
+                }
             }
             None => out!("No wallpaper set. Use: fact wallpaper set <image>"),
         },
@@ -173,18 +207,18 @@ fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
         }) => {
             let current = wallpaper::set(&locations, &image, opacity, fit)?;
             out!("Wallpaper set: {}", wallpaper::describe(&current));
-            out!(
-                "Windows Terminal profile \"{}\": {}",
-                wallpaper::PROFILE_NAME,
-                locations.fragment.display()
-            );
-            out!();
-            out!("Open it with:  wt -p {}", wallpaper::PROFILE_NAME);
-            out!("               (or pick FACT from the Windows Terminal tab menu)");
-            out!("New profile?   Restart Windows Terminal once so it loads.");
+            out!("It shows behind FACT in every terminal the next time you run `fact`.");
+            wallpaper::reload_windows_terminal();
+            if !current.video {
+                out!(
+                    "In Windows Terminal, `wt -p {}` shows it at full resolution.",
+                    wallpaper::PROFILE_NAME
+                );
+            }
         }
         Some(WallpaperAction::Clear) => {
             if wallpaper::clear(&locations)? {
+                wallpaper::reload_windows_terminal();
                 out!("Wallpaper and the FACT Windows Terminal profile were removed.");
             } else {
                 out!("No wallpaper was set.");

@@ -1,12 +1,13 @@
-//! `fact wallpaper`: a background image behind the whole workspace.
+//! `fact wallpaper`: an image or a looping video behind the whole workspace.
 //!
-//! A console program cannot draw a real image, but Windows Terminal can. FACT
-//! copies the image into its own directory and writes a Windows Terminal
-//! *fragment*: a separate JSON file that adds a "FACT" profile with that
-//! background image and starts `fact --transparent`. The user's own
-//! `settings.json` is never edited, and `fact wallpaper clear` removes both
-//! files again. In transparent mode FACT leaves default backgrounds to the host
-//! terminal, so the image shows through every pane at zero runtime cost.
+//! FACT paints the wallpaper itself, so it shows in every terminal. Images are
+//! copied into FACT's folder; videos are played from where they are (through
+//! ffmpeg). The choice is recorded in `wallpaper\settings.json`.
+//!
+//! For images FACT also writes a Windows Terminal *fragment*: a separate JSON
+//! file adding a "FACT" profile whose own background image Windows Terminal
+//! draws at full resolution, with FACT transparent on top. The user's
+//! `settings.json` is never edited, and `fact wallpaper clear` removes it all.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,10 +16,11 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 /// Fixed so re-running `fact wallpaper set` updates the same profile.
-const PROFILE_GUID: &str = "{4c8f3a1d-6b2e-4f9a-8d71-3e5c0b9a2f64}";
+pub const PROFILE_GUID: &str = "{4c8f3a1d-6b2e-4f9a-8d71-3e5c0b9a2f64}";
 pub const PROFILE_NAME: &str = "FACT";
 const FRAGMENT_FILE: &str = "fact.json";
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff"];
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+const RECORD_FILE: &str = "settings.json";
 pub const DEFAULT_OPACITY: f64 = 0.35;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -112,13 +114,53 @@ impl Locations {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wallpaper {
+    /// FACT's copy of an image, or the original video file.
     pub image: PathBuf,
     pub opacity: f64,
     pub fit: ImageFit,
+    pub video: bool,
 }
 
-/// The wallpaper recorded in FACT's fragment, if one is installed.
+impl ImageFit {
+    fn from_label(label: &str) -> Option<Self> {
+        [
+            ImageFit::Fill,
+            ImageFit::Fit,
+            ImageFit::Stretch,
+            ImageFit::Center,
+        ]
+        .into_iter()
+        .find(|fit| fit.label() == label)
+    }
+}
+
+pub fn is_video(path: &Path) -> bool {
+    fact_client::is_video_file(path)
+}
+
+/// The current wallpaper: FACT's own record, or (for setups made by 0.5.0)
+/// the image named in FACT's Windows Terminal fragment.
 pub fn current(locations: &Locations) -> Result<Option<Wallpaper>> {
+    let record = locations.image_dir.join(RECORD_FILE);
+    if record.is_file() {
+        let text = fs::read_to_string(&record)
+            .with_context(|| format!("could not read {}", record.display()))?;
+        let value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("{} is not valid JSON", record.display()))?;
+        let Some(source) = value["source"].as_str() else {
+            return Ok(None);
+        };
+        let image = PathBuf::from(source);
+        return Ok(Some(Wallpaper {
+            video: is_video(&image),
+            image,
+            opacity: value["opacity"].as_f64().unwrap_or(DEFAULT_OPACITY),
+            fit: value["fit"]
+                .as_str()
+                .and_then(ImageFit::from_label)
+                .unwrap_or(ImageFit::Fill),
+        }));
+    }
     if !locations.fragment.is_file() {
         return Ok(None);
     }
@@ -137,6 +179,7 @@ pub fn current(locations: &Locations) -> Result<Option<Wallpaper>> {
     };
     Ok(Some(Wallpaper {
         image: PathBuf::from(image),
+        video: false,
         opacity: profile["backgroundImageOpacity"]
             .as_f64()
             .unwrap_or(DEFAULT_OPACITY),
@@ -147,41 +190,89 @@ pub fn current(locations: &Locations) -> Result<Option<Wallpaper>> {
     }))
 }
 
-/// Copy the image, then write the Windows Terminal profile that uses it.
+/// Use an image (copied into FACT's folder) or a video (played in place).
 pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) -> Result<Wallpaper> {
     if !source.is_file() {
-        bail!("image not found: {}", source.display());
+        bail!("file not found: {}", source.display());
     }
     let extension = source
         .extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
+    let video = is_video(source);
+    if !video && !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
         bail!(
-            "unsupported image type '.{extension}' (use {})",
-            IMAGE_EXTENSIONS.join(", ")
+            "unsupported file type '.{extension}' (images: {}; videos: {})",
+            IMAGE_EXTENSIONS.join(", "),
+            fact_client::VIDEO_EXTENSIONS.join(", ")
         );
+    }
+    if video && fact_client::find_ffmpeg().is_none() {
+        bail!("video wallpapers need ffmpeg: install it with `winget install ffmpeg`, then run this again");
     }
 
     fs::create_dir_all(&locations.image_dir)
         .with_context(|| format!("could not create {}", locations.image_dir.display()))?;
-    // A fresh name per image: the installed profile keeps pointing at the old
-    // copy until the new fragment has been written in full.
-    let image = copy_to_fresh_name(source, &locations.image_dir, &extension)?;
-    if let Err(error) = write_fragment(locations, &image, opacity, fit) {
-        let _ = fs::remove_file(&image);
+    let image = if video {
+        // Videos can be large; play the original instead of copying it.
+        fs::canonicalize(source)
+            .map(|path| strip_verbatim(&path))
+            .unwrap_or_else(|_| source.to_path_buf())
+    } else {
+        // A fresh name per image: the installed profile keeps pointing at the
+        // old copy until the new fragment has been written in full.
+        copy_to_fresh_name(source, &locations.image_dir, &extension)?
+    };
+    let wallpaper = Wallpaper {
+        image,
+        opacity,
+        fit,
+        video,
+    };
+    // The record is FACT's source of truth, so it is written first; the
+    // Windows Terminal profile follows it.
+    let committed = write_record(locations, &wallpaper).and_then(|()| {
+        write_fragment(
+            locations,
+            (!video).then_some(wallpaper.image.as_path()),
+            opacity,
+            fit,
+        )
+    });
+    if let Err(error) = committed {
+        if !video {
+            let _ = fs::remove_file(&wallpaper.image);
+        }
         return Err(error);
     }
     // The new wallpaper is committed. Old copies are only clutter, so a
     // failure to delete one must not turn this success into an error.
-    let _ = remove_images(&locations.image_dir, Some(&image));
+    let _ = remove_images(&locations.image_dir, Some(wallpaper.image.as_path()));
+    Ok(wallpaper)
+}
 
-    Ok(Wallpaper {
-        image,
-        opacity,
-        fit,
-    })
+/// `canonicalize` returns `\\?\C:\...`; keep the familiar form.
+fn strip_verbatim(path: &Path) -> PathBuf {
+    let text = path.display().to_string();
+    // `\\?\UNC\server\share\...` is the verbatim form of `\\server\share\...`.
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{share}"));
+    }
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(&text))
+}
+
+fn write_record(locations: &Locations, wallpaper: &Wallpaper) -> Result<()> {
+    let record = locations.image_dir.join(RECORD_FILE);
+    let value = json!({
+        "source": wallpaper.image.display().to_string(),
+        "opacity": (wallpaper.opacity * 100.0).round() / 100.0,
+        "fit": wallpaper.fit.label(),
+    });
+    let temp = record.with_extension("json.tmp");
+    fs::write(&temp, serde_json::to_string_pretty(&value)? + "\n")
+        .with_context(|| format!("could not write {}", temp.display()))?;
+    fs::rename(&temp, &record).with_context(|| format!("could not write {}", record.display()))
 }
 
 /// Copy `source` to a `wallpaper-<number>.<ext>` name that does not exist yet.
@@ -219,7 +310,16 @@ fn copy_to_fresh_name(source: &Path, dir: &Path, extension: &str) -> Result<Path
 /// FACT's own image names: `wallpaper-<digits>.<ext>`, plus the fixed
 /// `wallpaper.<ext>` and `incoming.<ext>` names used before.
 fn is_fact_image(path: &Path) -> bool {
-    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+    // Only image copies: a video is always the user's own file.
+    let image = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+    let Some(stem) = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|_| image)
+    else {
         return false;
     };
     let stem = stem.to_ascii_lowercase();
@@ -230,21 +330,31 @@ fn is_fact_image(path: &Path) -> bool {
             .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
-fn write_fragment(locations: &Locations, image: &Path, opacity: f64, fit: ImageFit) -> Result<()> {
+/// The "FACT" Windows Terminal profile. With an image, Windows Terminal draws
+/// it at full resolution and FACT starts transparent; a video is drawn by
+/// FACT, so the profile then only launches FACT.
+fn write_fragment(
+    locations: &Locations,
+    image: Option<&Path>,
+    opacity: f64,
+    fit: ImageFit,
+) -> Result<()> {
     let exe = std::env::current_exe().context("could not locate fact.exe")?;
-    let fragment = json!({
-        "profiles": [{
-            "guid": PROFILE_GUID,
-            "name": PROFILE_NAME,
-            "commandline": format!("\"{}\" --transparent", exe.display()),
-            "startingDirectory": "%USERPROFILE%",
-            "background": "#000000",
-            "backgroundImage": image.display().to_string(),
-            "backgroundImageOpacity": (opacity * 100.0).round() / 100.0,
-            "backgroundImageStretchMode": fit.stretch_mode(),
-            "backgroundImageAlignment": "center",
-        }]
+    let mut profile = json!({
+        "guid": PROFILE_GUID,
+        "name": PROFILE_NAME,
+        "commandline": format!("\"{}\"", exe.display()),
+        "startingDirectory": "%USERPROFILE%",
+        "background": "#000000",
     });
+    if let Some(image) = image {
+        profile["commandline"] = json!(format!("\"{}\" --transparent", exe.display()));
+        profile["backgroundImage"] = json!(image.display().to_string());
+        profile["backgroundImageOpacity"] = json!((opacity * 100.0).round() / 100.0);
+        profile["backgroundImageStretchMode"] = json!(fit.stretch_mode());
+        profile["backgroundImageAlignment"] = json!("center");
+    }
+    let fragment = json!({ "profiles": [profile] });
     if let Some(parent) = locations.fragment.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("could not create {}", parent.display()))?;
@@ -273,6 +383,12 @@ pub fn clear(locations: &Locations) -> Result<bool> {
         }
     }
     if locations.image_dir.is_dir() {
+        let record = locations.image_dir.join(RECORD_FILE);
+        if record.is_file() {
+            fs::remove_file(&record)
+                .with_context(|| format!("could not remove {}", record.display()))?;
+            removed = true;
+        }
         removed |= remove_images(&locations.image_dir, None)?;
         let _ = fs::remove_dir(&locations.image_dir);
     }
@@ -294,18 +410,85 @@ fn remove_images(dir: &Path, keep: Option<&Path>) -> Result<bool> {
     Ok(removed)
 }
 
+/// Windows Terminal reads fragments only when it loads its settings, and it
+/// reloads them whenever `settings.json` changes. Bumping that file's
+/// modification time (its content is never touched) applies a new or removed
+/// wallpaper at once, without restarting Windows Terminal. Returns how many
+/// installs were nudged. Skipped when `FACT_WT_FRAGMENTS_DIR` points elsewhere.
+pub fn reload_windows_terminal() -> usize {
+    if std::env::var_os("FACT_WT_FRAGMENTS_DIR").is_some() {
+        return 0;
+    }
+    let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return 0;
+    };
+    let candidates = [
+        local.join(r"Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"),
+        local.join(
+            r"Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json",
+        ),
+        local.join(
+            r"Packages\Microsoft.WindowsTerminalCanary_8wekyb3d8bbwe\LocalState\settings.json",
+        ),
+        local.join(r"Microsoft\Windows Terminal\settings.json"),
+    ];
+    candidates
+        .iter()
+        .filter(|path| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+                .is_ok()
+        })
+        .count()
+}
+
+/// True inside a Windows Terminal tab that uses FACT's wallpaper profile.
+pub fn in_fact_profile() -> bool {
+    std::env::var("WT_PROFILE_ID").is_ok_and(|id| {
+        id.trim_matches(|c| c == '{' || c == '}')
+            .eq_ignore_ascii_case(PROFILE_GUID.trim_matches(|c| c == '{' || c == '}'))
+    })
+}
+
 pub fn describe(wallpaper: &Wallpaper) -> String {
     format!(
-        "{} (opacity {:.0}%, {})",
+        "{} ({}opacity {:.0}%, {})",
         wallpaper.image.display(),
+        if wallpaper.video { "video, " } else { "" },
         wallpaper.opacity * 100.0,
         wallpaper.fit.label()
     )
 }
 
+impl From<ImageFit> for fact_client::WallpaperFit {
+    fn from(fit: ImageFit) -> Self {
+        match fit {
+            ImageFit::Fill => Self::Fill,
+            ImageFit::Fit => Self::Fit,
+            ImageFit::Center => Self::Center,
+            ImageFit::Stretch => Self::Stretch,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verbatim_prefixes_are_removed_without_breaking_shares() {
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\C:\Videos\a.mp4")),
+            PathBuf::from(r"C:\Videos\a.mp4")
+        );
+        assert_eq!(
+            strip_verbatim(Path::new(r"\\?\UNC\server\share\a.mp4")),
+            PathBuf::from(r"\\server\share\a.mp4")
+        );
+        assert!(!is_fact_image(Path::new("wallpaper-123.mp4")));
+    }
 
     #[test]
     fn opacity_accepts_percent_and_fraction() {
@@ -349,13 +532,17 @@ mod tests {
             .unwrap()
             .ends_with("--transparent"));
         assert_eq!(current(&locations).unwrap(), Some(wallpaper));
+        assert!(locations.image_dir.join(RECORD_FILE).is_file());
 
         // Replacing the image with another type leaves exactly one copy.
         let jpeg = dir.path().join("photo.jpg");
         fs::write(&jpeg, b"jpeg").unwrap();
         set(&locations, &jpeg, DEFAULT_OPACITY, ImageFit::Fill).unwrap();
-        let images: Vec<_> = fs::read_dir(&locations.image_dir).unwrap().collect();
-        assert_eq!(images.len(), 1);
+        let images = fs::read_dir(&locations.image_dir)
+            .unwrap()
+            .filter(|entry| is_fact_image(&entry.as_ref().unwrap().path()))
+            .count();
+        assert_eq!(images, 1, "one image copy next to the settings record");
 
         assert!(clear(&locations).unwrap());
         assert!(!locations.fragment.exists());
@@ -397,6 +584,32 @@ mod tests {
         assert!(keep.is_file(), "unrelated files survive set");
         clear(&locations).unwrap();
         assert!(keep.is_file(), "unrelated files survive clear");
+    }
+
+    #[test]
+    fn videos_play_in_place_without_a_terminal_image() {
+        if fact_client::find_ffmpeg().is_none() {
+            return; // set() refuses videos without ffmpeg; covered by its error.
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locations = Locations {
+            image_dir: dir.path().join("FACT").join("wallpaper"),
+            fragment: dir.path().join("Fragments").join("FACT").join("fact.json"),
+        };
+        let video = dir.path().join("clip.mp4");
+        fs::write(&video, b"not really a video").unwrap();
+        let wallpaper = set(&locations, &video, 0.5, ImageFit::Fill).unwrap();
+        assert!(wallpaper.video);
+        assert_eq!(
+            fs::canonicalize(&wallpaper.image).unwrap(),
+            fs::canonicalize(&video).unwrap()
+        );
+        let fragment: Value =
+            serde_json::from_str(&fs::read_to_string(&locations.fragment).unwrap()).unwrap();
+        assert!(fragment["profiles"][0]["backgroundImage"].is_null());
+        assert_eq!(current(&locations).unwrap(), Some(wallpaper));
+        assert!(clear(&locations).unwrap());
+        assert!(video.is_file(), "clear never deletes the user's video");
     }
 
     #[test]

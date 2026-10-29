@@ -29,8 +29,9 @@ const AGENTS: &[(&str, &str)] = &[
     ("cursor-agent", "runs as a normal full-screen app"),
 ];
 
-/// Files that FACT 0.3 and earlier kept for its background daemon. 0.4+ never
-/// reads them, so they are safe to delete.
+/// Files that FACT 0.3 and earlier kept for its background daemon (a session
+/// database, runtime identity and logs). FACT no longer stores anything, so
+/// launching FACT removes them; `fact doctor` only reports them.
 const LEGACY: &[&str] = &[
     "sessions.db",
     "sessions.db-wal",
@@ -121,11 +122,14 @@ pub fn run(paths: &Paths) -> i32 {
                 warnings += 1;
                 row(
                     "",
-                    "! the image is missing; run `fact wallpaper set <image>` again",
+                    "! the file is missing; run `fact wallpaper set <file>` again",
                 );
+            } else if current.video && fact_client::find_ffmpeg().is_none() {
+                warnings += 1;
+                row("", "! video wallpapers need ffmpeg: winget install ffmpeg");
             }
         }
-        Ok(None) => row("Wallpaper", "none (fact wallpaper set <image>)"),
+        Ok(None) => row("Wallpaper", "none (fact wallpaper set <image or video>)"),
         Err(error) => {
             warnings += 1;
             row(
@@ -144,7 +148,7 @@ pub fn run(paths: &Paths) -> i32 {
         warnings += 1;
         row(
             "Old data",
-            "! files from FACT 0.3 or earlier are unused and safe to delete:",
+            "! files from FACT 0.3 or earlier; the next `fact` launch removes them:",
         );
         for path in &legacy {
             row("", &display(path));
@@ -161,6 +165,19 @@ pub fn run(paths: &Paths) -> i32 {
         );
     }
     0
+}
+
+/// Delete the daemon-era files listed in [`LEGACY`] from FACT's folder. Only
+/// those exact names are touched. Best effort: a locked file stays behind.
+pub fn remove_legacy_data(base: &Path) {
+    for name in LEGACY {
+        let path = base.join(name);
+        if path.is_dir() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else if path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 fn row(label: &str, value: &str) {
