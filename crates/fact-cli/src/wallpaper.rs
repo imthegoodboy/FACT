@@ -168,27 +168,66 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
         .with_context(|| format!("could not create {}", locations.image_dir.display()))?;
     // A fresh name per image: the installed profile keeps pointing at the old
     // copy until the new fragment has been written in full.
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_millis());
-    let image = locations
-        .image_dir
-        .join(format!("wallpaper-{stamp}.{extension}"));
-    if let Err(error) = fs::copy(source, &image) {
-        let _ = fs::remove_file(&image);
-        return Err(error).with_context(|| format!("could not copy {}", source.display()));
-    }
+    let image = copy_to_fresh_name(source, &locations.image_dir, &extension)?;
     if let Err(error) = write_fragment(locations, &image, opacity, fit) {
         let _ = fs::remove_file(&image);
         return Err(error);
     }
-    remove_images(&locations.image_dir, Some(&image))?;
+    // The new wallpaper is committed. Old copies are only clutter, so a
+    // failure to delete one must not turn this success into an error.
+    let _ = remove_images(&locations.image_dir, Some(&image));
 
     Ok(Wallpaper {
         image,
         opacity,
         fit,
     })
+}
+
+/// Copy `source` to a `wallpaper-<number>.<ext>` name that does not exist yet.
+/// `create_new` guarantees the copy can never overwrite the image the
+/// installed profile is using, even for two sets in the same instant.
+fn copy_to_fresh_name(source: &Path, dir: &Path, extension: &str) -> Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    let mut input =
+        fs::File::open(source).with_context(|| format!("could not open {}", source.display()))?;
+    for attempt in 0..1000u128 {
+        let image = dir.join(format!("wallpaper-{}.{extension}", stamp + attempt));
+        let mut output = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&image)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("could not create {}", image.display()))
+            }
+        };
+        if let Err(error) = std::io::copy(&mut input, &mut output) {
+            drop(output);
+            let _ = fs::remove_file(&image);
+            return Err(error).with_context(|| format!("could not copy {}", source.display()));
+        }
+        return Ok(image);
+    }
+    bail!("could not find a free file name in {}", dir.display())
+}
+
+/// FACT's own image names: `wallpaper-<digits>.<ext>`, plus the fixed
+/// `wallpaper.<ext>` and `incoming.<ext>` names used before.
+fn is_fact_image(path: &Path) -> bool {
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return false;
+    };
+    let stem = stem.to_ascii_lowercase();
+    stem == "wallpaper"
+        || stem == "incoming"
+        || stem
+            .strip_prefix("wallpaper-")
+            .is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn write_fragment(locations: &Locations, image: &Path, opacity: f64, fit: ImageFit) -> Result<()> {
@@ -240,18 +279,13 @@ pub fn clear(locations: &Locations) -> Result<bool> {
     Ok(removed)
 }
 
-/// Delete FACT's image copies (and staging files left by older versions),
-/// except `keep`.
+/// Delete FACT's image copies (see [`is_fact_image`]) except `keep`. Other
+/// files in the folder are left alone.
 fn remove_images(dir: &Path, keep: Option<&Path>) -> Result<bool> {
     let mut removed = false;
     for entry in fs::read_dir(dir).with_context(|| format!("could not read {}", dir.display()))? {
         let path = entry?.path();
-        let ours = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .map(str::to_ascii_lowercase)
-            .is_some_and(|stem| stem.starts_with("wallpaper") || stem.starts_with("incoming"));
-        if ours && path.is_file() && Some(path.as_path()) != keep {
+        if is_fact_image(&path) && path.is_file() && Some(path.as_path()) != keep {
             fs::remove_file(&path)
                 .with_context(|| format!("could not remove {}", path.display()))?;
             removed = true;
@@ -327,6 +361,42 @@ mod tests {
         assert!(!locations.fragment.exists());
         assert!(!locations.image_dir.exists());
         assert!(!clear(&locations).unwrap());
+    }
+
+    #[test]
+    fn only_fact_image_names_are_cleaned_up() {
+        for ours in [
+            "wallpaper.png",
+            "incoming.jpg",
+            "wallpaper-1730000000000.gif",
+        ] {
+            assert!(is_fact_image(Path::new(ours)), "{ours}");
+        }
+        for theirs in [
+            "wallpaper-backup.png",
+            "incoming-notes.txt",
+            "sky.png",
+            "wallpaper-.png",
+        ] {
+            assert!(!is_fact_image(Path::new(theirs)), "{theirs}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locations = Locations {
+            image_dir: dir.path().join("wallpaper"),
+            fragment: dir.path().join("Fragments").join("FACT").join("fact.json"),
+        };
+        fs::create_dir_all(&locations.image_dir).unwrap();
+        let keep = locations.image_dir.join("wallpaper-backup.png");
+        fs::write(&keep, b"user file").unwrap();
+        let source = dir.path().join("a.png");
+        fs::write(&source, b"a").unwrap();
+        let first = set(&locations, &source, 0.3, ImageFit::Fill).unwrap();
+        let second = set(&locations, &source, 0.3, ImageFit::Fill).unwrap();
+        assert_ne!(first.image, second.image, "each set gets a fresh name");
+        assert!(!first.image.exists() && second.image.is_file());
+        assert!(keep.is_file(), "unrelated files survive set");
+        clear(&locations).unwrap();
+        assert!(keep.is_file(), "unrelated files survive clear");
     }
 
     #[test]

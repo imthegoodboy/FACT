@@ -1201,18 +1201,27 @@ fn node_at_mut<'a>(node: &'a mut LayoutNode, path: &[u8]) -> Option<&'a mut Layo
     }
 }
 
-/// Number of slots a subtree occupies along `orientation`.
+/// Number of slots a subtree occupies along `orientation`: side-by-side
+/// children add up, stacked children take the widest row.
 fn split_weight(node: &LayoutNode, orientation: SplitOrientation) -> usize {
     match node {
+        LayoutNode::Leaf { .. } => 1,
         LayoutNode::Split {
             orientation: own,
             first,
             second,
             ..
-        } if *own == orientation => {
-            split_weight(first, orientation) + split_weight(second, orientation)
+        } => {
+            let (a, b) = (
+                split_weight(first, orientation),
+                split_weight(second, orientation),
+            );
+            if *own == orientation {
+                a + b
+            } else {
+                a.max(b)
+            }
         }
-        _ => 1,
     }
 }
 
@@ -1342,6 +1351,34 @@ mod tests {
         assert_eq!(widths.len(), 3);
         let spread = widths.iter().max().unwrap() - widths.iter().min().unwrap();
         assert!(spread <= 1, "unequal widths {widths:?}");
+    }
+
+    #[test]
+    fn balance_counts_the_widest_row_of_a_stacked_group() {
+        // A | (B | C stacked over D): three columns wide, so A gets a third.
+        let mut layout = SessionLayout::new(1, &[1]);
+        layout.split_pane(1, 2, SplitDirection::Right).unwrap();
+        layout.split_pane(2, 4, SplitDirection::Down).unwrap();
+        layout.split_pane(2, 3, SplitDirection::Right).unwrap();
+        layout.balance().unwrap();
+        assert!((root_ratio(&layout) - 1.0 / 3.0).abs() < 1e-4);
+        let result = layout.layout(opts(91, 30));
+        let width = |pane| {
+            result
+                .panes
+                .iter()
+                .find(|slot| slot.pane == pane)
+                .unwrap()
+                .content
+                .width
+        };
+        assert!(
+            width(1).abs_diff(width(2)) <= 1,
+            "A {} vs B {}",
+            width(1),
+            width(2)
+        );
+        assert!(width(2).abs_diff(width(3)) <= 1);
     }
 
     #[test]

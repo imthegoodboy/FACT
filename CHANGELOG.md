@@ -3,6 +3,18 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.5.1] - 2026-10-30
+
+### Fixed
+
+- `fact wallpaper set` copies each image to a name that is guaranteed to be
+  new, so a quick second `set` can never overwrite the image in use.
+- Wallpaper cleanup removes only FACT's own image names; other files in
+  `%LOCALAPPDATA%\FACT\wallpaper` are left alone, and a failed cleanup no
+  longer reports an error after the wallpaper was applied.
+- Balancing counts a stacked group as wide as its widest row, so
+  `A | (B | C over D)` gives A, B and C equal widths.
+
 ## [0.5.0] - 2026-10-29
 
 ### Added
@@ -368,7 +380,8 @@ All notable changes to FACT are documented here. The format follows
   restart reopens the saved layout with fresh shells and no replay of old output.
   Unsaved work in a lost process cannot be recovered.
 
-[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.5.1
 [0.5.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.5.0
 [0.4.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.4.0
 [0.3.3]: https://github.com/imthegoodboy/FACT/releases/tag/v0.3.3
