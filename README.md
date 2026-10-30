@@ -319,8 +319,8 @@ block characters.
 - `--fit` is `fill` (default, cover and crop), `fit` (letterbox), `stretch`
   or `center`.
 - Videos need [ffmpeg](https://ffmpeg.org): `winget install ffmpeg`. FACT finds
-  winget, Chocolatey and Scoop installs even in a terminal opened before the
-  install.
+  winget, Chocolatey and Scoop installs in their standard locations, even in a
+  terminal opened before the install.
 - `fact --transparent` (or `background = "transparent"`) keeps FACT fully
   transparent over your terminal's own background image or acrylic, and paints
   no wallpaper. `wallpaper_tab = false` in `config.toml` keeps `fact` in the
@@ -424,7 +424,8 @@ boundaries are in [docs/architecture.md](docs/architecture.md).
 ## Data and privacy
 
 FACT reads an optional configuration file and writes nothing on a normal
-launch. The default location is `%LOCALAPPDATA%\FACT\config.toml`, or the file
+launch, except that it brings its own Windows Terminal fragment up to date when
+an older FACT wrote it. The default location is `%LOCALAPPDATA%\FACT\config.toml`, or the file
 chosen with `--config`. `FACT_HOME` can relocate the default base directory.
 
 | Path | Contents |
@@ -437,8 +438,8 @@ Terminal output, scrollback and process state exist only in memory for the life
 of the FACT process. There is no database, history file or saved session;
 files left by FACT 0.3 (`sessions.db`, `runtime`, `logs`) are deleted on the
 next launch. Only `fact config init`, `fact wallpaper set` and
-`fact wallpaper transparent` write files; the wallpaper commands also write one
-Windows Terminal fragment
+`fact wallpaper transparent` write files (plus the launch-time fragment refresh
+above); the wallpaper commands also write one Windows Terminal fragment
 (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`), which
 `fact wallpaper clear` removes.
 Closing FACT, closing the last tab, or pressing `Ctrl+Space` then `Shift+Q`

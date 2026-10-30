@@ -53,8 +53,9 @@ struct Cli {
     /// Let the host terminal's background image show through (see `fact wallpaper`).
     #[arg(long)]
     transparent: bool,
-    /// Start in this tab. Otherwise, inside Windows Terminal with a wallpaper,
-    /// `fact` opens a FACT tab where pictures and videos are full resolution.
+    /// Start in this tab. Otherwise, inside Windows Terminal with a wallpaper
+    /// (and `wallpaper_tab` on), `fact` opens a FACT tab where pictures and
+    /// videos are full resolution, once Windows Terminal has loaded it.
     #[arg(long)]
     here: bool,
     #[command(subcommand)]
@@ -335,7 +336,7 @@ fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
             Some(current) => {
                 out!("Wallpaper: {}", wallpaper::describe(&current));
                 out!("It shows behind FACT in every terminal; prefix then B hides it.");
-                out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
+                out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution (unless wallpaper_tab = false).");
                 out!("Change it: fact wallpaper set [file] [--opacity N] [--fit fill|fit|stretch|center]");
             }
             None => out!("No wallpaper set. Use: fact wallpaper set <picture or video>"),
@@ -368,9 +369,9 @@ fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
                 None => wallpaper::adjust(&locations, opacity, fit)?,
             };
             out!("Wallpaper set: {}", wallpaper::describe(&current));
-            out!("Running FACT windows show it now; prefix then B hides it.");
+            out!("FACT windows showing a wallpaper switch now; prefix then B hides it.");
             wallpaper::reload_windows_terminal();
-            out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
+            out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution (unless wallpaper_tab = false).");
         }
         Some(WallpaperAction::Transparent { tint }) => {
             let current = wallpaper::set_transparent(&locations, tint)?;
