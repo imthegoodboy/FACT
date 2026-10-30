@@ -99,6 +99,11 @@ pub struct Config {
     /// `theme` paints the theme background; `transparent` leaves default
     /// backgrounds to the host terminal so its background image shows through.
     pub background: String,
+    /// In Windows Terminal, `fact` opens a FACT tab where a picture wallpaper
+    /// is drawn at full resolution. `false` always starts in place.
+    pub wallpaper_tab: bool,
+    /// Your own colors over the theme's.
+    pub colors: Colors,
     pub default_profile: String,
     pub keybinds: BTreeMap<String, String>,
     pub profiles: BTreeMap<String, Profile>,
@@ -121,11 +126,75 @@ impl Default for Config {
             copy_on_select: false,
             alt_shortcuts: false,
             background: "theme".to_string(),
+            wallpaper_tab: true,
+            colors: Colors::default(),
             default_profile: "auto".to_string(),
             keybinds: BTreeMap::new(),
             profiles: BTreeMap::new(),
             env: BTreeMap::new(),
         }
+    }
+}
+
+/// Colors that replace the theme's, as `"#rrggbb"`. Each one is optional.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Colors {
+    /// Terminal and screen background.
+    pub background: Option<String>,
+    /// Terminal text.
+    pub foreground: Option<String>,
+    /// Cursor, focused borders and highlights.
+    pub accent: Option<String>,
+    /// Selected text.
+    pub selection: Option<String>,
+}
+
+/// [`Colors`] parsed to RGB.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ColorOverrides {
+    pub background: Option<[u8; 3]>,
+    pub foreground: Option<[u8; 3]>,
+    pub accent: Option<[u8; 3]>,
+    pub selection: Option<[u8; 3]>,
+}
+
+impl Colors {
+    fn entries(&self) -> [(&'static str, &Option<String>); 4] {
+        [
+            ("background", &self.background),
+            ("foreground", &self.foreground),
+            ("accent", &self.accent),
+            ("selection", &self.selection),
+        ]
+    }
+
+    /// The colors that parse; invalid ones are reported by `validate`.
+    pub fn overrides(&self) -> ColorOverrides {
+        let parse = |value: &Option<String>| value.as_deref().and_then(parse_hex_color);
+        ColorOverrides {
+            background: parse(&self.background),
+            foreground: parse(&self.foreground),
+            accent: parse(&self.accent),
+            selection: parse(&self.selection),
+        }
+    }
+}
+
+/// `"#rrggbb"` (or `"#rgb"`) to RGB.
+pub fn parse_hex_color(text: &str) -> Option<[u8; 3]> {
+    let hex = text.trim().strip_prefix('#')?;
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+    match hex.len() {
+        6 => Some([channel(0..2)?, channel(2..4)?, channel(4..6)?]),
+        3 => {
+            let short = |i: usize| channel(i..i + 1).map(|v| v * 17);
+            Some([short(0)?, short(1)?, short(2)?])
+        }
+        _ => None,
     }
 }
 
@@ -212,6 +281,15 @@ impl Config {
                 "theme '{}' is unknown (expected fact-dark, fact-light, dracula, nord or gruvbox)",
                 self.theme
             ));
+        }
+        for (name, value) in self.colors.entries() {
+            if let Some(value) = value {
+                if parse_hex_color(value).is_none() {
+                    issues.push(format!(
+                        "colors.{name} '{value}' is not a color (expected \"#rrggbb\")"
+                    ));
+                }
+            }
         }
         if !BACKGROUNDS.contains(&self.background.as_str()) {
             issues.push(format!(
@@ -354,13 +432,18 @@ impl Config {
     /// The theme's terminal text and background colors, reported to programs
     /// that ask (OSC 10/11). Kept in step with fact-client's themes.
     pub fn terminal_colors(&self) -> ([u8; 3], [u8; 3]) {
-        match self.theme.as_str() {
+        let (foreground, background) = match self.theme.as_str() {
             "fact-light" => ([31, 35, 40], [255, 255, 255]),
             "dracula" => ([248, 248, 242], [33, 34, 44]),
             "nord" => ([216, 222, 233], [36, 41, 51]),
             "gruvbox" => ([235, 219, 178], [29, 32, 33]),
             _ => ([231, 233, 237], [0, 0, 0]),
-        }
+        };
+        let own = self.colors.overrides();
+        (
+            own.foreground.unwrap_or(foreground),
+            own.background.unwrap_or(background),
+        )
     }
 
     pub fn has_profile(&self, name: &str) -> bool {
@@ -494,7 +577,7 @@ pub fn expand_path(input: &str) -> Result<PathBuf, String> {
     Ok(expanded)
 }
 
-pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# FACT — Fast, Advanced, Reliable Terminal Workspace
+pub const DEFAULT_CONFIG_TEMPLATE: &str = r##"# FACT — Fast, Advanced, Reliable Terminal Workspace
 # Configuration reference: https://github.com/imthegoodboy/FACT/blob/main/docs/configuration.md
 config_version = 2
 
@@ -517,8 +600,20 @@ alt_shortcuts = false
 # background image or acrylic show through (see `fact wallpaper`).
 background = "theme"
 
+# In Windows Terminal, `fact` opens a FACT tab where a picture wallpaper is
+# drawn at full resolution. false always starts in the current tab.
+wallpaper_tab = true
+
 # "auto" chooses pwsh.exe, then powershell.exe, then cmd.exe.
 default_profile = "auto"
+
+[colors]
+# Your own colors over the theme's, as "#rrggbb". Leave any out to keep the
+# theme's, e.g.:
+# background = "#0b0e14"
+# foreground = "#e6e1cf"
+# accent = "#ffb454"
+# selection = "#273747"
 
 [keybinds]
 # Override any documented action, or set it to "none" to free the key, e.g.:
@@ -540,7 +635,7 @@ default_profile = "auto"
 
 [env]
 # FACT sets FACT, FACT_PANE, FACT_VERSION and (if unset) COLORTERM itself.
-"#;
+"##;
 
 pub fn write_default_config(path: &Path, force: bool) -> Result<(), ConfigError> {
     if path.exists() && !force {
@@ -719,6 +814,32 @@ mod tests {
         let parsed: Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE).unwrap();
         parsed.validate().unwrap();
         assert_eq!(parsed.default_profile, "auto");
+    }
+
+    #[test]
+    fn own_colors_are_parsed_validated_and_reported() {
+        assert_eq!(parse_hex_color("#0b0e14"), Some([11, 14, 20]));
+        assert_eq!(parse_hex_color(" #FFF "), Some([255, 255, 255]));
+        assert_eq!(parse_hex_color("0b0e14"), None);
+        assert_eq!(parse_hex_color("#12345"), None);
+        assert_eq!(parse_hex_color("#gggggg"), None);
+
+        let parsed: Config = toml::from_str(
+            "config_version = 2\nwallpaper_tab = false\n[colors]\nbackground = \"#101820\"\naccent = \"#ffb454\"\n",
+        )
+        .unwrap();
+        parsed.validate().unwrap();
+        assert!(!parsed.wallpaper_tab);
+        assert_eq!(parsed.colors.overrides().accent, Some([255, 180, 84]));
+        let (foreground, background) = parsed.terminal_colors();
+        assert_eq!(background, [16, 24, 32]);
+        assert_eq!(foreground, [231, 233, 237], "the theme's text color stays");
+
+        let bad: Config =
+            toml::from_str("config_version = 2\n[colors]\nforeground = \"white\"\n").unwrap();
+        let error = bad.validate().unwrap_err().to_string();
+        assert!(error.contains("colors.foreground"), "{error}");
+        assert!(toml::from_str::<Config>("[colors]\nshadow = \"#000000\"\n").is_err());
     }
 
     #[test]

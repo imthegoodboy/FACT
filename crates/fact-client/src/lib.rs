@@ -17,6 +17,7 @@ pub use wallpaper::{
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
@@ -100,6 +101,7 @@ pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("resize_down", "Resize: move edge down"),
     ("balance", "Balance pane sizes"),
     ("cycle_theme", "Cycle color theme"),
+    ("toggle_wallpaper", "Hide / show wallpaper"),
 ];
 
 pub(crate) fn action_label(action: &str) -> &'static str {
@@ -110,13 +112,36 @@ pub(crate) fn action_label(action: &str) -> &'static str {
         .unwrap_or("Unknown action")
 }
 
+/// Where the painted wallpaper comes from, so a running FACT follows
+/// `fact wallpaper set` and `clear` without a restart.
+pub struct WallpaperSource {
+    /// What to paint at start.
+    pub initial: Option<WallpaperSpec>,
+    /// A folder (watched with its subfolders) where a change may mean a new
+    /// wallpaper. `None` never reloads.
+    pub watch: Option<PathBuf>,
+    /// Reads what to paint now.
+    pub current: Box<dyn Fn() -> Option<WallpaperSpec>>,
+}
+
+impl WallpaperSource {
+    /// A fixed wallpaper (or none) that never reloads.
+    pub fn fixed(initial: Option<WallpaperSpec>) -> Self {
+        Self {
+            initial,
+            watch: None,
+            current: Box::new(|| None),
+        }
+    }
+}
+
 /// Run the interactive terminal UI. Terminal state is always restored before
-/// returning, including on errors. `wallpaper` is painted behind the panes.
+/// returning, including on errors. The wallpaper is painted behind the panes.
 pub fn run(
     client: EngineClient,
     events: EventStream,
     config: Config,
-    wallpaper: Option<WallpaperSpec>,
+    wallpaper: WallpaperSource,
 ) -> Result<()> {
     let keys = config
         .compiled_keybinds()
@@ -127,18 +152,12 @@ pub fn run(
     crossterm::style::Colored::set_ansi_color_disabled(false);
     let mut terminal = TerminalGuard::enter(config.mouse)?;
     let size = terminal.size().context("could not read terminal size")?;
-    let events = spawn_readers(events);
+    let events = spawn_readers(events, wallpaper.watch.clone());
 
     let mut app = App::new(client, config, keys, events, size.width, size.height);
-    if let Some(spec) = wallpaper {
-        match wallpaper::Wallpaper::load(&spec) {
-            Ok(loaded) => {
-                app.theme = app.theme.with_transparency(true);
-                app.wallpaper = Some(RefCell::new(loaded));
-                app.sync_wallpaper_base();
-            }
-            Err(error) => app.set_status(format!("Wallpaper: {error}")),
-        }
+    app.wallpaper_source = Some(wallpaper.current);
+    if let Some(spec) = wallpaper.initial {
+        app.show_wallpaper(Some(spec));
     }
     let result = app.event_loop(&mut terminal);
     app.stop_events();
@@ -163,13 +182,14 @@ struct UiEvents {
 
 /// Merge engine frames and terminal input into one queue so the UI thread can
 /// sleep until something actually happens, then redraw once.
-fn spawn_readers(mut stream: EventStream) -> UiEvents {
+fn spawn_readers(mut stream: EventStream, watch: Option<PathBuf>) -> UiEvents {
     // Bounded: a busy agent cannot grow an unbounded queue while drawing or
     // clipboard work falls behind. The engine drops and resends frames instead.
     let (tx, rx) = mpsc::sync_channel(64);
     let cancel = Arc::new(AtomicBool::new(false));
 
     let frames_tx = tx.clone();
+    let watch_tx = tx.clone();
     let frames_cancel = Arc::clone(&cancel);
     thread::Builder::new()
         .name("fact-ui-frames".into())
@@ -216,14 +236,68 @@ fn spawn_readers(mut stream: EventStream) -> UiEvents {
         })
         .expect("spawning the input reader thread cannot fail");
 
+    if let Some(dir) = watch {
+        watch_folder(dir, watch_tx);
+    }
+
     UiEvents {
         receiver: rx,
         cancel,
     }
 }
 
+/// Tell the UI when anything changes in `dir` or below it. The thread waits
+/// in the kernel between changes, so it costs nothing while idle.
+#[cfg(windows)]
+fn watch_folder(dir: PathBuf, tx: mpsc::SyncSender<UiEvent>) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
+        FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
+    };
+    use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+    let watch = move || {
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+            | FILE_NOTIFY_CHANGE_DIR_NAME
+            | FILE_NOTIFY_CHANGE_LAST_WRITE;
+        loop {
+            // FACT's folder may not exist before the first `wallpaper set`.
+            if !dir.is_dir() {
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            let handle = unsafe { FindFirstChangeNotificationW(wide.as_ptr(), 1, filter) };
+            if handle == INVALID_HANDLE_VALUE {
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            let mut open = true;
+            while open && unsafe { WaitForSingleObject(handle, INFINITE) } == WAIT_OBJECT_0 {
+                // Let the writer finish: the record is replaced by a rename.
+                thread::sleep(Duration::from_millis(150));
+                if tx.send(UiEvent::WallpaperChanged).is_err() {
+                    unsafe { FindCloseChangeNotification(handle) };
+                    return;
+                }
+                open = unsafe { FindNextChangeNotification(handle) } != 0;
+            }
+            unsafe { FindCloseChangeNotification(handle) };
+        }
+    };
+    let _ = thread::Builder::new()
+        .name("fact-ui-wallpaper".into())
+        .spawn(watch);
+}
+
+#[cfg(not(windows))]
+fn watch_folder(_dir: PathBuf, _tx: mpsc::SyncSender<UiEvent>) {}
+
 enum UiEvent {
     Message(Box<fact_protocol::ServerMessage>),
+    /// Something changed where the wallpaper is recorded.
+    WallpaperChanged,
     Closed(String),
     Key(KeyEvent, Instant),
     Input(Event),
@@ -871,6 +945,14 @@ struct App {
     dirty: bool,
     /// Painted behind the panes; `RefCell` because drawing advances its cache.
     wallpaper: Option<RefCell<wallpaper::Wallpaper>>,
+    /// What `wallpaper` was loaded from.
+    wallpaper_spec: Option<WallpaperSpec>,
+    /// Hidden with `toggle_wallpaper`: kept loaded, not painted, paused.
+    wallpaper_hidden: bool,
+    /// Reads the current wallpaper again after a change.
+    wallpaper_source: Option<Box<dyn Fn() -> Option<WallpaperSpec>>>,
+    /// The `[colors]` from config.toml, applied over every theme.
+    colors: fact_config::ColorOverrides,
 }
 
 impl App {
@@ -882,8 +964,10 @@ impl App {
         width: u16,
         height: u16,
     ) -> Self {
-        let theme =
-            Theme::by_name(&config.theme).with_transparency(config.transparent_background());
+        let colors = config.colors.overrides();
+        let theme = Theme::by_name(&config.theme)
+            .with_colors(&colors)
+            .with_transparency(config.transparent_background());
         Self {
             client,
             config,
@@ -916,6 +1000,65 @@ impl App {
             fatal: None,
             dirty: true,
             wallpaper: None,
+            wallpaper_spec: None,
+            wallpaper_hidden: false,
+            wallpaper_source: None,
+            colors,
+        }
+    }
+
+    /// The theme `name` with the user's colors, transparent when the host's
+    /// background or a visible wallpaper shows behind the panes.
+    fn set_theme(&mut self, name: &str) {
+        let painted = self.wallpaper.is_some() && !self.wallpaper_hidden;
+        self.theme = Theme::by_name(name)
+            .with_colors(&self.colors)
+            .with_transparency(self.config.transparent_background() || painted);
+        self.sync_wallpaper_base();
+    }
+
+    /// Paint `spec` behind the panes, or nothing. Keeps the current wallpaper
+    /// when the new one cannot be loaded.
+    fn show_wallpaper(&mut self, spec: Option<WallpaperSpec>) {
+        match spec.as_ref().map(wallpaper::Wallpaper::load) {
+            None => {
+                self.wallpaper = None;
+                self.wallpaper_spec = None;
+            }
+            Some(Ok(mut loaded)) => {
+                loaded.set_paused(self.wallpaper_hidden);
+                self.wallpaper = Some(RefCell::new(loaded));
+                self.wallpaper_spec = spec;
+            }
+            Some(Err(error)) => {
+                self.set_status(format!("Wallpaper: {error}"));
+                return;
+            }
+        }
+        let name = self.theme.name;
+        self.set_theme(name);
+        self.dirty = true;
+    }
+
+    /// The recorded wallpaper may have changed (`fact wallpaper set` or
+    /// `clear`, from any terminal): show the new one.
+    fn reload_wallpaper(&mut self) {
+        let Some(current) = self.wallpaper_source.as_ref().map(|read| read()) else {
+            return;
+        };
+        if current == self.wallpaper_spec {
+            return;
+        }
+        let removed = current.is_none();
+        self.show_wallpaper(current);
+        if removed {
+            self.set_status("Wallpaper removed.");
+        } else if self.wallpaper.is_some() {
+            self.set_status(if self.wallpaper_hidden {
+                "Wallpaper changed (hidden; prefix B shows it)."
+            } else {
+                "Wallpaper changed."
+            });
         }
     }
 
@@ -1071,6 +1214,7 @@ impl App {
                 self.handle_message(*message);
                 self.dirty = true;
             }
+            UiEvent::WallpaperChanged => self.reload_wallpaper(),
             UiEvent::Closed(reason) => {
                 self.fatal = Some(anyhow!("FACT engine event stream closed: {reason}"));
             }
@@ -1106,7 +1250,7 @@ impl App {
             Event::FocusGained => {
                 self.held_chars.clear();
                 if let Some(wallpaper) = &self.wallpaper {
-                    wallpaper.borrow_mut().set_paused(false);
+                    wallpaper.borrow_mut().set_paused(self.wallpaper_hidden);
                 }
             }
             Event::FocusLost => {
@@ -1133,6 +1277,23 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Hide the wallpaper (and pause a video) or show it again.
+    fn toggle_wallpaper(&mut self) {
+        let Some(wallpaper) = &self.wallpaper else {
+            self.set_status("No wallpaper. Set one with: fact wallpaper set <picture or video>");
+            return;
+        };
+        self.wallpaper_hidden = !self.wallpaper_hidden;
+        wallpaper.borrow_mut().set_paused(self.wallpaper_hidden);
+        let name = self.theme.name;
+        self.set_theme(name);
+        self.set_status(if self.wallpaper_hidden {
+            "Wallpaper hidden. Press the prefix, then B, to show it."
+        } else {
+            "Wallpaper shown."
+        });
     }
 
     /// Let the wallpaper fade toward the current theme's background.
@@ -1774,9 +1935,10 @@ impl App {
                     self.set_status("Panes balanced.");
                 }
             }
+            "toggle_wallpaper" => self.toggle_wallpaper(),
             "cycle_theme" => {
-                self.theme = self.theme.next();
-                self.sync_wallpaper_base();
+                let next = self.theme.next().name;
+                self.set_theme(next);
                 // Programs that ask for the default colors get the new ones.
                 let _ = self.send(Command::SetTheme {
                     name: self.theme.name.to_string(),

@@ -54,7 +54,7 @@ impl App {
         if self.overlay.is_some() {
             self.render_overlay(frame, area);
         }
-        if let Some(wallpaper) = &self.wallpaper {
+        if let Some(wallpaper) = self.wallpaper.as_ref().filter(|_| !self.wallpaper_hidden) {
             wallpaper.borrow_mut().paint(frame.buffer_mut(), area);
         }
     }

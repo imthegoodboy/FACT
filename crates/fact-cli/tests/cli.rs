@@ -236,7 +236,7 @@ fn wallpaper_set_show_and_clear_use_a_windows_terminal_fragment() {
         "--fit".as_ref(),
         "fit".as_ref(),
     ]);
-    assert!(set.contains("wt -p FACT"), "unexpected: {set}");
+    assert!(set.contains("full resolution"), "unexpected: {set}");
 
     let fragment = home.fragments_dir().join("FACT").join("fact.json");
     let profile = &json(&fs::read_to_string(&fragment).expect("fragment"))["profiles"][0];
@@ -257,6 +257,16 @@ fn wallpaper_set_show_and_clear_use_a_windows_terminal_fragment() {
         shown.contains("25%") && shown.contains("fit"),
         "unexpected: {shown}"
     );
+
+    // Without a file, `set` changes the current wallpaper in place.
+    home.ok(["wallpaper", "set", "--opacity", "60"]);
+    let shown = home.ok(["wallpaper"]);
+    assert!(
+        shown.contains("60%") && shown.contains("fit"),
+        "unexpected: {shown}"
+    );
+    let bare = home.run(["wallpaper", "set"]);
+    assert!(!bare.status.success(), "a bare `set` asks for a file");
 
     let bad = home.run(["wallpaper", "set", "missing.png"]);
     assert!(!bad.status.success());

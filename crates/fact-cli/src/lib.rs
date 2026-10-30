@@ -82,15 +82,19 @@ enum Commands {
 enum WallpaperAction {
     /// Use an image (png, jpg, jpeg, gif, bmp, webp) or a video (mp4, mkv, webm,
     /// mov, avi, m4v, wmv, flv; needs ffmpeg) as the workspace background.
+    /// Without a file, changes the opacity or fit of the current one. Running
+    /// FACT windows switch at once.
     Set {
         /// Image or video file. Images are copied; videos play from where they are.
-        image: PathBuf,
-        /// Image strength: 5-100 (percent) or 0.05-1.0. Lower keeps text easier to read.
-        #[arg(long, value_parser = wallpaper::parse_opacity, default_value = "35")]
-        opacity: f64,
-        /// How the image fills the window.
-        #[arg(long, value_enum, default_value_t = wallpaper::ImageFit::Fill)]
-        fit: wallpaper::ImageFit,
+        image: Option<PathBuf>,
+        /// Image strength: 5-100 (percent) or 0.05-1.0. Lower keeps text easier
+        /// to read. Default: the current wallpaper's, else 35.
+        #[arg(long, value_parser = wallpaper::parse_opacity)]
+        opacity: Option<f64>,
+        /// How the image fills the window. Default: the current wallpaper's,
+        /// else fill.
+        #[arg(long, value_enum)]
+        fit: Option<wallpaper::ImageFit>,
     },
     /// Remove the background image and FACT's Windows Terminal profile.
     Clear,
@@ -167,7 +171,7 @@ fn open_wallpaper_tab(paths: &Paths, cli: &Cli) -> bool {
     }
     // A broken config is reported by starting here, not in a tab that closes.
     match Config::load(paths) {
-        Ok(config) if !config.transparent_background() => {}
+        Ok(config) if config.wallpaper_tab && !config.transparent_background() => {}
         _ => return false,
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -229,26 +233,33 @@ fn launch(
     // A FACT started inside a transparent FACT pane inherits the mode, so it
     // does not paint a solid block over the outer wallpaper.
     let inherited = std::env::var("FACT_BACKGROUND").is_ok_and(|value| value == "transparent");
+    // `background = "transparent"` in config.toml means the same as the flag:
+    // the terminal's own background shows, so FACT never paints.
+    let host_background = transparent || config.transparent_background() || inherited;
     let current = wallpaper::Locations::resolve(&paths.base)
         .ok()
         .and_then(|locations| wallpaper::current(&locations).ok().flatten())
         .filter(|current| current.image.is_file());
     // In Windows Terminal's FACT profile the terminal draws an image itself.
     let native = wallpaper::in_fact_profile() && current.as_ref().is_some_and(|w| !w.video);
-    // `background = "transparent"` in config.toml means the same as the flag:
-    // the terminal's own background shows, so FACT paints nothing.
-    let leave_background = transparent || config.transparent_background() || inherited || native;
-    if leave_background {
+    if host_background || native {
         config.background = "transparent".to_string();
     }
-    let painted = if leave_background {
+    let painted = if host_background {
         None
     } else {
-        current.map(|current| fact_client::WallpaperSpec {
-            image: current.image,
-            opacity: current.opacity as f32,
-            fit: current.fit.into(),
-        })
+        painted_wallpaper(&paths.base)
+    };
+    // Follow `fact wallpaper set` and `clear` while running.
+    let source = if host_background {
+        fact_client::WallpaperSource::fixed(None)
+    } else {
+        let base = paths.base.clone();
+        fact_client::WallpaperSource {
+            initial: painted.clone(),
+            watch: Some(paths.base.clone()),
+            current: Box::new(move || painted_wallpaper(&base)),
+        }
     };
     if config.transparent_background() || painted.is_some() {
         config
@@ -264,42 +275,71 @@ fn launch(
 
     let started = fact_engine::start(config.clone(), grid.unwrap_or(1), profile, cwd)
         .context("could not start the FACT workspace")?;
-    let result = fact_client::run(started.client, started.events, config, painted)
+    let result = fact_client::run(started.client, started.events, config, source)
         .context("terminal user interface stopped with an error");
     drop(started.engine);
     result
 }
 
+/// The wallpaper FACT paints itself right now: none inside Windows
+/// Terminal's FACT profile for a picture, which the terminal draws.
+fn painted_wallpaper(base: &std::path::Path) -> Option<fact_client::WallpaperSpec> {
+    let locations = wallpaper::Locations::resolve(base).ok()?;
+    let current = wallpaper::current(&locations).ok().flatten()?;
+    if !current.image.is_file() || (wallpaper::in_fact_profile() && !current.video) {
+        return None;
+    }
+    Some(fact_client::WallpaperSpec {
+        image: current.image,
+        opacity: current.opacity as f32,
+        fit: current.fit.into(),
+    })
+}
+
 fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
     let locations = wallpaper::Locations::resolve(&paths.base)?;
     match action {
-        None => match wallpaper::current(&locations)? {
-            Some(current) => {
-                out!("Wallpaper: {}", wallpaper::describe(&current));
-                out!("It shows behind FACT in every terminal.");
-                if !current.video {
-                    out!(
-                        "Full resolution in Windows Terminal: wt -p {}",
-                        wallpaper::PROFILE_NAME
-                    );
+        None => {
+            match wallpaper::current(&locations)? {
+                Some(current) => {
+                    out!("Wallpaper: {}", wallpaper::describe(&current));
+                    out!("It shows behind FACT in every terminal; prefix then B hides it.");
+                    if !current.video {
+                        out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
+                    }
+                    out!("Change it: fact wallpaper set [file] [--opacity N] [--fit fill|fit|stretch|center]");
                 }
+                None => out!("No wallpaper set. Use: fact wallpaper set <picture or video>"),
             }
-            None => out!("No wallpaper set. Use: fact wallpaper set <image>"),
-        },
+        }
         Some(WallpaperAction::Set {
             image,
             opacity,
             fit,
         }) => {
-            let current = wallpaper::set(&locations, &image, opacity, fit)?;
+            let current = match image {
+                Some(image) => {
+                    // A new file keeps the current opacity and fit unless
+                    // given.
+                    let previous = wallpaper::current(&locations).ok().flatten();
+                    let opacity = opacity
+                        .or(previous.as_ref().map(|p| p.opacity))
+                        .unwrap_or(wallpaper::DEFAULT_OPACITY);
+                    let fit = fit
+                        .or(previous.as_ref().map(|p| p.fit))
+                        .unwrap_or(wallpaper::ImageFit::Fill);
+                    wallpaper::set(&locations, &image, opacity, fit)?
+                }
+                None if opacity.is_none() && fit.is_none() => bail!(
+                    "give a picture or video, or --opacity / --fit to change the current wallpaper"
+                ),
+                None => wallpaper::adjust(&locations, opacity, fit)?,
+            };
             out!("Wallpaper set: {}", wallpaper::describe(&current));
-            out!("It shows behind FACT in every terminal the next time you run `fact`.");
+            out!("Running FACT windows show it now; prefix then B hides it.");
             wallpaper::reload_windows_terminal();
             if !current.video {
-                out!(
-                    "In Windows Terminal, `wt -p {}` shows it at full resolution.",
-                    wallpaper::PROFILE_NAME
-                );
+                out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
             }
         }
         Some(WallpaperAction::Clear) => {
@@ -336,6 +376,8 @@ fn run_config(paths: &Paths, explicit: bool, action: ConfigAction) -> Result<()>
                     "prefix": config.prefix,
                     "theme": config.theme,
                     "background": config.background,
+                    "wallpaper_tab": config.wallpaper_tab,
+                    "colors": config.colors,
                     "alt_shortcuts": config.alt_shortcuts,
                     "keybind_count": keybinds.by_action.len(),
                     "profiles": config.profile_names(),
@@ -352,6 +394,21 @@ fn run_config(paths: &Paths, explicit: bool, action: ConfigAction) -> Result<()>
                 out!("  prefix       {}", config.prefix);
                 out!("  theme        {}", config.theme);
                 out!("  background   {}", config.background);
+                let own: Vec<String> = [
+                    ("background", &config.colors.background),
+                    ("foreground", &config.colors.foreground),
+                    ("accent", &config.colors.accent),
+                    ("selection", &config.colors.selection),
+                ]
+                .into_iter()
+                .filter_map(|(name, value)| value.as_ref().map(|value| format!("{name} {value}")))
+                .collect();
+                if !own.is_empty() {
+                    out!("  colors       {}", own.join(", "));
+                }
+                if !config.wallpaper_tab {
+                    out!("  wallpaper    stays in the current tab (wallpaper_tab = false)");
+                }
                 out!(
                     "  alt keys     {}",
                     if config.alt_shortcuts { "on" } else { "off" }

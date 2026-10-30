@@ -151,7 +151,10 @@ In the running window:
     to disk. Run `fact wallpaper set` with a picture and with a video; confirm the
     picture in a classic console window, the full-resolution FACT tab from a
     plain `fact` in Windows Terminal (`fact --here` stays), and video playback
-    that pauses when the window loses focus. In PowerShell, `Shift+Enter` gives a `>>` continuation; in Claude
+    that pauses when the window loses focus. With FACT running, run
+    `fact wallpaper set --opacity 80` and `fact wallpaper clear` from another
+    terminal and confirm the window follows; press prefix `B` to hide and show
+    the wallpaper. Add a `[colors]` background and confirm every pane uses it. In PowerShell, `Shift+Enter` gives a `>>` continuation; in Claude
     Code, `Shift+Enter` inserts a new line and `Esc` interrupts.
 13. Note a pane PID, quit with prefix `Shift+Q`, and confirm that process no
     longer exists.

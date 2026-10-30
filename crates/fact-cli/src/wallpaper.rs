@@ -239,24 +239,7 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
         fit,
         video,
     };
-    // The record is FACT's source of truth, so it is written first; the
-    // Windows Terminal profile follows it. If that fails, the previous record
-    // comes back so it never names an image that is about to be removed.
-    let record = locations.image_dir.join(RECORD_FILE);
-    let previous = fs::read(&record).ok();
-    let committed = write_record(locations, &wallpaper).and_then(|()| {
-        write_fragment(
-            locations,
-            (!video).then_some(wallpaper.image.as_path()),
-            opacity,
-            fit,
-        )
-    });
-    if let Err(error) = committed {
-        let _ = match &previous {
-            Some(bytes) => fs::write(&record, bytes),
-            None => fs::remove_file(&record),
-        };
+    if let Err(error) = commit(locations, &wallpaper) {
         if !video {
             let _ = fs::remove_file(&wallpaper.image);
         }
@@ -266,6 +249,56 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
     // failure to delete one must not turn this success into an error.
     let _ = remove_images(&locations.image_dir, Some(wallpaper.image.as_path()));
     Ok(wallpaper)
+}
+
+/// Change the opacity or fit of the current wallpaper, keeping its file.
+pub fn adjust(
+    locations: &Locations,
+    opacity: Option<f64>,
+    fit: Option<ImageFit>,
+) -> Result<Wallpaper> {
+    let Some(mut wallpaper) = current(locations)? else {
+        bail!("no wallpaper is set; give a picture or video: fact wallpaper set <file>");
+    };
+    if !wallpaper.image.is_file() {
+        bail!(
+            "the wallpaper file is gone ({}); set it again with a file",
+            wallpaper.image.display()
+        );
+    }
+    if let Some(opacity) = opacity {
+        wallpaper.opacity = opacity;
+    }
+    if let Some(fit) = fit {
+        wallpaper.fit = fit;
+    }
+    fs::create_dir_all(&locations.image_dir)
+        .with_context(|| format!("could not create {}", locations.image_dir.display()))?;
+    commit(locations, &wallpaper)?;
+    Ok(wallpaper)
+}
+
+/// The record is FACT's source of truth, so it is written first; the Windows
+/// Terminal profile follows it. If that fails, the previous record comes
+/// back, so it never names an image that is about to be removed.
+fn commit(locations: &Locations, wallpaper: &Wallpaper) -> Result<()> {
+    let record = locations.image_dir.join(RECORD_FILE);
+    let previous = fs::read(&record).ok();
+    let committed = write_record(locations, wallpaper).and_then(|()| {
+        write_fragment(
+            locations,
+            (!wallpaper.video).then_some(wallpaper.image.as_path()),
+            wallpaper.opacity,
+            wallpaper.fit,
+        )
+    });
+    if committed.is_err() {
+        let _ = match &previous {
+            Some(bytes) => fs::write(&record, bytes),
+            None => fs::remove_file(&record),
+        };
+    }
+    committed
 }
 
 /// `canonicalize` returns `\\?\C:\...`; keep the familiar form.
@@ -675,6 +708,35 @@ mod tests {
         assert!(!locations.fragment.exists());
         assert!(!locations.image_dir.exists());
         assert!(!clear(&locations).unwrap());
+    }
+
+    #[test]
+    fn adjust_changes_opacity_and_fit_but_keeps_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let locations = Locations {
+            image_dir: dir.path().join("wallpaper"),
+            fragment: dir.path().join("Fragments").join("FACT").join("fact.json"),
+        };
+        assert!(
+            adjust(&locations, Some(0.5), None).is_err(),
+            "nothing to adjust"
+        );
+        let source = dir.path().join("sky.png");
+        fs::write(&source, TINY_PNG).unwrap();
+        let first = set(&locations, &source, 0.3, ImageFit::Fill).unwrap();
+        let adjusted = adjust(&locations, Some(0.6), Some(ImageFit::Center)).unwrap();
+        assert_eq!(adjusted.image, first.image, "same copy, no new file");
+        assert_eq!(adjusted.opacity, 0.6);
+        assert_eq!(adjusted.fit, ImageFit::Center);
+        assert_eq!(current(&locations).unwrap(), Some(adjusted.clone()));
+        let fragment: Value =
+            serde_json::from_str(&fs::read_to_string(&locations.fragment).unwrap()).unwrap();
+        assert_eq!(
+            fragment["profiles"][0]["backgroundImageStretchMode"],
+            "none"
+        );
+        let only_fit = adjust(&locations, None, Some(ImageFit::Fit)).unwrap();
+        assert_eq!(only_fit.opacity, 0.6, "opacity kept");
     }
 
     #[test]

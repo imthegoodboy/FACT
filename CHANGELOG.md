@@ -22,6 +22,16 @@ All notable changes to FACT are documented here. The format follows
   pauses while the window is unfocused.
 - `fact wallpaper set` and `clear` make Windows Terminal reload at once; no
   restart is needed.
+- **Live wallpaper.** Running FACT windows switch as soon as the wallpaper is
+  set, changed or cleared, from any terminal. FACT waits for the change in the
+  kernel, so watching costs nothing.
+- **Hide the wallpaper.** Prefix then `B` (`toggle_wallpaper`) hides it and
+  pauses a video, and shows it again.
+- `fact wallpaper set --opacity N` / `--fit MODE` without a file adjusts the
+  current wallpaper; a new file keeps the current opacity and fit.
+- **Your own colors.** `[colors]` in `config.toml` sets `background`,
+  `foreground`, `accent` and `selection` over any theme.
+- `wallpaper_tab = false` keeps `fact` in the current Windows Terminal tab.
 
 ### Changed
 

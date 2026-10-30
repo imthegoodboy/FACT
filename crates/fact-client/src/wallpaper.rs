@@ -43,7 +43,7 @@ pub enum Fit {
 }
 
 /// What to paint behind the panes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WallpaperSpec {
     pub image: PathBuf,
     /// 0.05-1.0: how strongly the image shows through.
