@@ -165,8 +165,10 @@ fn open_wallpaper_tab(paths: &Paths, cli: &Cli) -> bool {
     if !picture || !locations.fragment.is_file() || !wallpaper::terminal_knows_profile() {
         return false;
     }
-    if Config::load(paths).is_ok_and(|config| config.transparent_background()) {
-        return false;
+    // A broken config is reported by starting here, not in a tab that closes.
+    match Config::load(paths) {
+        Ok(config) if !config.transparent_background() => {}
+        _ => return false,
     }
     let Ok(exe) = std::env::current_exe() else {
         return false;
@@ -204,10 +206,16 @@ fn open_wallpaper_tab(paths: &Paths, cli: &Cli) -> bool {
     let Some(args) = wallpaper::new_tab_arguments(&exe, dir.as_deref(), &fact_args) else {
         return false;
     };
-    std::process::Command::new("wt.exe")
-        .args(args)
-        .spawn()
-        .is_ok()
+    // Windows Terminal's own alias first; PATH only as a fallback (never the
+    // current folder).
+    let wt = std::env::var_os("LOCALAPPDATA")
+        .map(|local| PathBuf::from(local).join(r"Microsoft\WindowsApps\wt.exe"))
+        .filter(|alias| alias.exists())
+        .or_else(|| fact_config::find_on_path("wt.exe").map(PathBuf::from));
+    let Some(wt) = wt else {
+        return false;
+    };
+    std::process::Command::new(wt).args(args).spawn().is_ok()
 }
 
 fn launch(

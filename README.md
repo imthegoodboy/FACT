@@ -56,9 +56,10 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
   the keyboard with the prefix and `Shift`+arrows.
 - **Wallpaper and video.** `fact wallpaper set sky.jpg` or `fact wallpaper set
   clip.mp4` puts a picture or a looping video behind every pane, in any
-  terminal: Windows Terminal, the classic console, VS Code. In Windows Terminal
-  pictures are full resolution; elsewhere FACT paints them with block
-  characters. Text, the cursor and selections stay readable on top.
+  terminal: Windows Terminal, the classic console, VS Code. In Windows Terminal,
+  `fact` opens a FACT tab where pictures are full resolution; elsewhere (and
+  with `fact --here`) FACT paints them with block characters. Text, the cursor
+  and selections stay readable on top.
 - **Minimal black TUI.** Plain terminal panes with no title rows, buttons or
   permanent status bar. A one-line tab strip appears only when the workspace
   has more than one tab. Panes have a scrollbar on hover in shells, a steady

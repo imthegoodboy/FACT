@@ -28,12 +28,13 @@ against the process working directory.
 
 | Path | Contents |
 | --- | --- |
-| `config.toml` | This configuration. |
-| `wallpaper\` | Only after `fact wallpaper set`: FACT's copy of an image and its `settings.json`. Videos stay where they are. |
+| `config.toml` | This configuration (unless `--config` names another file). |
+| `wallpaper\` | Only after `fact wallpaper set`: FACT's copy of an image and its `settings.json`. Always in the base directory, even with `--config`. Videos stay where they are. |
 | No other paths | FACT creates no database, log, runtime identity, saved layout or exports. |
 
-FACT does not accept a `--data-dir` option. The base directory only locates the
-optional configuration file; the rest of the process is in memory.
+FACT does not accept a `--data-dir` option. The base directory only holds the
+optional configuration file and the wallpaper; the rest of the process is in
+memory.
 
 ## Top-level settings
 
@@ -296,8 +297,8 @@ fact wallpaper clear                                 # remove it again
 ```
 
 - **Images** (png, jpg, jpeg, gif, bmp, webp) are copied to the `wallpaper\`
-  folder next to `config.toml` (normally `%LOCALAPPDATA%\FACT\wallpaper\`).
-  Animated GIFs loop.
+  folder in FACT's data folder (`%LOCALAPPDATA%\FACT\wallpaper\`, or under
+  `FACT_HOME` when set), even with `--config`. Animated GIFs loop.
 - **Videos** (mp4, mkv, webm, mov, avi, m4v, wmv, flv) play from where they are,
   in a loop, at their own colors. ffmpeg decodes them and streams frames scaled
   to the window's cell grid at 24 fps, the finest detail a terminal can show

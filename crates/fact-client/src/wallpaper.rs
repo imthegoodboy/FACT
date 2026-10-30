@@ -420,10 +420,10 @@ impl Wallpaper {
     pub fn set_base(&mut self, base: [u8; 3]) {
         if self.base != base {
             self.base = base;
-            // Stills are recomputed from the source; video picks it up on
-            // its next frame.
-            if self.video.is_none() {
-                self.cache = None;
+            // Re-blend from the source, which for a video is its last frame,
+            // so a paused or stopped video follows the theme too.
+            if let Some((cols, rows, _)) = self.cache.take() {
+                self.pixels(cols, rows);
             }
         }
     }
@@ -782,20 +782,28 @@ fn quadrant(pixels: [[u8; 3]; 4]) -> (char, [u8; 3], [u8; 3]) {
         let color = mean(&pixels);
         return ('█', color, color);
     }
+    // Runs for every painted cell, so the two groups live on the stack.
     let mut mask = 0u8;
-    let (mut fg, mut bg) = (Vec::with_capacity(4), Vec::with_capacity(4));
+    let (mut fg, mut bg) = ([[0u8; 3]; 4], [[0u8; 3]; 4]);
+    let (mut fg_len, mut bg_len) = (0, 0);
     for (index, pixel) in pixels.iter().enumerate() {
         if distance(*pixel, pixels[a]) <= distance(*pixel, pixels[b]) {
             mask |= 0b1000 >> index;
-            fg.push(*pixel);
+            fg[fg_len] = *pixel;
+            fg_len += 1;
         } else {
-            bg.push(*pixel);
+            bg[bg_len] = *pixel;
+            bg_len += 1;
         }
     }
     const GLYPHS: [char; 16] = [
         ' ', '▗', '▖', '▄', '▝', '▐', '▞', '▟', '▘', '▚', '▌', '▙', '▀', '▜', '▛', '█',
     ];
-    (GLYPHS[usize::from(mask)], mean(&fg), mean(&bg))
+    (
+        GLYPHS[usize::from(mask)],
+        mean(&fg[..fg_len]),
+        mean(&bg[..bg_len]),
+    )
 }
 
 fn rgb([r, g, b]: [u8; 3]) -> Color {
