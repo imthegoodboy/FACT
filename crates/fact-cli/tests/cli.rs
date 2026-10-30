@@ -250,7 +250,7 @@ fn wallpaper_set_show_and_clear_use_a_windows_terminal_fragment() {
     );
     assert!(copied.is_file());
     let commandline = profile["commandline"].as_str().unwrap();
-    assert!(commandline.contains("fact") && commandline.ends_with("--transparent"));
+    assert!(commandline.contains("fact") && !commandline.contains("--transparent"));
 
     let shown = home.ok(["wallpaper"]);
     assert!(

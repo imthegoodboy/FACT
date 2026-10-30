@@ -118,7 +118,7 @@ pub fn run(paths: &Paths) -> i32 {
     match wallpaper::Locations::resolve(&paths.base).and_then(|l| wallpaper::current(&l)) {
         Ok(Some(current)) => {
             row("Wallpaper", &wallpaper::describe(&current));
-            if !current.image.is_file() {
+            if !current.usable() {
                 warnings += 1;
                 row(
                     "",

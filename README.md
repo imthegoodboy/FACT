@@ -57,8 +57,10 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
 - **Wallpaper and video.** `fact wallpaper set sky.jpg` or `fact wallpaper set
   clip.mp4` puts a picture or a looping video behind every pane, in any
   terminal: Windows Terminal, the classic console, VS Code. In Windows Terminal,
-  `fact` opens a FACT tab where pictures are full resolution; elsewhere (and
-  with `fact --here`) FACT paints them with block characters. Text, the cursor
+  `fact` opens a FACT tab where pictures and videos show at their real
+  quality (full HD and beyond, video at up to 60 fps); elsewhere (and with
+  `fact --here`) FACT paints them with block characters. `fact wallpaper
+  transparent` makes the tab see-through instead. Text, the cursor
   and selections stay readable on top. Changes show in running FACT windows at
   once, and prefix then `B` hides the wallpaper (pausing a video).
 - **Your colors.** Five built-in themes, plus a `[colors]` table in
@@ -142,6 +144,7 @@ fact doctor                       # check terminal, config, duplicate installs a
 fact wallpaper set C:\Pictures\sky.jpg   # background picture, in every terminal
 fact wallpaper set C:\Videos\rain.mp4   # looping video background (needs ffmpeg)
 fact wallpaper set --opacity 50   # adjust the current wallpaper in place
+fact wallpaper transparent        # see-through tab: the desktop shows behind your text
 fact wallpaper clear              # back to the theme background
 fact config path                  # print the configuration file in use
 fact config validate              # parse and validate configuration
@@ -316,6 +319,7 @@ FACT adds no scrollbar to alternate-screen or mouse-controlled agent UIs.
 | `fact [--grid N] [--profile NAME] [--cwd DIR] [--transparent] [--here] [--config FILE]` | Start a fresh workspace and open the TUI. |
 | `fact doctor` | Report the host terminal, config, duplicate `fact` installs on PATH, agent CLIs, wallpaper and old data. Changes nothing. |
 | `fact wallpaper set [FILE] [--opacity N] [--fit fill\|fit\|stretch\|center]` | Put an image (png, jpg, jpeg, gif, bmp, webp) or a looping video (mp4, mkv, webm, mov, avi, m4v, wmv, flv; needs ffmpeg) behind every pane. Without a file, `--opacity` or `--fit` adjusts the current one. Running FACT windows update at once. |
+| `fact wallpaper transparent [--tint N]` | Make FACT's Windows Terminal tab see-through (desktop behind the text); `--tint` 0-90 keeps some darkness. |
 | `fact wallpaper` / `fact wallpaper clear` | Show / remove the wallpaper. |
 | `fact config path` | Print the configuration file path in use. |
 | `fact config validate [--json]` | Parse, validate and compile the configuration. |
@@ -329,11 +333,12 @@ Options:
 - `--cwd DIR` sets the working directory for the initial shells. New tabs and
   splits inherit the focused pane's directory.
 - `--transparent` leaves default backgrounds to the host terminal for this
-  launch, so its background image shows through (the wallpaper profile uses it).
+  launch, so its own background image or acrylic shows through, and paints no
+  wallpaper.
 - `--here` starts in the current tab. Without it, `fact` typed in a Windows
-  Terminal tab while a picture wallpaper is set opens a new FACT tab where
-  Windows Terminal draws the picture at full resolution, once Windows Terminal
-  has loaded FACT's profile (until then FACT starts in place). Videos, `--transparent`,
+  Terminal tab while a wallpaper is set opens a FACT tab where pictures and
+  videos show at full resolution, once Windows Terminal has loaded FACT's
+  profile (until then FACT starts in place). `--transparent`,
   `background = "transparent"` and `wallpaper_tab = false` always start in place.
 - `--config FILE` overrides the default `config.toml`.
 - `FACT_HOME` changes the base directory used to find `config.toml`. There is no

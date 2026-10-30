@@ -122,7 +122,33 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
     on_path
         .chain(known)
         .find(|path| path.is_file())
+        .map(|found| behind_shim(&found).unwrap_or(found))
         .or_else(|| winget_package_ffmpeg(&local?.join(r"Microsoft\WinGet\Packages")))
+}
+
+/// Chocolatey's `binfmpeg.exe` is a small launcher that runs the real one as
+/// its child. FACT uses the real one, so stopping a video stops ffmpeg itself.
+fn behind_shim(path: &Path) -> Option<PathBuf> {
+    let bin = path.parent()?;
+    if !bin
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .ends_with(r"\chocolateyin")
+    {
+        return None;
+    }
+    std::fs::read_dir(bin.parent()?.join("lib"))
+        .ok()?
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("ffmpeg")
+        })
+        .map(|entry| entry.path().join(r"toolsfmpeginfmpeg.exe"))
+        .find(|real| real.is_file())
 }
 
 /// `<packages>\Gyan.FFmpeg_...\ffmpeg-7.1-full_build\bin\ffmpeg.exe`.

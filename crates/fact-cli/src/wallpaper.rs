@@ -22,6 +22,8 @@ pub const PROFILE_NAME: &str = "FACT";
 const FRAGMENT_FILE: &str = "fact.json";
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
 const RECORD_FILE: &str = "settings.json";
+/// The record's `source` for a see-through tab instead of a file.
+const TRANSPARENT: &str = "transparent";
 pub const DEFAULT_OPACITY: f64 = 0.35;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -89,6 +91,29 @@ pub fn parse_opacity(text: &str) -> Result<f64, String> {
     Ok(value)
 }
 
+/// Darkness kept behind the text of a see-through tab: 0-90 percent or
+/// 0-0.9; 0 is fully transparent.
+pub fn parse_tint(text: &str) -> Result<f64, String> {
+    let trimmed = text.trim();
+    let (number, percent) = match trimmed.strip_suffix('%') {
+        Some(number) => (number, true),
+        None => (trimmed, false),
+    };
+    let value: f64 = number
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{text}' is not a number"))?;
+    let value = if percent || value > 1.0 {
+        value / 100.0
+    } else {
+        value
+    };
+    if !(0.0..=0.9).contains(&value) {
+        return Err("tint must be between 0% and 90%".into());
+    }
+    Ok(value)
+}
+
 pub struct Locations {
     /// FACT's own copy of the image lives here.
     pub image_dir: PathBuf,
@@ -115,6 +140,9 @@ impl Locations {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Wallpaper {
+    /// A see-through tab: no file; the desktop shows behind the text, and
+    /// `opacity` is the darkness kept (the tint).
+    pub transparent: bool,
     /// FACT's copy of an image, or the original video file.
     pub image: PathBuf,
     pub opacity: f64,
@@ -152,7 +180,13 @@ pub fn current(locations: &Locations) -> Result<Option<Wallpaper>> {
             return Ok(None);
         };
         let image = PathBuf::from(source);
+        if source == TRANSPARENT {
+            return Ok(Some(Wallpaper::see_through(
+                value["opacity"].as_f64().unwrap_or(0.0),
+            )));
+        }
         return Ok(Some(Wallpaper {
+            transparent: false,
             video: is_video(&image),
             image,
             opacity: value["opacity"].as_f64().unwrap_or(DEFAULT_OPACITY),
@@ -181,6 +215,7 @@ pub fn current(locations: &Locations) -> Result<Option<Wallpaper>> {
     Ok(Some(Wallpaper {
         image: PathBuf::from(image),
         video: false,
+        transparent: false,
         opacity: profile["backgroundImageOpacity"]
             .as_f64()
             .unwrap_or(DEFAULT_OPACITY),
@@ -234,6 +269,7 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
         copy_to_fresh_name(source, &locations.image_dir, &extension)?
     };
     let wallpaper = Wallpaper {
+        transparent: false,
         image,
         opacity,
         fit,
@@ -260,6 +296,9 @@ pub fn adjust(
     let Some(mut wallpaper) = current(locations)? else {
         bail!("no wallpaper is set; give a picture or video: fact wallpaper set <file>");
     };
+    if wallpaper.transparent {
+        bail!("the tab is see-through; change it with: fact wallpaper transparent --tint N");
+    }
     if !wallpaper.image.is_file() {
         bail!(
             "the wallpaper file is gone ({}); set it again with a file",
@@ -292,14 +331,8 @@ pub fn adjust(
 fn commit(locations: &Locations, wallpaper: &Wallpaper) -> Result<()> {
     let record = locations.image_dir.join(RECORD_FILE);
     let previous = fs::read(&record).ok();
-    let committed = write_record(locations, wallpaper).and_then(|()| {
-        write_fragment(
-            locations,
-            (!wallpaper.video).then_some(wallpaper.image.as_path()),
-            wallpaper.opacity,
-            wallpaper.fit,
-        )
-    });
+    let committed =
+        write_record(locations, wallpaper).and_then(|()| write_fragment(locations, wallpaper));
     if committed.is_err() {
         let _ = match &previous {
             Some(bytes) => fs::write(&record, bytes),
@@ -321,8 +354,13 @@ fn strip_verbatim(path: &Path) -> PathBuf {
 
 fn write_record(locations: &Locations, wallpaper: &Wallpaper) -> Result<()> {
     let record = locations.image_dir.join(RECORD_FILE);
+    let source = if wallpaper.transparent {
+        TRANSPARENT.to_string()
+    } else {
+        wallpaper.image.display().to_string()
+    };
     let value = json!({
-        "source": wallpaper.image.display().to_string(),
+        "source": source,
         "opacity": (wallpaper.opacity * 100.0).round() / 100.0,
         "fit": wallpaper.fit.label(),
     });
@@ -394,25 +432,30 @@ fn is_fact_image(path: &Path) -> bool {
 /// The "FACT" Windows Terminal profile. With an image, Windows Terminal draws
 /// it at full resolution and FACT starts transparent; a video is drawn by
 /// FACT, so the profile then only launches FACT.
-fn write_fragment(
-    locations: &Locations,
-    image: Option<&Path>,
-    opacity: f64,
-    fit: ImageFit,
-) -> Result<()> {
+fn write_fragment(locations: &Locations, wallpaper: &Wallpaper) -> Result<()> {
     let exe = std::env::current_exe().context("could not locate fact.exe")?;
+    // For a video the background is fully transparent and FACT plays the
+    // video in a window behind the terminal; a see-through tab keeps only
+    // its tint.
     let mut profile = json!({
         "guid": PROFILE_GUID,
         "name": PROFILE_NAME,
         "commandline": format!("\"{}\"", exe.display()),
         "startingDirectory": "%USERPROFILE%",
         "background": "#000000",
+        "opacity": 0,
+        "useAcrylic": false,
     });
-    if let Some(image) = image {
-        profile["commandline"] = json!(format!("\"{}\" --transparent", exe.display()));
-        profile["backgroundImage"] = json!(image.display().to_string());
-        profile["backgroundImageOpacity"] = json!((opacity * 100.0).round() / 100.0);
-        profile["backgroundImageStretchMode"] = json!(fit.stretch_mode());
+    // FACT recognizes this profile itself (WT_PROFILE_ID): it stays
+    // transparent over the picture and follows later wallpaper changes, so
+    // the command line needs no flags.
+    if wallpaper.transparent {
+        profile["opacity"] = json!((wallpaper.opacity * 100.0).round() as u32);
+    } else if !wallpaper.video {
+        profile["opacity"] = json!(100);
+        profile["backgroundImage"] = json!(wallpaper.image.display().to_string());
+        profile["backgroundImageOpacity"] = json!((wallpaper.opacity * 100.0).round() / 100.0);
+        profile["backgroundImageStretchMode"] = json!(wallpaper.fit.stretch_mode());
         profile["backgroundImageAlignment"] = json!("center");
     }
     let fragment = json!({ "profiles": [profile] });
@@ -568,7 +611,6 @@ pub fn new_tab_arguments(
     }
     args.push("--".into());
     args.push(exe.as_os_str().to_os_string());
-    args.push("--transparent".into());
     args.extend(fact_args.iter().cloned());
     if args.iter().any(|arg| {
         let text = arg.to_string_lossy();
@@ -579,7 +621,39 @@ pub fn new_tab_arguments(
     Some(args)
 }
 
+impl Wallpaper {
+    fn see_through(tint: f64) -> Self {
+        Self {
+            transparent: true,
+            image: PathBuf::new(),
+            opacity: tint.clamp(0.0, 0.9),
+            fit: ImageFit::Fill,
+            video: false,
+        }
+    }
+
+    /// Whether there is something to show: a see-through tab, or a file
+    /// that still exists.
+    pub fn usable(&self) -> bool {
+        self.transparent || self.image.is_file()
+    }
+}
+
+/// Make FACT's Windows Terminal tab see-through, keeping `tint` darkness.
+pub fn set_transparent(locations: &Locations, tint: f64) -> Result<Wallpaper> {
+    let wallpaper = Wallpaper::see_through(tint);
+    fs::create_dir_all(&locations.image_dir)
+        .with_context(|| format!("could not create {}", locations.image_dir.display()))?;
+    commit(locations, &wallpaper)?;
+    // Old picture copies are only clutter now.
+    let _ = remove_images(&locations.image_dir, None);
+    Ok(wallpaper)
+}
+
 pub fn describe(wallpaper: &Wallpaper) -> String {
+    if wallpaper.transparent {
+        return format!("see-through tab (tint {:.0}%)", wallpaper.opacity * 100.0);
+    }
     format!(
         "{} ({}opacity {:.0}%, {})",
         wallpaper.image.display(),
@@ -617,7 +691,7 @@ mod tests {
         assert_eq!(text[5..7], ["-d".to_string(), r"C:\.".to_string()]);
         assert_eq!(text[7], "--");
         assert_eq!(text[8], exe.display().to_string());
-        assert_eq!(text[9..], ["--transparent", "--grid", "4"]);
+        assert_eq!(text[9..], ["--grid", "4"]);
         assert!(new_tab_arguments(exe, Some(Path::new(r"C:\a;b")), &[]).is_none());
         assert!(new_tab_arguments(exe, None, &["--cwd".into(), "a\"b".into()]).is_none());
         assert!(
@@ -688,10 +762,13 @@ mod tests {
         let profile = &fragment["profiles"][0];
         assert_eq!(profile["name"], PROFILE_NAME);
         assert_eq!(profile["backgroundImageStretchMode"], "uniform");
-        assert!(profile["commandline"]
-            .as_str()
-            .unwrap()
-            .ends_with("--transparent"));
+        // No flags: FACT recognizes its profile and keeps following changes.
+        let commandline = profile["commandline"].as_str().unwrap();
+        assert!(
+            commandline.starts_with('"') && commandline.ends_with('"'),
+            "{commandline}"
+        );
+        assert_eq!(profile["opacity"], 100);
         assert_eq!(current(&locations).unwrap(), Some(wallpaper.clone()));
         assert!(locations.image_dir.join(RECORD_FILE).is_file());
 
@@ -716,6 +793,38 @@ mod tests {
         assert!(!locations.fragment.exists());
         assert!(!locations.image_dir.exists());
         assert!(!clear(&locations).unwrap());
+    }
+
+    #[test]
+    fn transparent_tab_keeps_only_its_tint() {
+        assert_eq!(parse_tint("0").unwrap(), 0.0);
+        assert_eq!(parse_tint("30%").unwrap(), 0.3);
+        assert_eq!(parse_tint("0.5").unwrap(), 0.5);
+        assert!(parse_tint("95").is_err());
+        assert!(parse_tint("dark").is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let locations = Locations {
+            image_dir: dir.path().join("wallpaper"),
+            fragment: dir.path().join("Fragments").join("FACT").join("fact.json"),
+        };
+        let source = dir.path().join("sky.png");
+        fs::write(&source, TINY_PNG).unwrap();
+        let picture = set(&locations, &source, 0.4, ImageFit::Fill).unwrap();
+        let glass = set_transparent(&locations, 0.2).unwrap();
+        assert!(glass.transparent && glass.usable());
+        assert!(!picture.image.exists(), "the picture copy is cleaned up");
+        assert_eq!(current(&locations).unwrap(), Some(glass.clone()));
+        assert!(describe(&glass).contains("see-through"));
+        let fragment: Value =
+            serde_json::from_str(&fs::read_to_string(&locations.fragment).unwrap()).unwrap();
+        let profile = &fragment["profiles"][0];
+        assert_eq!(profile["opacity"], 20);
+        assert_eq!(profile["useAcrylic"], false);
+        assert!(profile.get("backgroundImage").is_none());
+        assert!(adjust(&locations, Some(0.5), None).is_err());
+        assert!(clear(&locations).unwrap());
+        assert!(current(&locations).unwrap().is_none());
     }
 
     #[test]

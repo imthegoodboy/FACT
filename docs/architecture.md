@@ -43,7 +43,7 @@ ends every shell it owns.
 | `fact-term` | Alacritty-backed terminal model, bounded scrollback, search and frame snapshots. |
 | `fact-pty` | ConPTY creation, process/job-object ownership, input, resize and exit codes. |
 | `fact-engine` | Owner thread, workspace state, shell lifecycle, layout commands and frame generation. |
-| `fact-client` | Ratatui renderer, keymap, themes, selection, mouse handling, overlays, and the painted wallpaper (images, animated GIFs, ffmpeg video at 24 fps, paused while unfocused). |
+| `fact-client` | Ratatui renderer, keymap, themes, selection, mouse handling, overlays, the painted wallpaper (images, animated GIFs, ffmpeg video at 24 fps, paused while unfocused), and the full-resolution video window kept behind Windows Terminal (`backdrop.rs`). |
 | `fact-cli` | Argument parsing, configuration, `wallpaper` and `doctor` commands, the Windows Terminal fragment, and engine/TUI startup (including the full-resolution Windows Terminal tab). |
 
 Dependencies point downward. `fact-client` and `fact-cli` do not parse terminal

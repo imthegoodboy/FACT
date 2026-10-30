@@ -316,26 +316,48 @@ fact wallpaper set C:\Pictures\sky.jpg               # 35% strength, cover the w
 fact wallpaper set .\forest.png --opacity 20 --fit fit
 fact wallpaper set C:\Videos\rain.mp4                # loops; needs ffmpeg
 fact wallpaper set --opacity 50                      # change the current one in place
+fact wallpaper transparent                           # see-through tab, desktop behind the text
+fact wallpaper transparent --tint 40                 # see-through, darkened for readability
 fact wallpaper                                       # show the current wallpaper
 fact wallpaper clear                                 # remove it again
 ```
 
+### Full resolution in Windows Terminal
+
+In Windows Terminal, a plain `fact` opens a FACT tab (FACT's own profile)
+where the wallpaper shows at its real quality behind your text:
+
+- **Pictures** are drawn by Windows Terminal itself from the original file.
+- **Videos** play in a borderless window that FACT keeps exactly behind the
+  Windows Terminal window, whose FACT tab is transparent. The video is scaled
+  by ffmpeg (Lanczos) to the window's pixel size, up to 4K, at its own frame
+  rate up to 60 fps. The window never takes focus, stays out of the taskbar
+  and Alt+Tab, follows the terminal as it moves, resizes, minimizes or
+  changes virtual desktop, pauses while the terminal is unfocused, and
+  disappears with FACT.
+- **See-through** (`fact wallpaper transparent`) makes the FACT tab
+  transparent, so the desktop and windows behind it show. `--tint` (0-90%)
+  keeps some darkness so text stays readable over bright windows.
+
+`--opacity` sets how bright a picture or video is: 100 is the original, lower
+dims it toward black so text reads more easily.
+
 Running FACT windows switch at once when you set, change or clear the
 wallpaper, from any terminal (a FACT pane included); there is nothing to
-restart. Prefix then `B` hides a wallpaper FACT paints and pauses a video,
-and shows it again; in Windows Terminal's FACT tab the terminal draws the
-picture, so `B` cannot hide it there. A new file keeps the current opacity and fit unless you give
-`--opacity` or `--fit`; `set` without a file changes only those.
+restart. Prefix then `B` hides the wallpaper (the theme background covers
+it, and a video pauses) and shows it again. A new file keeps the current
+opacity and fit unless you give `--opacity` or `--fit`; `set` without a file
+changes only those.
 
 - **Images** (png, jpg, jpeg, gif, bmp, webp) are copied to the `wallpaper\`
   folder in FACT's data folder (`%LOCALAPPDATA%\FACT\wallpaper\`, or under
   `FACT_HOME` when set), even with `--config`. Animated GIFs loop.
 - **Videos** (mp4, mkv, webm, mov, avi, m4v, wmv, flv) play from where they are,
-  in a loop, at their own colors. ffmpeg decodes them and streams frames scaled
-  to the window's cell grid at 24 fps, the finest detail a terminal can show
-  behind text. Install ffmpeg with `winget install ffmpeg`, or point
-  `FACT_FFMPEG` at `ffmpeg.exe`.
-- Where FACT paints the wallpaper itself it uses four pixels per cell (2x2
+  in a loop, at their own colors, through ffmpeg. Install it with
+  `winget install ffmpeg`, or point `FACT_FFMPEG` at `ffmpeg.exe`.
+- In other terminals (the classic console, VS Code, `fact --here`), which can
+  only show text cells, FACT paints the wallpaper itself at 24 fps for videos:
+  four pixels per cell (2x2
   quadrant block characters) in Windows Terminal, VS Code and WezTerm, and two
   (`▀` half blocks) in the classic console, whose fonts may lack quadrants. The
   image fades toward the theme's background by `--opacity` (5-100 or 0.05-1.0)
@@ -349,10 +371,10 @@ picture, so `B` cannot hide it there. A new file keeps the current opacity and f
 - `background = "transparent"` or `--transparent` turns the painted wallpaper
   off so the terminal's own background shows.
 
-For images, `set` also writes a Windows Terminal *fragment*
+`set` and `transparent` also write a Windows Terminal *fragment*
 (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`) that adds
-a "FACT" profile with the image, where Windows Terminal draws it at full
-resolution and FACT stays transparent on top. A plain `fact` typed in any other
+the "FACT" profile: with the picture for an image, fully transparent for a
+video, or transparent with your tint for a see-through tab. A plain `fact` typed in any other
 Windows Terminal tab opens a FACT tab with that profile, as soon as Windows
 Terminal has loaded it (until then, and with `fact --here` or
 `wallpaper_tab = false`, FACT starts in the current tab). `wt -p FACT` and the FACT entry in the tab menu open it

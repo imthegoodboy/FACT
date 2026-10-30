@@ -3,6 +3,33 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.7.0] - 2026-10-30
+
+### Added
+
+- **Full-resolution video in Windows Terminal.** In FACT's Windows Terminal
+  tab a video plays at its real quality behind your text: a borderless window
+  kept exactly behind the terminal window, scaled by ffmpeg to the window's
+  pixel size (up to 4K) at the video's own frame rate (up to 60 fps). It never
+  takes focus, stays out of the taskbar and Alt+Tab, follows moves, resizes,
+  minimizing and virtual desktops, and disappears with FACT. `fact` typed in
+  any Windows Terminal tab opens the FACT tab for videos too.
+- **See-through tab.** `fact wallpaper transparent [--tint N]` makes FACT's
+  Windows Terminal tab transparent, so the desktop and windows behind it show
+  through your text; `--tint` keeps some darkness for readability.
+- Prefix then `B` also hides a picture Windows Terminal draws in the FACT tab
+  (the theme background covers it).
+
+### Fixed
+
+- FACT in its Windows Terminal tab follows wallpaper changes there: the tab no
+  longer starts FACT with `--transparent`, which turned live updates off.
+  `--transparent` itself is unchanged.
+- ffmpeg installed by Chocolatey runs directly instead of through its
+  launcher, so stopping a video always stops ffmpeg.
+- A live switch to a picture in a regular tab says how to get full
+  resolution.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added

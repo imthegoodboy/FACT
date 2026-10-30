@@ -4,6 +4,26 @@
 //! renders the frames it receives and forwards keyboard, mouse and clipboard
 //! input. It never parses terminal output itself.
 
+#[cfg(windows)]
+mod backdrop;
+#[cfg(not(windows))]
+mod backdrop {
+    /// Full-resolution video needs Windows Terminal.
+    pub struct Backdrop;
+
+    impl Backdrop {
+        pub fn start(
+            _spec: &crate::WallpaperSpec,
+            _ffmpeg: std::path::PathBuf,
+        ) -> Result<Self, String> {
+            Err("this needs Windows Terminal".into())
+        }
+
+        pub fn set_paused(&self, _paused: bool) {}
+
+        pub fn set_hidden(&self, _hidden: bool) {}
+    }
+}
 mod keymap;
 mod render;
 mod theme;
@@ -122,6 +142,10 @@ pub enum WallpaperState {
     /// A picture the host terminal draws (Windows Terminal's FACT profile);
     /// FACT stays transparent over it.
     HostDraws,
+    /// A video played at full resolution in a window behind the host
+    /// terminal, whose background is transparent (Windows Terminal's FACT
+    /// profile).
+    Backdrop(WallpaperSpec),
 }
 
 /// Where the wallpaper comes from, so a running FACT follows
@@ -959,6 +983,11 @@ struct App {
     wallpaper: Option<RefCell<wallpaper::Wallpaper>>,
     /// What is behind the panes (`wallpaper` holds a painted one).
     wallpaper_state: WallpaperState,
+    /// What the record asked for; differs from `wallpaper_state` when a
+    /// full-resolution video fell back to painting.
+    wallpaper_wanted: WallpaperState,
+    /// The full-resolution video window behind the terminal.
+    backdrop: Option<backdrop::Backdrop>,
     /// Hidden with `toggle_wallpaper`: kept loaded, not painted, paused.
     wallpaper_hidden: bool,
     /// Reads the current wallpaper again after a change.
@@ -1013,6 +1042,8 @@ impl App {
             dirty: true,
             wallpaper: None,
             wallpaper_state: WallpaperState::None,
+            wallpaper_wanted: WallpaperState::None,
+            backdrop: None,
             wallpaper_hidden: false,
             wallpaper_source: None,
             colors,
@@ -1022,11 +1053,9 @@ impl App {
     /// The theme `name` with the user's colors, transparent when the host's
     /// background or a visible wallpaper shows behind the panes.
     fn set_theme(&mut self, name: &str) {
-        let behind = match self.wallpaper_state {
-            WallpaperState::None => false,
-            WallpaperState::Painted(_) => !self.wallpaper_hidden,
-            WallpaperState::HostDraws => true,
-        };
+        // A hidden wallpaper gets the opaque theme background, which also
+        // covers a picture or video the terminal shows behind FACT.
+        let behind = self.wallpaper_state != WallpaperState::None && !self.wallpaper_hidden;
         self.theme = Theme::by_name(name)
             .with_colors(&self.colors)
             .with_transparency(self.config.transparent_background() || behind);
@@ -1034,8 +1063,25 @@ impl App {
     }
 
     /// Show `state` behind the panes. Keeps the current wallpaper when a new
-    /// one cannot be loaded.
+    /// one cannot be loaded; a full-resolution video that cannot start is
+    /// painted in the terminal instead.
     fn show_wallpaper(&mut self, state: WallpaperState) {
+        self.wallpaper_wanted = state.clone();
+        let state = match state {
+            WallpaperState::Backdrop(spec) => match self.start_backdrop(&spec) {
+                Ok(()) => WallpaperState::Backdrop(spec),
+                Err(error) => {
+                    self.set_status(format!(
+                        "Full-resolution video is unavailable ({error}); drawing it with text cells."
+                    ));
+                    WallpaperState::Painted(spec)
+                }
+            },
+            other => {
+                self.backdrop = None;
+                other
+            }
+        };
         if let WallpaperState::Painted(spec) = &state {
             match wallpaper::Wallpaper::load(spec) {
                 Ok(mut loaded) => {
@@ -1062,20 +1108,34 @@ impl App {
         let Some(current) = self.wallpaper_source.as_ref().map(|read| read()) else {
             return;
         };
-        if current == self.wallpaper_state {
+        if current == self.wallpaper_wanted {
             return;
         }
         let removed = current == WallpaperState::None;
         self.show_wallpaper(current);
         if removed {
             self.set_status("Wallpaper removed.");
-        } else if self.wallpaper.is_some() {
-            self.set_status(if self.wallpaper_hidden {
-                "Wallpaper changed (hidden; prefix B shows it)."
-            } else {
-                "Wallpaper changed."
-            });
+        } else if self.wallpaper_hidden {
+            self.set_status("Wallpaper changed (hidden; prefix B shows it).");
+        } else if matches!(self.wallpaper_state, WallpaperState::Painted(_))
+            && in_windows_terminal()
+        {
+            self.set_status(
+                "Wallpaper changed. For full resolution, type `fact` in a new Windows Terminal tab.",
+            );
+        } else {
+            self.set_status("Wallpaper changed.");
         }
+    }
+
+    fn start_backdrop(&mut self, spec: &WallpaperSpec) -> Result<(), String> {
+        // Stop the old window first: only one plays at a time.
+        self.backdrop = None;
+        let ffmpeg = find_ffmpeg().ok_or("ffmpeg was not found")?;
+        let started = backdrop::Backdrop::start(spec, ffmpeg)?;
+        started.set_hidden(self.wallpaper_hidden);
+        self.backdrop = Some(started);
+        Ok(())
     }
 
     /// Sleep until input or a frame arrives, apply everything queued, then
@@ -1268,12 +1328,18 @@ impl App {
                 if let Some(wallpaper) = &self.wallpaper {
                     wallpaper.borrow_mut().set_paused(self.wallpaper_hidden);
                 }
+                if let Some(backdrop) = &self.backdrop {
+                    backdrop.set_paused(false);
+                }
             }
             Event::FocusLost => {
                 self.held_chars.clear();
                 // An animated wallpaper costs nothing while nobody watches.
                 if let Some(wallpaper) = &self.wallpaper {
                     wallpaper.borrow_mut().set_paused(true);
+                }
+                if let Some(backdrop) = &self.backdrop {
+                    backdrop.set_paused(true);
                 }
                 self.mouse_position = None;
                 self.scroll_drag = None;
@@ -1297,16 +1363,17 @@ impl App {
 
     /// Hide the wallpaper (and pause a video) or show it again.
     fn toggle_wallpaper(&mut self) {
-        let Some(wallpaper) = &self.wallpaper else {
-            self.set_status(if self.wallpaper_state == WallpaperState::HostDraws {
-                "Windows Terminal draws this picture. Run `fact --here` in another tab to let FACT paint it (then prefix B hides it)."
-            } else {
-                "No wallpaper. Set one with: fact wallpaper set <picture or video>"
-            });
+        if self.wallpaper_state == WallpaperState::None {
+            self.set_status("No wallpaper. Set one with: fact wallpaper set <picture or video>");
             return;
-        };
+        }
         self.wallpaper_hidden = !self.wallpaper_hidden;
-        wallpaper.borrow_mut().set_paused(self.wallpaper_hidden);
+        if let Some(wallpaper) = &self.wallpaper {
+            wallpaper.borrow_mut().set_paused(self.wallpaper_hidden);
+        }
+        if let Some(backdrop) = &self.backdrop {
+            backdrop.set_hidden(self.wallpaper_hidden);
+        }
         let name = self.theme.name;
         self.set_theme(name);
         self.set_status(if self.wallpaper_hidden {
