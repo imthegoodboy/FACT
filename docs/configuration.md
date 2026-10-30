@@ -73,7 +73,7 @@ foreground = "#fca311"
 | `copy_on_select` | `false` | Copy a completed mouse selection automatically. |
 | `alt_shortcuts` | `false` | `true` enables the direct `Alt+M` / `Alt+N` / `Alt+T` shortcuts. Off by default because Claude Code, readline and other apps use those chords. |
 | `background` | `theme` | `theme` paints the theme background. `transparent` leaves default backgrounds to the host terminal so its background image or acrylic shows through. `fact --transparent` does the same for one launch. |
-| `wallpaper_tab` | `true` | In Windows Terminal, a plain `fact` opens a FACT tab where a picture wallpaper is drawn at full resolution. `false` always starts in the current tab, like `fact --here`. |
+| `wallpaper_tab` | `true` | In Windows Terminal, a plain `fact` opens a FACT tab where a picture or video shows at full resolution, or the tab is see-through. `false` always starts in the current tab, like `fact --here`. |
 | `default_profile` | `auto` | `auto` or a key from `[profiles]`. |
 
 Prefix then `T` (the `cycle_theme` action) cycles themes for the current run
@@ -327,7 +327,8 @@ fact wallpaper clear                                 # remove it again
 In Windows Terminal, a plain `fact` opens a FACT tab (FACT's own profile)
 where the wallpaper shows at its real quality behind your text:
 
-- **Pictures** are drawn by Windows Terminal itself from the original file.
+- **Pictures** are drawn by Windows Terminal itself, from FACT's full-size
+  copy of the file.
 - **Videos** play in a borderless window that FACT keeps exactly behind the
   Windows Terminal window, whose FACT tab is transparent. The video is scaled
   by ffmpeg (Lanczos) to the window's pixel size, up to 4K, at its own frame

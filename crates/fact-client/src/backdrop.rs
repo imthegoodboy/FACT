@@ -156,8 +156,13 @@ struct Player {
     fps: f64,
     duration: Option<f64>,
     stream: Option<Stream>,
-    /// Window size in pixels.
+    /// Video size in pixels: the window's, capped at 4K.
     size: (i32, i32),
+    /// Window size in pixels, which frames are stretched to.
+    window_size: (i32, i32),
+    /// When the running ffmpeg started; ten seconds of playback earns a
+    /// fresh set of restarts.
+    started_at: Instant,
     rect: (i32, i32, i32, i32),
     visible: bool,
     paused: bool,
@@ -190,6 +195,8 @@ impl Player {
             duration,
             stream: None,
             size: (0, 0),
+            window_size: (0, 0),
+            started_at: Instant::now(),
             rect: (0, 0, 0, 0),
             visible: false,
             paused: false,
@@ -274,9 +281,10 @@ impl Player {
         }
         let bounds = frame_bounds(host);
         let rect = (bounds.left, bounds.top, bounds.right, bounds.bottom);
+        self.window_size = ((rect.2 - rect.0).max(1), (rect.3 - rect.1).max(1));
         let size = (
-            (rect.2 - rect.0).clamp(1, MAX_WIDTH),
-            (rect.3 - rect.1).clamp(1, MAX_HEIGHT),
+            self.window_size.0.min(MAX_WIDTH),
+            self.window_size.1.min(MAX_HEIGHT),
         );
         let above = unsafe { GetWindow(self.window, GW_HWNDPREV) };
         if !self.visible || rect != self.rect || above != host {
@@ -333,7 +341,9 @@ impl Player {
                 } else {
                     self.due + frame_time
                 };
-                if self.attempts > 0 && self.position > 10.0 {
+                if self.attempts > 0
+                    && now.saturating_duration_since(self.started_at) > Duration::from_secs(10)
+                {
                     self.attempts = 0;
                 }
             }
@@ -438,6 +448,7 @@ impl Player {
             size: (width, height),
         });
         self.due = Instant::now();
+        self.started_at = self.due;
     }
 
     fn stop(&mut self) {
@@ -451,7 +462,7 @@ impl Player {
         unsafe {
             let hdc = GetDC(self.window);
             if !hdc.is_null() {
-                draw(hdc, self.size.0, self.size.1);
+                draw(hdc, self.window_size.0, self.window_size.1);
                 ReleaseDC(self.window, hdc);
             }
         }

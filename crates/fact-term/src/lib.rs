@@ -892,14 +892,14 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
         sink.attach_writer(tx);
         let mut model = TerminalModel::new(20, 4, 100, sink.clone());
-        model.feed(b"]11;?");
+        model.feed(b"\x1b]11;?\x07");
         let reply = String::from_utf8(rx.try_recv().unwrap()).unwrap();
         assert!(reply.contains("rgb:0000/0000/0000"), "{reply:?}");
         sink.set_default_colors([31, 35, 40], [255, 255, 255]);
-        model.feed(b"]11;?");
+        model.feed(b"\x1b]11;?\x07");
         let reply = String::from_utf8(rx.try_recv().unwrap()).unwrap();
         assert!(reply.contains("rgb:ffff/ffff/ffff"), "{reply:?}");
-        model.feed(b"]10;?");
+        model.feed(b"\x1b]10;?\x07");
         let reply = String::from_utf8(rx.try_recv().unwrap()).unwrap();
         assert!(reply.contains("rgb:1f1f/2323/2828"), "{reply:?}");
     }

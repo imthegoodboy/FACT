@@ -339,8 +339,9 @@ enum UiEvent {
     Message(Box<fact_protocol::ServerMessage>),
     /// Something changed where the wallpaper is recorded.
     WallpaperChanged,
-    /// The full-resolution video window could not play the video.
-    BackdropFailed,
+    /// The full-resolution video window with this generation could not play
+    /// the video.
+    BackdropFailed(u64),
     Closed(String),
     Key(KeyEvent, Instant),
     Input(Event),
@@ -995,6 +996,8 @@ struct App {
     wallpaper_wanted: WallpaperState,
     /// The full-resolution video window behind the terminal.
     backdrop: Option<backdrop::Backdrop>,
+    /// Counts video windows, so a failure from a replaced one is ignored.
+    backdrop_generation: u64,
     /// Hidden with `toggle_wallpaper`: kept loaded, not painted, paused.
     wallpaper_hidden: bool,
     /// Reads the current wallpaper again after a change.
@@ -1051,6 +1054,7 @@ impl App {
             wallpaper_state: WallpaperState::None,
             wallpaper_wanted: WallpaperState::None,
             backdrop: None,
+            backdrop_generation: 0,
             wallpaper_hidden: false,
             wallpaper_source: None,
             colors,
@@ -1072,41 +1076,46 @@ impl App {
     /// Show `state` behind the panes. Keeps the current wallpaper when a new
     /// one cannot be loaded; a full-resolution video that cannot start is
     /// painted in the terminal instead.
-    fn show_wallpaper(&mut self, state: WallpaperState) {
-        self.wallpaper_wanted = state.clone();
-        let state = match state {
-            WallpaperState::Backdrop(spec) => match self.start_backdrop(&spec) {
-                Ok(()) => WallpaperState::Backdrop(spec),
+    fn show_wallpaper(&mut self, requested: WallpaperState) {
+        // Prepare the new wallpaper before touching the current one, which
+        // stays when the new one cannot be shown at all.
+        let prepared = match &requested {
+            WallpaperState::None | WallpaperState::HostDraws => Ok((requested.clone(), None, None)),
+            WallpaperState::Painted(spec) => self
+                .load_painted(spec)
+                .map(|painted| (requested.clone(), Some(painted), None)),
+            WallpaperState::Backdrop(spec) => match self.start_backdrop(spec) {
+                Ok(started) => Ok((requested.clone(), None, Some(started))),
                 Err(error) => {
                     self.set_status(format!(
                         "Full-resolution video is unavailable ({error}); drawing it with text cells."
                     ));
-                    WallpaperState::Painted(spec)
+                    self.load_painted(spec)
+                        .map(|painted| (WallpaperState::Painted(spec.clone()), Some(painted), None))
                 }
             },
-            other => {
-                self.backdrop = None;
-                other
+        };
+        let (state, painted, started) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // Not remembered as shown, so a fixed file is tried again.
+                self.set_status(format!("Wallpaper: {error}"));
+                return;
             }
         };
-        if let WallpaperState::Painted(spec) = &state {
-            match wallpaper::Wallpaper::load(spec) {
-                Ok(mut loaded) => {
-                    loaded.set_paused(self.wallpaper_hidden);
-                    self.wallpaper = Some(RefCell::new(loaded));
-                }
-                Err(error) => {
-                    self.set_status(format!("Wallpaper: {error}"));
-                    return;
-                }
-            }
-        } else {
-            self.wallpaper = None;
-        }
+        self.wallpaper_wanted = requested;
+        self.wallpaper = painted.map(RefCell::new);
+        self.backdrop = started;
         self.wallpaper_state = state;
         let name = self.theme.name;
         self.set_theme(name);
         self.dirty = true;
+    }
+
+    fn load_painted(&self, spec: &WallpaperSpec) -> Result<wallpaper::Wallpaper, String> {
+        let mut loaded = wallpaper::Wallpaper::load(spec)?;
+        loaded.set_paused(self.wallpaper_hidden);
+        Ok(loaded)
     }
 
     /// The recorded wallpaper may have changed (`fact wallpaper set` or
@@ -1135,23 +1144,33 @@ impl App {
         }
     }
 
-    fn start_backdrop(&mut self, spec: &WallpaperSpec) -> Result<(), String> {
-        // Stop the old window first: only one plays at a time.
-        self.backdrop = None;
+    /// A new video window; the caller swaps it in for the old one.
+    fn start_backdrop(&mut self, spec: &WallpaperSpec) -> Result<backdrop::Backdrop, String> {
         let ffmpeg = find_ffmpeg().ok_or("ffmpeg was not found")?;
+        self.backdrop_generation += 1;
+        let generation = self.backdrop_generation;
         let sender = self.events.sender.clone();
         let gave_up = Box::new(move || {
-            let _ = sender.send(UiEvent::BackdropFailed);
+            // Never wait here: the UI may be waiting for this window's
+            // thread to finish.
+            let sender = sender.clone();
+            let _ = thread::Builder::new()
+                .name("fact-backdrop-report".into())
+                .spawn(move || {
+                    let _ = sender.send(UiEvent::BackdropFailed(generation));
+                });
         });
         let started = backdrop::Backdrop::start(spec, ffmpeg, gave_up)?;
         started.set_hidden(self.wallpaper_hidden);
-        self.backdrop = Some(started);
-        Ok(())
+        Ok(started)
     }
 
     /// The video window gave up: draw the video with text cells instead,
     /// still following the record for later changes.
-    fn backdrop_failed(&mut self) {
+    fn backdrop_failed(&mut self, generation: u64) {
+        if generation != self.backdrop_generation {
+            return;
+        }
         let WallpaperState::Backdrop(spec) = self.wallpaper_state.clone() else {
             return;
         };
@@ -1317,7 +1336,7 @@ impl App {
                 self.dirty = true;
             }
             UiEvent::WallpaperChanged => self.reload_wallpaper(),
-            UiEvent::BackdropFailed => self.backdrop_failed(),
+            UiEvent::BackdropFailed(generation) => self.backdrop_failed(generation),
             UiEvent::Closed(reason) => {
                 self.fatal = Some(anyhow!("FACT engine event stream closed: {reason}"));
             }

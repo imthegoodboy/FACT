@@ -126,15 +126,15 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
         .or_else(|| winget_package_ffmpeg(&local?.join(r"Microsoft\WinGet\Packages")))
 }
 
-/// Chocolatey's `binfmpeg.exe` is a small launcher that runs the real one as
+/// Chocolatey's `bin\ffmpeg.exe` is a small launcher that runs the real one as
 /// its child. FACT uses the real one, so stopping a video stops ffmpeg itself.
 fn behind_shim(path: &Path) -> Option<PathBuf> {
     let bin = path.parent()?;
-    if !bin
-        .to_string_lossy()
-        .to_ascii_lowercase()
-        .ends_with(r"\chocolateyin")
-    {
+    let lower = |path: &Path| path.to_string_lossy().to_ascii_lowercase();
+    // Chocolatey may be installed anywhere; ChocolateyInstall says where.
+    let installed = std::env::var_os("ChocolateyInstall")
+        .is_some_and(|root| lower(&PathBuf::from(root).join("bin")) == lower(bin));
+    if !installed && !lower(bin).ends_with(r"\chocolatey\bin") {
         return None;
     }
     std::fs::read_dir(bin.parent()?.join("lib"))
@@ -147,7 +147,7 @@ fn behind_shim(path: &Path) -> Option<PathBuf> {
                 .to_ascii_lowercase()
                 .starts_with("ffmpeg")
         })
-        .map(|entry| entry.path().join(r"toolsfmpeginfmpeg.exe"))
+        .map(|entry| entry.path().join(r"tools\ffmpeg\bin\ffmpeg.exe"))
         .find(|real| real.is_file())
 }
 
@@ -863,6 +863,22 @@ mod tests {
                 Rgb([0, 0, 200])
             }
         })
+    }
+
+    #[test]
+    fn chocolatey_launchers_lead_to_the_real_ffmpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let shim = dir.path().join(r"chocolatey\bin\ffmpeg.exe");
+        let real = dir
+            .path()
+            .join(r"chocolatey\lib\ffmpeg-full\tools\ffmpeg\bin\ffmpeg.exe");
+        for file in [&shim, &real] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"").unwrap();
+        }
+        assert_eq!(behind_shim(&shim), Some(real));
+        let elsewhere = dir.path().join(r"tools\ffmpeg.exe");
+        assert_eq!(behind_shim(&elsewhere), None);
     }
 
     #[test]

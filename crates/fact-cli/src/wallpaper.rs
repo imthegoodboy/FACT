@@ -282,8 +282,10 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
         return Err(error);
     }
     // The new wallpaper is committed. Old copies are only clutter, so a
-    // failure to delete one must not turn this success into an error.
-    let _ = remove_images(&locations.image_dir, Some(wallpaper.image.as_path()));
+    // failure to delete one must not turn this success into an error. The
+    // image the record names now stays, in case another `set` just ran.
+    let keep = recorded_image(locations).unwrap_or_else(|| wallpaper.image.clone());
+    let _ = remove_images(&locations.image_dir, Some(keep.as_path()));
     Ok(wallpaper)
 }
 
@@ -663,14 +665,24 @@ impl Wallpaper {
     }
 }
 
+/// The image file the record names right now, if any.
+fn recorded_image(locations: &Locations) -> Option<PathBuf> {
+    current(locations)
+        .ok()
+        .flatten()
+        .filter(|recorded| !recorded.transparent)
+        .map(|recorded| recorded.image)
+}
+
 /// Make FACT's Windows Terminal tab see-through, keeping `tint` darkness.
 pub fn set_transparent(locations: &Locations, tint: f64) -> Result<Wallpaper> {
     let wallpaper = Wallpaper::see_through(tint);
     fs::create_dir_all(&locations.image_dir)
         .with_context(|| format!("could not create {}", locations.image_dir.display()))?;
     commit(locations, &wallpaper)?;
-    // Old picture copies are only clutter now.
-    let _ = remove_images(&locations.image_dir, None);
+    // Old picture copies are only clutter now. Whatever the record names at
+    // this moment stays, in case another `wallpaper set` just ran.
+    let _ = remove_images(&locations.image_dir, recorded_image(locations).as_deref());
     Ok(wallpaper)
 }
 

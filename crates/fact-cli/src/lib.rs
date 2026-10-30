@@ -351,7 +351,11 @@ fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
                 Some(image) => {
                     // A new file keeps the current opacity and fit unless
                     // given.
-                    let previous = wallpaper::current(&locations).ok().flatten();
+                    // A see-through tab's tint is not a picture's opacity.
+                    let previous = wallpaper::current(&locations)
+                        .ok()
+                        .flatten()
+                        .filter(|previous| !previous.transparent);
                     let opacity = opacity
                         .or(previous.as_ref().map(|p| p.opacity))
                         .unwrap_or(wallpaper::DEFAULT_OPACITY);

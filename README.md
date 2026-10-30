@@ -58,9 +58,10 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
   clip.mp4` puts a picture or a looping video behind every pane, in any
   terminal: Windows Terminal, the classic console, VS Code. In Windows Terminal,
   `fact` opens a FACT tab where pictures and videos show at their real
-  quality (full HD and beyond, video at up to 60 fps); elsewhere (and with
-  `fact --here`) FACT paints them with block characters. `fact wallpaper
-  transparent` makes the tab see-through instead. Text, the cursor
+  quality (full HD and beyond, video at up to 60 fps); in other tabs and
+  terminals (and with `fact --here` outside the FACT tab) FACT paints them
+  with block characters. `fact wallpaper transparent` makes the tab
+  see-through instead. Text, the cursor
   and selections stay readable on top. Changes show in running FACT windows at
   once, and prefix then `B` hides the wallpaper (pausing a video).
 - **Your colors.** Five built-in themes, plus a `[colors]` table in
@@ -319,7 +320,7 @@ FACT adds no scrollbar to alternate-screen or mouse-controlled agent UIs.
 | `fact [--grid N] [--profile NAME] [--cwd DIR] [--transparent] [--here] [--config FILE]` | Start a fresh workspace and open the TUI. |
 | `fact doctor` | Report the host terminal, config, duplicate `fact` installs on PATH, agent CLIs, wallpaper and old data. Changes nothing. |
 | `fact wallpaper set [FILE] [--opacity N] [--fit fill\|fit\|stretch\|center]` | Put an image (png, jpg, jpeg, gif, bmp, webp) or a looping video (mp4, mkv, webm, mov, avi, m4v, wmv, flv; needs ffmpeg) behind every pane. Without a file, `--opacity` or `--fit` adjusts the current one. Running FACT windows update at once. |
-| `fact wallpaper transparent [--tint N]` | Make FACT's Windows Terminal tab see-through (desktop behind the text); `--tint` 0-90 keeps some darkness. |
+| `fact wallpaper transparent [--tint N]` | Make FACT's Windows Terminal tab see-through (desktop behind the text). `--tint 0` (default) is fully transparent; higher values, up to 90, keep that much darkness. |
 | `fact wallpaper` / `fact wallpaper clear` | Show / remove the wallpaper. |
 | `fact config path` | Print the configuration file path in use. |
 | `fact config validate [--json]` | Parse, validate and compile the configuration. |
@@ -386,8 +387,9 @@ chosen with `--config`. `FACT_HOME` can relocate the default base directory.
 Terminal output, scrollback and process state exist only in memory for the life
 of the FACT process. There is no database, history file or saved session;
 files left by FACT 0.3 (`sessions.db`, `runtime`, `logs`) are deleted on the
-next launch. Only `fact config init` and `fact wallpaper set` write files;
-`fact wallpaper set` also writes one Windows Terminal fragment
+next launch. Only `fact config init`, `fact wallpaper set` and
+`fact wallpaper transparent` write files; the wallpaper commands also write one
+Windows Terminal fragment
 (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`), which
 `fact wallpaper clear` removes.
 Closing FACT, closing the last tab, or pressing `Ctrl+Space` then `Shift+Q`
