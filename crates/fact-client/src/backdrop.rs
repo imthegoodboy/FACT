@@ -72,7 +72,12 @@ enum Control {
 impl Backdrop {
     /// Start playing `spec` behind the terminal window hosting FACT. Fails when
     /// that window cannot be found or the video window cannot be made.
-    pub fn start(spec: &WallpaperSpec, ffmpeg: PathBuf) -> Result<Self, String> {
+    /// `gave_up` runs once if ffmpeg later cannot play the video at all.
+    pub fn start(
+        spec: &WallpaperSpec,
+        ffmpeg: PathBuf,
+        gave_up: Box<dyn Fn() + Send>,
+    ) -> Result<Self, String> {
         let host = host_window().ok_or("Windows Terminal's window was not found")?;
         let host = host as isize;
         let spec = spec.clone();
@@ -81,7 +86,7 @@ impl Backdrop {
         let thread = thread::Builder::new()
             .name("fact-backdrop".into())
             .spawn(move || {
-                let mut player = match Player::new(spec, ffmpeg, host as HWND) {
+                let mut player = match Player::new(spec, ffmpeg, host as HWND, gave_up) {
                     Ok(player) => player,
                     Err(error) => {
                         let _ = ready_tx.send(Err(error));
@@ -141,6 +146,8 @@ struct Stream {
 
 struct Player {
     window: HWND,
+    /// Tells the app that playback has given up.
+    gave_up: Option<Box<dyn Fn() + Send>>,
     /// The terminal window found at start, used if the console's owner
     /// cannot be read later.
     host: HWND,
@@ -165,11 +172,17 @@ struct Player {
 }
 
 impl Player {
-    fn new(spec: WallpaperSpec, ffmpeg: PathBuf, host: HWND) -> Result<Self, String> {
+    fn new(
+        spec: WallpaperSpec,
+        ffmpeg: PathBuf,
+        host: HWND,
+        gave_up: Box<dyn Fn() + Send>,
+    ) -> Result<Self, String> {
         let window = unsafe { create_window()? };
         let (fps, duration) = probe(&ffmpeg, &spec.image);
         Ok(Self {
             window,
+            gave_up: Some(gave_up),
             host,
             spec,
             ffmpeg,
@@ -332,8 +345,21 @@ impl Player {
                 self.hardware = false;
                 if self.attempts < ATTEMPTS {
                     self.restart_at = Some(now + Duration::from_secs(u64::from(self.attempts)));
+                } else {
+                    self.give_up();
                 }
             }
+        }
+    }
+
+    /// ffmpeg cannot play this video: hide, and let the app draw it another
+    /// way (once).
+    fn give_up(&mut self) {
+        self.hidden = true;
+        unsafe { ShowWindow(self.window, SW_HIDE) };
+        self.visible = false;
+        if let Some(gave_up) = self.gave_up.take() {
+            gave_up();
         }
     }
 
@@ -383,6 +409,7 @@ impl Player {
         hide_console(&mut command);
         let Ok(mut child) = command.spawn() else {
             self.attempts = ATTEMPTS;
+            self.give_up();
             return;
         };
         let Some(mut stdout) = child.stdout.take() else {

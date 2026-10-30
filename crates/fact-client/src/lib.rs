@@ -15,6 +15,7 @@ mod backdrop {
         pub fn start(
             _spec: &crate::WallpaperSpec,
             _ffmpeg: std::path::PathBuf,
+            _gave_up: Box<dyn Fn() + Send>,
         ) -> Result<Self, String> {
             Err("this needs Windows Terminal".into())
         }
@@ -213,6 +214,8 @@ pub fn run(
 
 struct UiEvents {
     receiver: Receiver<UiEvent>,
+    /// For helpers (the video window) that report back to the UI.
+    sender: mpsc::SyncSender<UiEvent>,
     cancel: Arc<AtomicBool>,
 }
 
@@ -226,6 +229,7 @@ fn spawn_readers(mut stream: EventStream, watch: Option<PathBuf>) -> UiEvents {
 
     let frames_tx = tx.clone();
     let watch_tx = tx.clone();
+    let sender = tx.clone();
     let frames_cancel = Arc::clone(&cancel);
     thread::Builder::new()
         .name("fact-ui-frames".into())
@@ -278,6 +282,7 @@ fn spawn_readers(mut stream: EventStream, watch: Option<PathBuf>) -> UiEvents {
 
     UiEvents {
         receiver: rx,
+        sender,
         cancel,
     }
 }
@@ -334,6 +339,8 @@ enum UiEvent {
     Message(Box<fact_protocol::ServerMessage>),
     /// Something changed where the wallpaper is recorded.
     WallpaperChanged,
+    /// The full-resolution video window could not play the video.
+    BackdropFailed,
     Closed(String),
     Key(KeyEvent, Instant),
     Input(Event),
@@ -1132,10 +1139,29 @@ impl App {
         // Stop the old window first: only one plays at a time.
         self.backdrop = None;
         let ffmpeg = find_ffmpeg().ok_or("ffmpeg was not found")?;
-        let started = backdrop::Backdrop::start(spec, ffmpeg)?;
+        let sender = self.events.sender.clone();
+        let gave_up = Box::new(move || {
+            let _ = sender.send(UiEvent::BackdropFailed);
+        });
+        let started = backdrop::Backdrop::start(spec, ffmpeg, gave_up)?;
         started.set_hidden(self.wallpaper_hidden);
         self.backdrop = Some(started);
         Ok(())
+    }
+
+    /// The video window gave up: draw the video with text cells instead,
+    /// still following the record for later changes.
+    fn backdrop_failed(&mut self) {
+        let WallpaperState::Backdrop(spec) = self.wallpaper_state.clone() else {
+            return;
+        };
+        self.backdrop = None;
+        let wanted = self.wallpaper_wanted.clone();
+        self.show_wallpaper(WallpaperState::Painted(spec));
+        self.wallpaper_wanted = wanted;
+        self.set_status(
+            "Full-resolution video stopped: ffmpeg could not play it. Drawing it with text cells.",
+        );
     }
 
     /// Sleep until input or a frame arrives, apply everything queued, then
@@ -1291,6 +1317,7 @@ impl App {
                 self.dirty = true;
             }
             UiEvent::WallpaperChanged => self.reload_wallpaper(),
+            UiEvent::BackdropFailed => self.backdrop_failed(),
             UiEvent::Closed(reason) => {
                 self.fatal = Some(anyhow!("FACT engine event stream closed: {reason}"));
             }

@@ -143,6 +143,12 @@ pub fn run() -> Result<i32> {
     }
 
     doctor::remove_legacy_data(&paths.base);
+    // A profile installed by an older FACT may lack what this one needs.
+    if let Ok(locations) = wallpaper::Locations::resolve(&paths.base) {
+        if wallpaper::refresh_fragment(&locations) {
+            wallpaper::reload_windows_terminal();
+        }
+    }
     if !cli.here && !cli.transparent && open_wallpaper_tab(&paths, &cli) {
         out!("Opened FACT in a new Windows Terminal tab with your wallpaper at full resolution.");
         out!("(Use `fact --here` to start in this tab instead.)");

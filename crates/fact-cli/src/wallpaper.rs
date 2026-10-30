@@ -432,7 +432,44 @@ fn is_fact_image(path: &Path) -> bool {
 /// The "FACT" Windows Terminal profile. With an image, Windows Terminal draws
 /// it at full resolution and FACT starts transparent; a video is drawn by
 /// FACT, so the profile then only launches FACT.
+/// Bring an installed profile up to date: an upgrade may change what it
+/// needs (0.7 made it transparent for videos). Returns whether it was
+/// rewritten.
+pub fn refresh_fragment(locations: &Locations) -> bool {
+    let Ok(Some(current)) = current(locations) else {
+        return false;
+    };
+    if !current.usable() || !locations.fragment.is_file() {
+        return false;
+    }
+    let Ok(expected) = fragment_json(&current) else {
+        return false;
+    };
+    let installed = fs::read_to_string(&locations.fragment)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    installed.as_ref() != Some(&expected) && write_fragment(locations, &current).is_ok()
+}
+
 fn write_fragment(locations: &Locations, wallpaper: &Wallpaper) -> Result<()> {
+    let fragment = fragment_json(wallpaper)?;
+    if let Some(parent) = locations.fragment.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("could not create {}", parent.display()))?;
+    }
+    let temp = locations.fragment.with_extension("json.tmp");
+    fs::write(&temp, serde_json::to_string_pretty(&fragment)? + "\n")
+        .with_context(|| format!("could not write {}", temp.display()))?;
+    if let Err(error) = fs::rename(&temp, &locations.fragment) {
+        let _ = fs::remove_file(&temp);
+        return Err(error)
+            .with_context(|| format!("could not write {}", locations.fragment.display()));
+    }
+    Ok(())
+}
+
+/// The fragment that adds FACT's profile for `wallpaper`.
+fn fragment_json(wallpaper: &Wallpaper) -> Result<Value> {
     let exe = std::env::current_exe().context("could not locate fact.exe")?;
     // For a video the background is fully transparent and FACT plays the
     // video in a window behind the terminal; a see-through tab keeps only
@@ -458,20 +495,7 @@ fn write_fragment(locations: &Locations, wallpaper: &Wallpaper) -> Result<()> {
         profile["backgroundImageStretchMode"] = json!(wallpaper.fit.stretch_mode());
         profile["backgroundImageAlignment"] = json!("center");
     }
-    let fragment = json!({ "profiles": [profile] });
-    if let Some(parent) = locations.fragment.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("could not create {}", parent.display()))?;
-    }
-    let temp = locations.fragment.with_extension("json.tmp");
-    fs::write(&temp, serde_json::to_string_pretty(&fragment)? + "\n")
-        .with_context(|| format!("could not write {}", temp.display()))?;
-    if let Err(error) = fs::rename(&temp, &locations.fragment) {
-        let _ = fs::remove_file(&temp);
-        return Err(error)
-            .with_context(|| format!("could not write {}", locations.fragment.display()));
-    }
-    Ok(())
+    Ok(json!({ "profiles": [profile] }))
 }
 
 /// Remove FACT's fragment and image copy. Returns whether anything existed.
@@ -793,6 +817,37 @@ mod tests {
         assert!(!locations.fragment.exists());
         assert!(!locations.image_dir.exists());
         assert!(!clear(&locations).unwrap());
+    }
+
+    #[test]
+    fn profiles_from_older_versions_are_brought_up_to_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let locations = Locations {
+            image_dir: dir.path().join("wallpaper"),
+            fragment: dir.path().join("Fragments").join("FACT").join("fact.json"),
+        };
+        assert!(!refresh_fragment(&locations), "nothing installed");
+        // A video recorded by 0.6, whose profile was opaque and passed
+        // --transparent.
+        let video = dir.path().join("rain.mp4");
+        fs::write(&video, b"not decoded here").unwrap();
+        fs::create_dir_all(&locations.image_dir).unwrap();
+        let record =
+            json!({ "source": video.display().to_string(), "opacity": 0.5, "fit": "fill" });
+        fs::write(locations.image_dir.join(RECORD_FILE), record.to_string()).unwrap();
+        fs::create_dir_all(locations.fragment.parent().unwrap()).unwrap();
+        let old = json!({ "profiles": [{ "guid": PROFILE_GUID, "name": PROFILE_NAME,
+            "commandline": "fact.exe --transparent", "background": "#000000" }] });
+        fs::write(&locations.fragment, old.to_string()).unwrap();
+
+        assert!(refresh_fragment(&locations));
+        let profile: Value =
+            serde_json::from_str(&fs::read_to_string(&locations.fragment).unwrap()).unwrap();
+        assert_eq!(
+            profile["profiles"][0]["opacity"], 0,
+            "transparent for the video"
+        );
+        assert!(!refresh_fragment(&locations), "already current");
     }
 
     #[test]
