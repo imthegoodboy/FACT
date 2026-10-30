@@ -1,6 +1,6 @@
 {
   "name": "fact-terminal",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "FACT: a lightweight Windows terminal workspace. Real ConPTY shells in tabs, splits and grids, tuned for Claude Code, Codex, OpenCode and other AI agent CLIs.",
   "license": "MIT",
   "author": "FACT contributors",

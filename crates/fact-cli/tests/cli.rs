@@ -250,7 +250,11 @@ fn wallpaper_set_show_and_clear_use_a_windows_terminal_fragment() {
     );
     assert!(copied.is_file());
     let commandline = profile["commandline"].as_str().unwrap();
-    assert!(commandline.contains("fact") && commandline.ends_with("--transparent"));
+    // Exactly the quoted executable: FACT recognizes its profile itself.
+    assert!(
+        commandline.starts_with('"') && commandline.ends_with("fact.exe\""),
+        "{commandline}"
+    );
 
     let shown = home.ok(["wallpaper"]);
     assert!(

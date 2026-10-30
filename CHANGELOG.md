@@ -3,6 +3,36 @@
 All notable changes to FACT are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and semantic versioning.
 
+## [0.7.0] - 2026-10-30
+
+### Added
+
+- **Full-resolution video in Windows Terminal.** In FACT's Windows Terminal
+  tab a video plays at its real quality behind your text: a borderless window
+  kept exactly behind the terminal window, scaled by ffmpeg to the window's
+  pixel size (up to 4K) at the video's own frame rate (up to 60 fps). It never
+  takes focus, stays out of the taskbar and Alt+Tab, follows moves, resizes,
+  minimizing and virtual desktops, and disappears with FACT. `fact` typed in
+  another Windows Terminal tab opens the FACT tab for videos too, once Windows
+  Terminal has loaded FACT's profile.
+- **See-through tab.** `fact wallpaper transparent [--tint N]` makes FACT's
+  Windows Terminal tab transparent, so the desktop and windows behind it show
+  through your text; `--tint` keeps some darkness for readability.
+- Prefix then `B` also hides a picture Windows Terminal draws in the FACT tab
+  (the theme background covers it).
+
+### Fixed
+
+- FACT in its Windows Terminal tab follows wallpaper changes there: the tab no
+  longer starts FACT with `--transparent`, which turned live updates off.
+  `--transparent` itself is unchanged.
+- ffmpeg installed by Chocolatey runs directly instead of through its
+  launcher, so stopping a video always stops ffmpeg.
+- A live switch to a picture in a regular tab says how to get full
+  resolution.
+- A profile written by an older FACT is brought up to date at launch, and a
+  video ffmpeg cannot play falls back to text cells with a message.
+
 ## [0.6.0] - 2026-10-30
 
 ### Added
@@ -456,7 +486,8 @@ All notable changes to FACT are documented here. The format follows
   restart reopens the saved layout with fresh shells and no replay of old output.
   Unsaved work in a lost process cannot be recovered.
 
-[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/imthegoodboy/FACT/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.7.0
 [0.6.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.6.0
 [0.5.1]: https://github.com/imthegoodboy/FACT/releases/tag/v0.5.1
 [0.5.0]: https://github.com/imthegoodboy/FACT/releases/tag/v0.5.0
