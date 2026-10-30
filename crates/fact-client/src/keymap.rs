@@ -94,9 +94,11 @@ pub fn chord_for(key: KeyEvent) -> Option<KeyChord> {
         _ => return None,
     };
 
+    // AltGr text (`@` on a German keyboard) is not a Ctrl+Alt shortcut.
+    let altgr = is_altgr_text(&key);
     let mut modifiers = Modifiers {
-        control: key.modifiers.contains(KeyModifiers::CONTROL),
-        alt: key.modifiers.contains(KeyModifiers::ALT),
+        control: key.modifiers.contains(KeyModifiers::CONTROL) && !altgr,
+        alt: key.modifiers.contains(KeyModifiers::ALT) && !altgr,
         shift: key.modifiers.contains(KeyModifiers::SHIFT),
     };
 
@@ -116,11 +118,22 @@ pub fn chord_for(key: KeyEvent) -> Option<KeyChord> {
 /// Windows reports AltGr as Ctrl+Alt. On Windows, a Ctrl+Alt chord that
 /// produced a character other than an ASCII letter (`@`, `{`, `ą`, `€`) is
 /// typed text, not a shortcut.
-fn is_altgr_text(key: &KeyEvent) -> bool {
+pub(crate) fn is_altgr_text(key: &KeyEvent) -> bool {
     cfg!(windows)
         && matches!(key.code, CKey::Char(c) if !c.is_ascii_alphabetic() && !c.is_control())
         && key.modifiers.contains(KeyModifiers::CONTROL)
         && key.modifiers.contains(KeyModifiers::ALT)
+}
+
+/// The character a key types into a text field, if it types one: plain and
+/// shifted keys, and AltGr characters.
+pub(crate) fn typed_char(key: &KeyEvent) -> Option<char> {
+    let CKey::Char(c) = key.code else {
+        return None;
+    };
+    let shortcut =
+        key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT);
+    (!shortcut || is_altgr_text(key)).then_some(c)
 }
 
 fn control_byte(c: char) -> Option<u8> {
@@ -274,6 +287,12 @@ pub fn encode_key_win32(key: KeyEvent) -> Option<Vec<u8>> {
         format!("\x1b[{vk};{scan};{uc};1;{state};1_\x1b[{vk};{scan};{uc};0;{state};1_")
             .into_bytes(),
     )
+}
+
+/// Whether the active keyboard layout has a key for `c`. Windows types a
+/// character it has no key for as an Alt code, which arrives as a key release.
+pub(crate) fn layout_types(c: char) -> bool {
+    vk_for_char(c) != 0
 }
 
 #[cfg(windows)]

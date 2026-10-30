@@ -9,10 +9,11 @@
 //! draws at full resolution, with FACT transparent on top. The user's
 //! `settings.json` is never edited, and `fact wallpaper clear` removes it all.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
 /// Fixed so re-running `fact wallpaper set` updates the same profile.
@@ -211,6 +212,14 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
     if video && fact_client::find_ffmpeg().is_none() {
         bail!("video wallpapers need ffmpeg: install it with `winget install ffmpeg`, then run this again");
     }
+    if !video {
+        fact_client::image_dimensions(source).map_err(|error| {
+            anyhow!(
+                "{} is not a picture FACT can show: {error}",
+                source.display()
+            )
+        })?;
+    }
 
     fs::create_dir_all(&locations.image_dir)
         .with_context(|| format!("could not create {}", locations.image_dir.display()))?;
@@ -230,17 +239,7 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
         fit,
         video,
     };
-    // The record is FACT's source of truth, so it is written first; the
-    // Windows Terminal profile follows it.
-    let committed = write_record(locations, &wallpaper).and_then(|()| {
-        write_fragment(
-            locations,
-            (!video).then_some(wallpaper.image.as_path()),
-            opacity,
-            fit,
-        )
-    });
-    if let Err(error) = committed {
+    if let Err(error) = commit(locations, &wallpaper) {
         if !video {
             let _ = fs::remove_file(&wallpaper.image);
         }
@@ -250,6 +249,64 @@ pub fn set(locations: &Locations, source: &Path, opacity: f64, fit: ImageFit) ->
     // failure to delete one must not turn this success into an error.
     let _ = remove_images(&locations.image_dir, Some(wallpaper.image.as_path()));
     Ok(wallpaper)
+}
+
+/// Change the opacity or fit of the current wallpaper, keeping its file.
+pub fn adjust(
+    locations: &Locations,
+    opacity: Option<f64>,
+    fit: Option<ImageFit>,
+) -> Result<Wallpaper> {
+    let Some(mut wallpaper) = current(locations)? else {
+        bail!("no wallpaper is set; give a picture or video: fact wallpaper set <file>");
+    };
+    if !wallpaper.image.is_file() {
+        bail!(
+            "the wallpaper file is gone ({}); set it again with a file",
+            wallpaper.image.display()
+        );
+    }
+    if !wallpaper.video {
+        fact_client::image_dimensions(&wallpaper.image).map_err(|error| {
+            anyhow!(
+                "{} is no longer a picture FACT can show: {error}; set it again with a file",
+                wallpaper.image.display()
+            )
+        })?;
+    }
+    if let Some(opacity) = opacity {
+        wallpaper.opacity = opacity;
+    }
+    if let Some(fit) = fit {
+        wallpaper.fit = fit;
+    }
+    fs::create_dir_all(&locations.image_dir)
+        .with_context(|| format!("could not create {}", locations.image_dir.display()))?;
+    commit(locations, &wallpaper)?;
+    Ok(wallpaper)
+}
+
+/// The record is FACT's source of truth, so it is written first; the Windows
+/// Terminal profile follows it. If that fails, the previous record comes
+/// back, so it never names an image that is about to be removed.
+fn commit(locations: &Locations, wallpaper: &Wallpaper) -> Result<()> {
+    let record = locations.image_dir.join(RECORD_FILE);
+    let previous = fs::read(&record).ok();
+    let committed = write_record(locations, wallpaper).and_then(|()| {
+        write_fragment(
+            locations,
+            (!wallpaper.video).then_some(wallpaper.image.as_path()),
+            wallpaper.opacity,
+            wallpaper.fit,
+        )
+    });
+    if committed.is_err() {
+        let _ = match &previous {
+            Some(bytes) => fs::write(&record, bytes),
+            None => fs::remove_file(&record),
+        };
+    }
+    committed
 }
 
 /// `canonicalize` returns `\\?\C:\...`; keep the familiar form.
@@ -310,11 +367,15 @@ fn copy_to_fresh_name(source: &Path, dir: &Path, extension: &str) -> Result<Path
 /// FACT's own image names: `wallpaper-<digits>.<ext>`, plus the fixed
 /// `wallpaper.<ext>` and `incoming.<ext>` names used before.
 fn is_fact_image(path: &Path) -> bool {
-    // Only image copies: a video is always the user's own file.
+    // Only image copies: a video is always the user's own file. TIFF copies
+    // made by FACT 0.5 are still FACT's to clean up.
     let image = path
         .extension()
         .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()));
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|ext| {
+            IMAGE_EXTENSIONS.contains(&ext.as_str()) || ext == "tif" || ext == "tiff"
+        });
     let Some(stem) = path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -444,12 +505,78 @@ pub fn reload_windows_terminal() -> usize {
         .count()
 }
 
+/// Whether Windows Terminal has loaded FACT's profile from the fragment. It
+/// lists the profiles it generated in its `state.json` (packaged, preview or
+/// unpackaged installs keep it in different folders).
+pub fn terminal_knows_profile() -> bool {
+    let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return false;
+    };
+    let mut files = vec![local.join(r"Microsoft\Windows Terminal\state.json")];
+    if let Ok(entries) = fs::read_dir(local.join("Packages")) {
+        files.extend(
+            entries
+                .flatten()
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("Microsoft.WindowsTerminal")
+                })
+                .map(|entry| entry.path().join(r"LocalState\state.json")),
+        );
+    }
+    let guid = PROFILE_GUID
+        .trim_matches(|c| c == '{' || c == '}')
+        .to_ascii_lowercase();
+    files.iter().any(|file| {
+        fs::read_to_string(file).is_ok_and(|text| text.to_ascii_lowercase().contains(&guid))
+    })
+}
+
 /// True inside a Windows Terminal tab that uses FACT's wallpaper profile.
 pub fn in_fact_profile() -> bool {
-    std::env::var("WT_PROFILE_ID").is_ok_and(|id| {
-        id.trim_matches(|c| c == '{' || c == '}')
-            .eq_ignore_ascii_case(PROFILE_GUID.trim_matches(|c| c == '{' || c == '}'))
-    })
+    fact_client::in_windows_terminal()
+        && std::env::var("WT_PROFILE_ID").is_ok_and(|id| {
+            id.trim_matches(|c| c == '{' || c == '}')
+                .eq_ignore_ascii_case(PROFILE_GUID.trim_matches(|c| c == '{' || c == '}'))
+        })
+}
+
+/// Arguments for `wt.exe` that open FACT in a new tab of the current window
+/// with the wallpaper profile (by GUID, so a user profile that happens to be
+/// called "FACT" is never picked). `None` when an argument cannot be passed
+/// safely: Windows Terminal treats `;` as a command separator, and quotes
+/// inside an argument do not survive its parsing.
+pub fn new_tab_arguments(
+    exe: &Path,
+    dir: Option<&Path>,
+    fact_args: &[OsString],
+) -> Option<Vec<OsString>> {
+    let mut args: Vec<OsString> = ["-w", "0", "new-tab", "-p", PROFILE_GUID]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    if let Some(dir) = dir {
+        let mut dir = dir.as_os_str().to_os_string();
+        // A trailing backslash would escape the closing quote ("C:\").
+        if dir.to_string_lossy().ends_with('\\') {
+            dir.push(".");
+        }
+        args.push("-d".into());
+        args.push(dir);
+    }
+    args.push("--".into());
+    args.push(exe.as_os_str().to_os_string());
+    args.push("--transparent".into());
+    args.extend(fact_args.iter().cloned());
+    if args.iter().any(|arg| {
+        let text = arg.to_string_lossy();
+        text.contains(';') || text.contains('"')
+    }) {
+        return None;
+    }
+    Some(args)
 }
 
 pub fn describe(wallpaper: &Wallpaper) -> String {
@@ -478,6 +605,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn new_tab_arguments_keep_paths_intact() {
+        let exe = Path::new(r"C:\Program Files\FACT\fact.exe");
+        let args = new_tab_arguments(exe, Some(Path::new(r"C:\")), &["--grid".into(), "4".into()])
+            .unwrap();
+        let text: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&text[..5], ["-w", "0", "new-tab", "-p", PROFILE_GUID]);
+        assert_eq!(text[5..7], ["-d".to_string(), r"C:\.".to_string()]);
+        assert_eq!(text[7], "--");
+        assert_eq!(text[8], exe.display().to_string());
+        assert_eq!(text[9..], ["--transparent", "--grid", "4"]);
+        assert!(new_tab_arguments(exe, Some(Path::new(r"C:\a;b")), &[]).is_none());
+        assert!(new_tab_arguments(exe, None, &["--cwd".into(), "a\"b".into()]).is_none());
+        assert!(
+            is_fact_image(Path::new("wallpaper-1.tiff")),
+            "old TIFF copies"
+        );
+    }
+
+    #[test]
     fn verbatim_prefixes_are_removed_without_breaking_shares() {
         assert_eq!(
             strip_verbatim(Path::new(r"\\?\C:\Videos\a.mp4")),
@@ -504,6 +653,15 @@ mod tests {
         assert!(parse_opacity("dim").is_err());
     }
 
+    /// A 1x1 PNG: `set` checks that a picture really is one.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
     #[test]
     fn set_writes_a_profile_and_clear_removes_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -514,6 +672,9 @@ mod tests {
         assert!(current(&locations).unwrap().is_none());
         let source = dir.path().join("Sunset.PNG");
         fs::write(&source, b"not really a png").unwrap();
+        assert!(set(&locations, &source, 0.4, ImageFit::Fit).is_err());
+        assert!(current(&locations).unwrap().is_none(), "nothing recorded");
+        fs::write(&source, TINY_PNG).unwrap();
         let wallpaper = set(&locations, &source, 0.4, ImageFit::Fit).unwrap();
         let name = wallpaper.image.file_name().unwrap().to_string_lossy();
         assert!(
@@ -531,12 +692,19 @@ mod tests {
             .as_str()
             .unwrap()
             .ends_with("--transparent"));
-        assert_eq!(current(&locations).unwrap(), Some(wallpaper));
+        assert_eq!(current(&locations).unwrap(), Some(wallpaper.clone()));
         assert!(locations.image_dir.join(RECORD_FILE).is_file());
 
-        // Replacing the image with another type leaves exactly one copy.
+        // A broken picture leaves the current wallpaper as it was.
+        let broken = dir.path().join("broken.png");
+        fs::write(&broken, b"broken").unwrap();
+        assert!(set(&locations, &broken, 0.4, ImageFit::Fit).is_err());
+        assert_eq!(current(&locations).unwrap(), Some(wallpaper));
+
+        // Replacing the image with another type leaves exactly one copy. The
+        // content decides the format, not the name.
         let jpeg = dir.path().join("photo.jpg");
-        fs::write(&jpeg, b"jpeg").unwrap();
+        fs::write(&jpeg, TINY_PNG).unwrap();
         set(&locations, &jpeg, DEFAULT_OPACITY, ImageFit::Fill).unwrap();
         let images = fs::read_dir(&locations.image_dir)
             .unwrap()
@@ -548,6 +716,35 @@ mod tests {
         assert!(!locations.fragment.exists());
         assert!(!locations.image_dir.exists());
         assert!(!clear(&locations).unwrap());
+    }
+
+    #[test]
+    fn adjust_changes_opacity_and_fit_but_keeps_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let locations = Locations {
+            image_dir: dir.path().join("wallpaper"),
+            fragment: dir.path().join("Fragments").join("FACT").join("fact.json"),
+        };
+        assert!(
+            adjust(&locations, Some(0.5), None).is_err(),
+            "nothing to adjust"
+        );
+        let source = dir.path().join("sky.png");
+        fs::write(&source, TINY_PNG).unwrap();
+        let first = set(&locations, &source, 0.3, ImageFit::Fill).unwrap();
+        let adjusted = adjust(&locations, Some(0.6), Some(ImageFit::Center)).unwrap();
+        assert_eq!(adjusted.image, first.image, "same copy, no new file");
+        assert_eq!(adjusted.opacity, 0.6);
+        assert_eq!(adjusted.fit, ImageFit::Center);
+        assert_eq!(current(&locations).unwrap(), Some(adjusted.clone()));
+        let fragment: Value =
+            serde_json::from_str(&fs::read_to_string(&locations.fragment).unwrap()).unwrap();
+        assert_eq!(
+            fragment["profiles"][0]["backgroundImageStretchMode"],
+            "none"
+        );
+        let only_fit = adjust(&locations, None, Some(ImageFit::Fit)).unwrap();
+        assert_eq!(only_fit.opacity, 0.6, "opacity kept");
     }
 
     #[test]
@@ -576,7 +773,7 @@ mod tests {
         let keep = locations.image_dir.join("wallpaper-backup.png");
         fs::write(&keep, b"user file").unwrap();
         let source = dir.path().join("a.png");
-        fs::write(&source, b"a").unwrap();
+        fs::write(&source, TINY_PNG).unwrap();
         let first = set(&locations, &source, 0.3, ImageFit::Fill).unwrap();
         let second = set(&locations, &source, 0.3, ImageFit::Fill).unwrap();
         assert_ne!(first.image, second.image, "each set gets a fresh name");

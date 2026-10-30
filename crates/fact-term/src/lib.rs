@@ -18,6 +18,7 @@ use fact_protocol::{
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 /// Shared state filled by parser callbacks and consumed by the engine.
 #[derive(Default)]
@@ -26,6 +27,8 @@ struct EventState {
     response_tx: Option<SyncSender<Vec<u8>>>,
     bell_seq: u64,
     last_error: Option<String>,
+    /// Default foreground and background reported to OSC 10/11 queries.
+    default_colors: Option<([u8; 3], [u8; 3])>,
 }
 
 use std::sync::mpsc::SyncSender;
@@ -53,6 +56,22 @@ impl TerminalEventSink {
 
     fn dimensions(&self) -> (u16, u16) {
         self.dimensions.lock().map(|d| *d).unwrap_or((100, 30))
+    }
+
+    /// The theme's default text and background colors. Programs ask for them
+    /// (OSC 10/11) to choose between their light and dark looks.
+    pub fn set_default_colors(&self, foreground: [u8; 3], background: [u8; 3]) {
+        if let Ok(mut state) = self.state.lock() {
+            state.default_colors = Some((foreground, background));
+        }
+    }
+
+    fn default_colors(&self) -> ([u8; 3], [u8; 3]) {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|s| s.default_colors)
+            .unwrap_or(([231, 233, 237], [0, 0, 0]))
     }
 
     pub fn attach_writer(&self, tx: SyncSender<Vec<u8>>) {
@@ -124,7 +143,15 @@ impl EventListener for Listener {
             Event::ColorRequest(index, format) => {
                 // Report a sane xterm 256-color palette. Applications query these
                 // during startup; returning an empty response breaks some TUIs.
-                let rgb = palette_rgb(index);
+                let rgb = if index < 256 {
+                    palette_rgb(index)
+                } else {
+                    // 257 is the background; the foreground, cursor and
+                    // the rest follow the text color.
+                    let (foreground, background) = self.sink.default_colors();
+                    let [r, g, b] = if index == 257 { background } else { foreground };
+                    Rgb { r, g, b }
+                };
                 let text = format(rgb);
                 self.sink.send_pty(text.into_bytes());
             }
@@ -288,6 +315,28 @@ impl TerminalModel {
         }
     }
 
+    /// When a synchronized update (DEC mode 2026) that the application has
+    /// not ended yet must be shown anyway.
+    pub fn sync_deadline(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    /// Show a synchronized update whose deadline has passed, so a program
+    /// that never ends one cannot freeze its pane. Returns `true` when it did.
+    pub fn flush_expired_sync(&mut self, now: Instant) -> bool {
+        if self.sync_deadline().is_none_or(|deadline| deadline > now) {
+            return false;
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.parser.stop_sync(&mut self.term);
+        }));
+        if result.is_err() {
+            self.sink
+                .set_error("terminal parser panic contained; pane may be unstable");
+        }
+        true
+    }
+
     pub fn resize(&mut self, cols: u16, rows: u16) {
         let cols = cols.max(1);
         let rows = rows.max(1);
@@ -341,6 +390,11 @@ impl TerminalModel {
 
     pub fn reset_scroll(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// The colors reported when a program asks for the defaults (OSC 10/11).
+    pub fn set_default_colors(&self, foreground: [u8; 3], background: [u8; 3]) {
+        self.sink.set_default_colors(foreground, background);
     }
 
     pub fn bracketed_paste(&self) -> bool {
@@ -681,6 +735,21 @@ mod tests {
     }
 
     #[test]
+    fn unfinished_synchronized_updates_are_shown_after_their_deadline() {
+        let mut t = term(20, 4);
+        t.feed(b"\x1b[?2026hhidden");
+        assert!(
+            !t.plain_text().contains("hidden"),
+            "held until the update ends"
+        );
+        let deadline = t.sync_deadline().expect("a synchronized update is open");
+        assert!(!t.flush_expired_sync(deadline - std::time::Duration::from_millis(1)));
+        assert!(t.flush_expired_sync(deadline));
+        assert!(t.plain_text().contains("hidden"));
+        assert_eq!(t.sync_deadline(), None);
+    }
+
+    #[test]
     fn plain_text_and_cursor() {
         let mut t = term(20, 4);
         t.feed(b"hello\r\nworld");
@@ -815,6 +884,24 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), b"\x1b[?5u");
         model.feed(b"\x1b[<u");
         assert_eq!(model.modes() & pane_modes::KITTY_KEYS, 0);
+    }
+
+    #[test]
+    fn default_colors_are_the_themes() {
+        let sink = TerminalEventSink::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        sink.attach_writer(tx);
+        let mut model = TerminalModel::new(20, 4, 100, sink.clone());
+        model.feed(b"]11;?");
+        let reply = String::from_utf8(rx.try_recv().unwrap()).unwrap();
+        assert!(reply.contains("rgb:0000/0000/0000"), "{reply:?}");
+        sink.set_default_colors([31, 35, 40], [255, 255, 255]);
+        model.feed(b"]11;?");
+        let reply = String::from_utf8(rx.try_recv().unwrap()).unwrap();
+        assert!(reply.contains("rgb:ffff/ffff/ffff"), "{reply:?}");
+        model.feed(b"]10;?");
+        let reply = String::from_utf8(rx.try_recv().unwrap()).unwrap();
+        assert!(reply.contains("rgb:1f1f/2323/2828"), "{reply:?}");
     }
 
     #[test]

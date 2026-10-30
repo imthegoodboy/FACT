@@ -189,16 +189,15 @@ fn display(path: &Path) -> String {
 }
 
 fn terminal_host() -> String {
-    let var = |name: &str| std::env::var_os(name).is_some();
     let program = std::env::var("TERM_PROGRAM").unwrap_or_default();
     if program.eq_ignore_ascii_case("vscode") {
         "VS Code terminal".into()
-    } else if var("WT_SESSION") {
-        "Windows Terminal (wallpaper, true color and full key reporting)".into()
+    } else if fact_client::in_windows_terminal() {
+        "Windows Terminal (full-resolution wallpaper, true color, full key reporting)".into()
     } else if !program.is_empty() {
         program
     } else {
-        "console host; Windows Terminal is recommended for wallpapers and colors".into()
+        "classic console; Windows Terminal gives sharper wallpapers".into()
     }
 }
 

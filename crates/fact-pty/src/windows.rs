@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::mem;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::FromRawHandle;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -37,8 +37,9 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
-    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION,
+    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
+    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+    EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION,
     PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
@@ -151,10 +152,16 @@ impl Shared {
     fn close_conpty(&self) {
         let handle = self.conpty.lock().ok().and_then(|mut guard| guard.take());
         if let Some(handle) = handle {
-            // ClosePseudoConsole can wait for output. Keep the dedicated
-            // reader active until EOF; normal engine ticks consume its bounded
-            // queue so process-exit cleanup does not block the owner thread.
-            unsafe { ClosePseudoConsole(handle) };
+            // Before Windows 11 24H2, ClosePseudoConsole waits until its
+            // output has been read. Closing on its own thread keeps the owner
+            // (which may be the only one draining that output) from waiting
+            // on itself; the reader keeps draining until EOF.
+            let closed = thread::Builder::new()
+                .name("fact-pty-close".into())
+                .spawn(move || unsafe { ClosePseudoConsole(handle) });
+            if closed.is_err() {
+                unsafe { ClosePseudoConsole(handle) };
+            }
         }
     }
 
@@ -169,7 +176,7 @@ impl Shared {
             let process = self.process.load(Ordering::Acquire);
             if process != 0 {
                 unsafe {
-                    windows_sys::Win32::System::Threading::TerminateProcess(process as HANDLE, 1);
+                    TerminateProcess(process as HANDLE, 1);
                 }
             }
         }
@@ -358,13 +365,10 @@ impl PtyProcess {
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         let cols = cols.clamp(1, i16::MAX as u16);
         let rows = rows.clamp(1, i16::MAX as u16);
-        let conpty = self
-            .shared
-            .conpty
-            .lock()
-            .ok()
-            .and_then(|guard| *guard)
-            .ok_or(PtyError::Closed)?;
+        // Hold the lock while resizing so the exit monitor cannot close the
+        // pseudo console in between.
+        let guard = self.shared.conpty.lock().map_err(|_| PtyError::Closed)?;
+        let conpty = (*guard).ok_or(PtyError::Closed)?;
         let hr = unsafe {
             ResizePseudoConsole(
                 conpty,
@@ -374,6 +378,7 @@ impl PtyProcess {
                 },
             )
         };
+        drop(guard);
         if hr < 0 {
             return Err(PtyError::Invalid(format!(
                 "ResizePseudoConsole failed with HRESULT 0x{hr:08X}"
@@ -518,8 +523,7 @@ unsafe fn spawn_child(
     startup.StartupInfo.hStdError = ptr::null_mut();
     startup.lpAttributeList = attr_list;
 
-    let application = wide(&options.command);
-    let mut command_line = command_line(&options.command, &options.args);
+    let (application, mut command_line) = launch_line(&options.command, &options.args);
     let cwd = options
         .cwd
         .as_ref()
@@ -528,13 +532,14 @@ unsafe fn spawn_child(
     let env_block = build_environment_block(&options.env);
 
     let mut process_info: PROCESS_INFORMATION = mem::zeroed();
+    // Started suspended so it is inside the job before it can start children.
     let success = CreateProcessW(
-        application.as_ptr(),
+        application.as_ref().map_or(ptr::null(), |app| app.as_ptr()),
         command_line.as_mut_ptr(),
         ptr::null::<SECURITY_ATTRIBUTES>(),
         ptr::null::<SECURITY_ATTRIBUTES>(),
         0,
-        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+        EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
         env_block.as_ptr() as *const c_void,
         if cwd.is_empty() {
             ptr::null()
@@ -551,10 +556,26 @@ unsafe fn spawn_child(
         return Err(PtyError::win("start the pane process"));
     }
 
+    let job = create_job(process_info.hProcess);
+    if ResumeThread(process_info.hThread) == u32::MAX {
+        let error = PtyError::win("start the pane process");
+        TerminateProcess(process_info.hProcess, 1);
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+        if job != 0 {
+            CloseHandle(job as HANDLE);
+        }
+        return Err(error);
+    }
+    Ok((process_info, job))
+}
+
+/// A kill-on-close job holding `process`, or 0 when one cannot be made (the
+/// pane still works; killing it falls back to TerminateProcess).
+unsafe fn create_job(process: HANDLE) -> usize {
     let job = CreateJobObjectW(ptr::null(), ptr::null());
     if job.is_null() {
-        // The pane still works; killing it will fall back to TerminateProcess.
-        return Ok((process_info, 0));
+        return 0;
     }
     let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = mem::zeroed();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -564,11 +585,11 @@ unsafe fn spawn_child(
         &limits as *const _ as *const c_void,
         mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
     );
-    if set == 0 || AssignProcessToJobObject(job, process_info.hProcess) == 0 {
+    if set == 0 || AssignProcessToJobObject(job, process) == 0 {
         CloseHandle(job);
-        return Ok((process_info, 0));
+        return 0;
     }
-    Ok((process_info, job as usize))
+    job as usize
 }
 
 fn spawn_input_writer(handle: usize, receiver: Receiver<Vec<u8>>, shared: Arc<Shared>) {
@@ -613,11 +634,12 @@ fn spawn_output_reader(
                 match file.read(&mut buffer) {
                     Ok(0) => break,
                     Ok(n) => {
-                        if sender.send(buffer[..n].to_vec()).is_err() {
-                            break;
-                        }
-                        if let Some(waker) = &waker {
-                            waker.wake();
+                        // Once the pane is gone, keep reading (and dropping)
+                        // until EOF so ClosePseudoConsole is not left waiting.
+                        if sender.send(buffer[..n].to_vec()).is_ok() {
+                            if let Some(waker) = &waker {
+                                waker.wake();
+                            }
                         }
                     }
                     Err(error) if error.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) => break,
@@ -668,26 +690,71 @@ fn spawn_exit_monitor(shared: Arc<Shared>, waker: Option<OutputWaker>) {
         .expect("spawn ConPTY exit thread");
 }
 
-fn command_line(command: &str, args: &[String]) -> Vec<u16> {
-    let mut line = String::new();
-    line.push_str(&quote_arg(command));
-    for arg in args {
-        line.push(' ');
-        line.push_str(&quote_arg(arg));
-    }
+/// The application name and command line for CreateProcessW.
+///
+/// Batch files (`claude.cmd`) cannot be started directly, so they run through
+/// `cmd.exe /d /s /c "..."`. A command that is not a full path gets no
+/// application name, so Windows searches for it.
+fn launch_line(command: &str, args: &[String]) -> (Option<Vec<u16>>, Vec<u16>) {
+    let batch = Path::new(command)
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"));
+    let (application, line) = if batch {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| {
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
+            format!(r"{root}\System32\cmd.exe")
+        });
+        // `/s` strips exactly the outer quotes added here.
+        let inner = joined(command, args, true);
+        let line = format!("{} /d /s /c \"{inner}\"", quote_arg(&shell));
+        (Some(shell), line)
+    } else {
+        let full_path = Path::new(command).is_absolute();
+        (
+            full_path.then(|| command.to_string()),
+            joined(command, args, false),
+        )
+    };
     // CreateProcessW may modify the command line buffer; keep it mutable.
-    let mut wide = wide(&line);
-    // `wide` already has one trailing NUL.
-    wide.reserve(1);
-    wide
+    (application.as_deref().map(wide), wide(&line))
 }
 
+fn joined(command: &str, args: &[String], batch: bool) -> String {
+    let quote = |arg: &str| {
+        if batch {
+            quote_batch_arg(arg)
+        } else {
+            quote_arg(arg)
+        }
+    };
+    let mut line = quote(command);
+    for arg in args {
+        line.push(' ');
+        line.push_str(&quote(arg));
+    }
+    line
+}
+
+/// Quote one argument for cmd.exe and a batch file: cmd keeps backslashes as
+/// they are and writes a quote inside quotes as `""`.
+fn quote_batch_arg(arg: &str) -> String {
+    let special = |c: char| {
+        matches!(
+            c,
+            ' ' | '\t' | '"' | '&' | '|' | '<' | '>' | '^' | '(' | ')' | ',' | ';' | '='
+        )
+    };
+    if !arg.is_empty() && !arg.chars().any(special) {
+        return arg.to_string();
+    }
+    format!("\"{}\"", arg.replace('"', "\"\""))
+}
+
+/// Quote one argument for the C runtime's parser.
 fn quote_arg(arg: &str) -> String {
-    if !arg.is_empty()
-        && !arg
-            .chars()
-            .any(|c| c == ' ' || c == '\t' || c == '"' || c == '\\')
-    {
+    let special = |c: char| c == ' ' || c == '\t' || c == '"' || c == '\\';
+    if !arg.is_empty() && !arg.chars().any(special) {
         return arg.to_string();
     }
     let mut out = String::with_capacity(arg.len() + 2);
@@ -784,6 +851,37 @@ mod tests {
         assert_eq!(quote_arg("a\\b"), "\"a\\b\"");
         assert_eq!(quote_arg("a\\"), "\"a\\\\\"");
         assert_eq!(quote_arg(""), "\"\"");
+        assert_eq!(quote_arg("a&b"), "a&b");
+        assert_eq!(quote_batch_arg("a&b"), "\"a&b\"");
+        assert_eq!(quote_batch_arg(r"C:\dir\"), r"C:\dir\");
+        assert_eq!(quote_batch_arg(r"C:\my dir\"), r#""C:\my dir\""#);
+        assert_eq!(quote_batch_arg("say \"hi\""), "\"say \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn batch_files_run_through_cmd() {
+        let text = |wide: &[u16]| {
+            String::from_utf16_lossy(wide)
+                .trim_end_matches('\0')
+                .to_string()
+        };
+        let (application, line) = launch_line(
+            r"C:\Users\me\AppData\Roaming\npm\claude.CMD",
+            &["--resume".into()],
+        );
+        let application = text(&application.expect("cmd.exe"));
+        assert!(application.to_ascii_lowercase().ends_with("cmd.exe"));
+        assert!(text(&line)
+            .ends_with(r#" /d /s /c "C:\Users\me\AppData\Roaming\npm\claude.CMD --resume""#));
+        let (_, line) = launch_line(r"C:\My Tools\run.bat", &[r"C:\out dir\".into()]);
+        assert!(text(&line).ends_with(r#" /d /s /c ""C:\My Tools\run.bat" "C:\out dir\"""#));
+
+        let (application, line) = launch_line("pwsh.exe", &["-NoLogo".into()]);
+        assert!(application.is_none(), "bare names are searched by Windows");
+        assert_eq!(text(&line), "pwsh.exe -NoLogo");
+
+        let (application, _) = launch_line(r"C:\Windows\System32\cmd.exe", &[]);
+        assert_eq!(text(&application.unwrap()), r"C:\Windows\System32\cmd.exe");
     }
 
     #[test]

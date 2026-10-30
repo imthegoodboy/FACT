@@ -7,16 +7,32 @@ All notable changes to FACT are documented here. The format follows
 
 ### Added
 
-- **Wallpaper everywhere.** FACT paints the wallpaper itself, two pixels per
-  cell, so it shows in every terminal (Windows Terminal, the classic console,
-  VS Code), not only in Windows Terminal's FACT profile. Text, the cursor,
-  selections and program colors stay on top.
+- **Wallpaper everywhere.** FACT paints the wallpaper itself, so it shows in
+  every terminal (Windows Terminal, the classic console, VS Code), not only in
+  Windows Terminal's FACT profile: four pixels per cell with quadrant glyphs
+  where the terminal draws block characters itself, two elsewhere. The image
+  fades toward the theme's background, so light themes stay readable. Text, the
+  cursor, selections and program colors stay on top.
+- **Full-resolution pictures in Windows Terminal.** A plain `fact` typed in a
+  Windows Terminal tab with a picture wallpaper opens a FACT tab where Windows
+  Terminal draws the picture at full resolution; `fact --here` stays put.
 - **Video wallpapers.** `fact wallpaper set clip.mp4` (mp4, mkv, webm, mov, avi,
   m4v, wmv, flv) plays the video in a loop at its own colors, streamed through
   ffmpeg at the window's cell resolution. Animated GIFs loop too. Playback
   pauses while the window is unfocused.
 - `fact wallpaper set` and `clear` make Windows Terminal reload at once; no
   restart is needed.
+- **Live wallpaper.** Running FACT windows switch as soon as the wallpaper is
+  set, changed or cleared, from any terminal. FACT waits for the change in the
+  kernel, so watching costs nothing.
+- **Hide the wallpaper.** Prefix then `B` (`toggle_wallpaper`) hides a
+  wallpaper FACT paints and pauses a video, and shows it again. (In Windows
+  Terminal's full-resolution FACT tab the terminal draws the picture.)
+- `fact wallpaper set --opacity N` / `--fit MODE` without a file adjusts the
+  current wallpaper; a new file keeps the current opacity and fit.
+- **Your own colors.** `[colors]` in `config.toml` sets `background`,
+  `foreground`, `accent` and `selection` over any theme.
+- `wallpaper_tab = false` keeps `fact` in the current Windows Terminal tab.
 
 ### Changed
 
@@ -30,6 +46,38 @@ All notable changes to FACT are documented here. The format follows
 - Files left by FACT 0.3 (`sessions.db`, `runtime`, `logs`) are removed on
   launch. FACT stores no database or history.
 - The GitHub language bar now reflects the Rust code only.
+- Windows Terminal is detected from the console itself, not only from the
+  inherited `WT_SESSION`, so a classic console started from a Windows
+  Terminal tab is treated as a classic console.
+
+### Fixed
+
+- Profiles whose `command` is a bare name (`pwsh.exe`, `claude`) are found on
+  PATH (never in the current folder; a missing one is reported by name), and
+  batch files such as npm's `claude.cmd` start through `cmd.exe`.
+- Text pasted in Windows Terminal reaches the pane as one paste instead of
+  running line by line, and characters the keyboard cannot type (Alt codes,
+  pasted accents and symbols) are no longer dropped. AltGr characters work in
+  the palette, search and rename fields and never trigger Ctrl+Alt shortcuts.
+- Clicking a pane focuses it at once: keys and a right-click paste typed right
+  after go to that pane. Scroll mode ends when another pane is focused.
+- Ctrl+C copies only when text is selected and clears the selection after
+  copying; a selection released over the tab strip no longer lingers.
+- Double and triple clicks reach programs that track the mouse instead of
+  selecting text. Dragged gutters land exactly where released, and dragging
+  tabs of different widths no longer flips them back and forth.
+- A program that starts a synchronized update and never ends it can no longer
+  freeze its pane. Programs asking for the default colors get the theme's.
+- Inverse text stays readable over a wallpaper or transparent background.
+- Video wallpapers keep their pace, hold the last frame while the window is
+  resized, restart ffmpeg if it stops and say so if it keeps failing. ffmpeg
+  installed by winget, Chocolatey or Scoop is found even with an old PATH.
+- `fact wallpaper set` checks that a picture really is one (by content, not
+  name) and leaves the previous wallpaper intact if anything fails. The
+  Windows Terminal tab opens only once Windows Terminal has loaded FACT's
+  profile.
+- Closing a pane can no longer hang on older Windows 10 and 11 builds, and the
+  pane process joins its job before it starts children.
 
 ## [0.5.1] - 2026-10-30
 

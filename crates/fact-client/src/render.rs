@@ -54,7 +54,7 @@ impl App {
         if self.overlay.is_some() {
             self.render_overlay(frame, area);
         }
-        if let Some(wallpaper) = &self.wallpaper {
+        if let Some(wallpaper) = self.wallpaper.as_ref().filter(|_| !self.wallpaper_hidden) {
             wallpaper.borrow_mut().paint(frame.buffer_mut(), area);
         }
     }
@@ -953,6 +953,24 @@ fn cell_style(cell: &CellDto, theme: &crate::theme::Theme) -> Style {
     let mut bg = color(cell.bg, theme);
     let flags = cell.flags;
     if flags & cell_flags::INVERSE != 0 {
+        // A transparent background has no color to become the text color;
+        // pick the theme color that contrasts with the new block.
+        if bg == Color::Reset {
+            let block = luma(fg, theme);
+            let contrast = |color: Color| block.abs_diff(luma(color, theme));
+            let best = [theme.bg, theme.terminal_fg]
+                .into_iter()
+                .max_by_key(|candidate| contrast(*candidate))
+                .unwrap_or(theme.bg);
+            // Neither theme color stands out on this block: black or white.
+            bg = if contrast(best) >= 100_000 {
+                best
+            } else if block > 128_000 {
+                Color::Rgb(0, 0, 0)
+            } else {
+                Color::Rgb(255, 255, 255)
+            };
+        }
         std::mem::swap(&mut fg, &mut bg);
     }
     if flags & cell_flags::HIDDEN != 0 {
@@ -975,6 +993,54 @@ fn cell_style(cell: &CellDto, theme: &crate::theme::Theme) -> Style {
         style = style.add_modifier(Modifier::CROSSED_OUT);
     }
     style
+}
+
+/// Perceived brightness of `color`, 0 (black) to 255 000 (white).
+fn luma(color: Color, theme: &crate::theme::Theme) -> u32 {
+    let [r, g, b] = match color {
+        Color::Rgb(r, g, b) => [r, g, b],
+        Color::Indexed(index) => xterm_rgb(index),
+        Color::Reset => match theme.terminal_fg {
+            Color::Rgb(r, g, b) => [r, g, b],
+            _ => [229, 229, 229],
+        },
+        _ => [229, 229, 229],
+    };
+    u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114
+}
+
+/// The usual xterm palette, close enough to judge brightness.
+fn xterm_rgb(index: u8) -> [u8; 3] {
+    const ANSI: [[u8; 3]; 16] = [
+        [0, 0, 0],
+        [205, 49, 49],
+        [13, 188, 121],
+        [229, 229, 16],
+        [36, 114, 200],
+        [188, 63, 188],
+        [17, 168, 205],
+        [229, 229, 229],
+        [102, 102, 102],
+        [241, 76, 76],
+        [35, 209, 139],
+        [245, 245, 67],
+        [59, 142, 234],
+        [214, 112, 214],
+        [41, 184, 219],
+        [255, 255, 255],
+    ];
+    match index {
+        0..=15 => ANSI[usize::from(index)],
+        16..=231 => {
+            let i = index - 16;
+            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            [level(i / 36), level((i % 36) / 6), level(i % 6)]
+        }
+        _ => {
+            let v = 8 + (index - 232) * 10;
+            [v, v, v]
+        }
+    }
 }
 
 fn color(value: ColorDto, theme: &crate::theme::Theme) -> Color {
@@ -1055,6 +1121,42 @@ mod tests {
         assert_eq!(beam_glyph(CursorShape::Beam, " "), Some("│"));
         assert_eq!(beam_glyph(CursorShape::Beam, "x"), None);
         assert_eq!(beam_glyph(CursorShape::Block, " "), None);
+    }
+
+    #[test]
+    fn inverse_text_stays_readable_on_a_transparent_background() {
+        let theme = crate::theme::Theme::fact_dark().with_transparency(true);
+        let cell = CellDto {
+            ch: 'x',
+            zero: Vec::new(),
+            fg: ColorDto::Named(semantic_color::FOREGROUND),
+            bg: ColorDto::Named(semantic_color::BACKGROUND),
+            flags: cell_flags::INVERSE,
+        };
+        let style = cell_style(&cell, &theme);
+        assert_eq!(style.bg, Some(theme.terminal_fg));
+        assert_eq!(style.fg, Some(theme.bg));
+        assert_ne!(style.fg, Some(Color::Reset));
+
+        // Black inverse text (a black block) gets light text, not black.
+        let black = CellDto {
+            fg: ColorDto::Indexed(0),
+            ..cell
+        };
+        let style = cell_style(&black, &theme);
+        assert_eq!(style.bg, Some(Color::Indexed(0)));
+        assert_eq!(style.fg, Some(theme.terminal_fg));
+
+        // Light theme, white inverse text (a white block): dark text.
+        let light = crate::theme::Theme::fact_light().with_transparency(true);
+        let white = CellDto {
+            fg: ColorDto::Indexed(15),
+            ..black
+        };
+        let style = cell_style(&white, &light);
+        assert_eq!(style.bg, Some(Color::Indexed(15)));
+        assert_eq!(style.fg, Some(light.terminal_fg));
+        assert!(luma(style.fg.unwrap(), &light) < 100_000);
     }
 
     #[test]

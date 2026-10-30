@@ -190,3 +190,23 @@ fn killing_a_pane_with_unread_output_does_not_deadlock() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[test]
+fn batch_files_start_with_their_arguments() {
+    let dir = std::env::temp_dir().join(format!("fact-pty-batch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("fact tool.cmd");
+    std::fs::write(&script, "@echo off\r\necho BATCH_ARG=[%1]\r\nexit /b 3\r\n").unwrap();
+    let mut options = SpawnOptions::new(script.to_string_lossy(), 80, 24);
+    options.args = vec!["two words & more".into()];
+    let process = PtyProcess::spawn(options).expect("spawn a batch file through ConPTY");
+    let (output, exit) = collect(&process, Duration::from_secs(15));
+    let text = String::from_utf8_lossy(&output);
+    assert!(
+        text.contains("BATCH_ARG=[\"two words & more\"]"),
+        "output: {text:?}"
+    );
+    assert_eq!(exit, Some(3));
+    drop(process);
+    let _ = std::fs::remove_dir_all(&dir);
+}

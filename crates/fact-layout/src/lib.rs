@@ -690,7 +690,13 @@ impl SessionLayout {
                 || s.content.height < options.min_content_rows
                 || s.content.height == 0
         });
-        let use_focused_only = too_small_viewport || tab.zoomed || (too_small && !tab.fit_all);
+        // A split too small to divide stands in for every pane inside it, so
+        // the grid cannot be shown even when all panes are asked for.
+        let degenerate = slots
+            .iter()
+            .any(|s| s.content.width == 0 || s.content.height == 0);
+        let use_focused_only =
+            too_small_viewport || tab.zoomed || degenerate || (too_small && !tab.fit_all);
         if use_focused_only {
             let hidden_panes: Vec<u64> = visible
                 .iter()
@@ -1490,6 +1496,20 @@ mod tests {
             assert!(slot.content.width > 0 && slot.content.height > 0);
         }
         assert!(layout.tab(1).unwrap().fit_all);
+    }
+
+    #[test]
+    fn show_all_never_drops_panes_in_a_tiny_window() {
+        let mut layout = SessionLayout::new(1, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        layout.zoom(false).unwrap();
+        for (cols, rows) in [(10, 4), (12, 5), (20, 3), (60, 18)] {
+            let result = layout.layout(opts(cols, rows));
+            let mut seen: Vec<u64> = result.panes.iter().map(|slot| slot.pane).collect();
+            seen.extend(&result.hidden_panes);
+            seen.sort_unstable();
+            assert_eq!(seen, [1, 2, 3, 4, 5, 6, 7, 8], "{cols}x{rows}");
+            assert!(result.panes.iter().all(|slot| slot.content.width > 0));
+        }
     }
 
     #[test]

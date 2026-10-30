@@ -35,7 +35,7 @@ FACT has no such state. The ConPTY tests terminate their shells during cleanup.
 | Keyboard | win32-input-mode records keep Shift/Ctrl/Alt on Enter, Backspace, Tab and arrows; kitty `CSI u` encoding covers only the ambiguous modified keys; AltGr characters stay text; the terminal model tracks `CSI ? 9001 h/l` across split reads and answers kitty `CSI ? u` queries with the pushed flags. |
 | Layout | Keyboard resize moves the nearest matching gutter and clamps, balance gives chained splits equal widths, and tabs can be reordered. |
 | Client | Selection extraction and snapshot copy, wide-spacer handling, overlapping mouse buttons, direct Alt shortcuts, action labels, word selection, tab/new-tab geometry, the minimized tray, hover-only scrollbar hit testing, app scroll routing and theme/render helpers. |
-| CLI | Help surface (including the absence of removed session commands), `FACT_HOME` path resolution, `config validate` with built-in defaults and JSON, `config init` and overwrite refusal, invalid-prefix diagnostics and rejection of obsolete daemon settings. `wallpaper set/show/clear` against a temporary fragments folder (`FACT_WT_FRAGMENTS_DIR`), and a read-only `doctor` report. CLI tests never touch the real Windows Terminal folder. |
+| CLI | Help surface (including the absence of removed session commands), `FACT_HOME` path resolution, `config validate` with built-in defaults and JSON, `config init` and overwrite refusal, invalid-prefix diagnostics and rejection of obsolete daemon settings. `wallpaper set`, `wallpaper` (show) and `wallpaper clear` against a temporary fragments folder (`FACT_WT_FRAGMENTS_DIR`), and a read-only `doctor` report. CLI tests never touch the real Windows Terminal folder. |
 | Installer | `scripts/test-install.ps1` mocks release downloads and exercises pinned, unprefixed and latest versions, checking the URL/tag, SHA-256 verification and the installed `--version`. |
 | Windows CI | `.github/workflows/ci.yml` runs format, Clippy, the full suite and the offline installer test on `windows-latest` for every push to `main` and every pull request. |
 
@@ -148,7 +148,14 @@ In the running window:
 11. Press `F1`; confirm help lists the compiled bindings. Press prefix `K` and
     filter the palette. Press prefix `/` and search a marker in the focused pane.
 12. Press prefix `T`; confirm the theme changes for this run and is not written
-    to disk. In PowerShell, `Shift+Enter` gives a `>>` continuation; in Claude
+    to disk. Run `fact wallpaper set` with a picture and with a video; confirm the
+    picture in a classic console window, the full-resolution FACT tab from a
+    plain `fact` in Windows Terminal (`fact --here` stays), and video playback
+    that pauses when the window loses focus. With FACT running, run
+    `fact wallpaper set --opacity 80` and `fact wallpaper clear` from another
+    terminal and confirm the window follows; press prefix `B` to hide and show
+    the wallpaper. Add a `[colors]` background before launching (FACT reads
+    config.toml at start) and confirm every pane uses it. In PowerShell, `Shift+Enter` gives a `>>` continuation; in Claude
     Code, `Shift+Enter` inserts a new line and `Esc` interrupts.
 13. Note a pane PID, quit with prefix `Shift+Q`, and confirm that process no
     longer exists.

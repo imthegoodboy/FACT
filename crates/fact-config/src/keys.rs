@@ -332,6 +332,7 @@ pub const ACTIONS: &[&str] = &[
     "resize_down",
     "balance",
     "cycle_theme",
+    "toggle_wallpaper",
 ];
 
 /// Binding value that leaves an action without a key.
@@ -374,6 +375,7 @@ pub fn default_keybinds() -> BTreeMap<String, String> {
         ("resize_down", "prefix+shift+down"),
         ("balance", "prefix+="),
         ("cycle_theme", "prefix+t"),
+        ("toggle_wallpaper", "prefix+b"),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))

@@ -10,12 +10,14 @@ mod theme;
 mod wallpaper;
 
 pub use wallpaper::{
-    find_ffmpeg, is_video as is_video_file, Fit as WallpaperFit, WallpaperSpec, VIDEO_EXTENSIONS,
+    find_ffmpeg, image_dimensions, in_windows_terminal, is_video as is_video_file,
+    Fit as WallpaperFit, WallpaperSpec, VIDEO_EXTENSIONS,
 };
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
@@ -50,6 +52,12 @@ const READER_POLL: Duration = Duration::from_millis(100);
 const STATUS_LIFETIME: Duration = Duration::from_secs(2);
 /// Upper bound on one batch of queued events before the screen is redrawn.
 const MAX_BATCH: Duration = Duration::from_millis(8);
+/// How long to wait for the rest of a paste that arrives as keystrokes.
+const PASTE_GAP: Duration = Duration::from_millis(8);
+/// Longest stretch of keystrokes gathered into one paste batch.
+const MAX_PASTE_BATCH: Duration = Duration::from_millis(250);
+/// Keys this close together were not typed by hand (key repeat is ~30 ms).
+const PASTE_SPACING: Duration = Duration::from_millis(5);
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 /// Width of the new-tab button in the tab strip.
@@ -93,6 +101,7 @@ pub(crate) const ACTION_INFO: &[(&str, &str)] = &[
     ("resize_down", "Resize: move edge down"),
     ("balance", "Balance pane sizes"),
     ("cycle_theme", "Cycle color theme"),
+    ("toggle_wallpaper", "Hide / show wallpaper"),
 ];
 
 pub(crate) fn action_label(action: &str) -> &'static str {
@@ -103,13 +112,48 @@ pub(crate) fn action_label(action: &str) -> &'static str {
         .unwrap_or("Unknown action")
 }
 
+/// What is behind the panes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WallpaperState {
+    /// Nothing: the theme background.
+    None,
+    /// A picture or video FACT paints itself.
+    Painted(WallpaperSpec),
+    /// A picture the host terminal draws (Windows Terminal's FACT profile);
+    /// FACT stays transparent over it.
+    HostDraws,
+}
+
+/// Where the wallpaper comes from, so a running FACT follows
+/// `fact wallpaper set` and `clear` without a restart.
+pub struct WallpaperSource {
+    /// What is behind the panes at start.
+    pub initial: WallpaperState,
+    /// A folder (watched with its subfolders) where a change may mean a new
+    /// wallpaper. `None` never reloads.
+    pub watch: Option<PathBuf>,
+    /// Reads what is behind the panes now.
+    pub current: Box<dyn Fn() -> WallpaperState>,
+}
+
+impl WallpaperSource {
+    /// No wallpaper, never reloaded (the host terminal's background shows).
+    pub fn none() -> Self {
+        Self {
+            initial: WallpaperState::None,
+            watch: None,
+            current: Box::new(|| WallpaperState::None),
+        }
+    }
+}
+
 /// Run the interactive terminal UI. Terminal state is always restored before
-/// returning, including on errors. `wallpaper` is painted behind the panes.
+/// returning, including on errors. The wallpaper is painted behind the panes.
 pub fn run(
     client: EngineClient,
     events: EventStream,
     config: Config,
-    wallpaper: Option<WallpaperSpec>,
+    wallpaper: WallpaperSource,
 ) -> Result<()> {
     let keys = config
         .compiled_keybinds()
@@ -120,17 +164,12 @@ pub fn run(
     crossterm::style::Colored::set_ansi_color_disabled(false);
     let mut terminal = TerminalGuard::enter(config.mouse)?;
     let size = terminal.size().context("could not read terminal size")?;
-    let events = spawn_readers(events);
+    let events = spawn_readers(events, wallpaper.watch.clone());
 
     let mut app = App::new(client, config, keys, events, size.width, size.height);
-    if let Some(spec) = wallpaper {
-        match wallpaper::Wallpaper::load(&spec) {
-            Ok(loaded) => {
-                app.theme = app.theme.with_transparency(true);
-                app.wallpaper = Some(RefCell::new(loaded));
-            }
-            Err(error) => app.set_status(format!("Wallpaper: {error}")),
-        }
+    app.wallpaper_source = Some(wallpaper.current);
+    if wallpaper.initial != WallpaperState::None {
+        app.show_wallpaper(wallpaper.initial);
     }
     let result = app.event_loop(&mut terminal);
     app.stop_events();
@@ -155,13 +194,14 @@ struct UiEvents {
 
 /// Merge engine frames and terminal input into one queue so the UI thread can
 /// sleep until something actually happens, then redraw once.
-fn spawn_readers(mut stream: EventStream) -> UiEvents {
+fn spawn_readers(mut stream: EventStream, watch: Option<PathBuf>) -> UiEvents {
     // Bounded: a busy agent cannot grow an unbounded queue while drawing or
     // clipboard work falls behind. The engine drops and resends frames instead.
     let (tx, rx) = mpsc::sync_channel(64);
     let cancel = Arc::new(AtomicBool::new(false));
 
     let frames_tx = tx.clone();
+    let watch_tx = tx.clone();
     let frames_cancel = Arc::clone(&cancel);
     thread::Builder::new()
         .name("fact-ui-frames".into())
@@ -193,7 +233,10 @@ fn spawn_readers(mut stream: EventStream) -> UiEvents {
                     Ok(true) => event::read(),
                     Err(error) => Err(error),
                 };
+                // Keys carry when they arrived: a paste arrives as a burst
+                // of keys microseconds apart, typing never does.
                 let message = match event {
+                    Ok(Event::Key(key)) => UiEvent::Key(key, Instant::now()),
                     Ok(event) => UiEvent::Input(event),
                     Err(error) => UiEvent::InputFailed(error.to_string()),
                 };
@@ -205,15 +248,70 @@ fn spawn_readers(mut stream: EventStream) -> UiEvents {
         })
         .expect("spawning the input reader thread cannot fail");
 
+    if let Some(dir) = watch {
+        watch_folder(dir, watch_tx);
+    }
+
     UiEvents {
         receiver: rx,
         cancel,
     }
 }
 
+/// Tell the UI when anything changes in `dir` or below it. The thread waits
+/// in the kernel between changes, so it costs nothing while idle.
+#[cfg(windows)]
+fn watch_folder(dir: PathBuf, tx: mpsc::SyncSender<UiEvent>) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
+        FILE_NOTIFY_CHANGE_DIR_NAME, FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE,
+    };
+    use windows_sys::Win32::System::Threading::{WaitForSingleObject, INFINITE};
+    let watch = move || {
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+        let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+            | FILE_NOTIFY_CHANGE_DIR_NAME
+            | FILE_NOTIFY_CHANGE_LAST_WRITE;
+        loop {
+            // FACT's folder may not exist before the first `wallpaper set`.
+            if !dir.is_dir() {
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            let handle = unsafe { FindFirstChangeNotificationW(wide.as_ptr(), 1, filter) };
+            if handle == INVALID_HANDLE_VALUE {
+                thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+            let mut open = true;
+            while open && unsafe { WaitForSingleObject(handle, INFINITE) } == WAIT_OBJECT_0 {
+                // Let the writer finish: the record is replaced by a rename.
+                thread::sleep(Duration::from_millis(150));
+                if tx.send(UiEvent::WallpaperChanged).is_err() {
+                    unsafe { FindCloseChangeNotification(handle) };
+                    return;
+                }
+                open = unsafe { FindNextChangeNotification(handle) } != 0;
+            }
+            unsafe { FindCloseChangeNotification(handle) };
+        }
+    };
+    let _ = thread::Builder::new()
+        .name("fact-ui-wallpaper".into())
+        .spawn(watch);
+}
+
+#[cfg(not(windows))]
+fn watch_folder(_dir: PathBuf, _tx: mpsc::SyncSender<UiEvent>) {}
+
 enum UiEvent {
     Message(Box<fact_protocol::ServerMessage>),
+    /// Something changed where the wallpaper is recorded.
+    WallpaperChanged,
     Closed(String),
+    Key(KeyEvent, Instant),
     Input(Event),
     InputFailed(String),
 }
@@ -847,6 +945,11 @@ struct App {
     mouse_position: Option<(u16, u16)>,
     scroll_mode: Option<u64>,
     app_mouse_down: AppMouseCapture,
+    /// Characters whose key is down, to tell a key's release from a console
+    /// alt code, which arrives as a release alone.
+    held_chars: HashSet<char>,
+    /// The window was resized during this batch; tell the engine once.
+    resize_pending: bool,
     status: Option<(String, Instant)>,
     exit_message: Option<String>,
     fatal: Option<anyhow::Error>,
@@ -854,6 +957,14 @@ struct App {
     dirty: bool,
     /// Painted behind the panes; `RefCell` because drawing advances its cache.
     wallpaper: Option<RefCell<wallpaper::Wallpaper>>,
+    /// What is behind the panes (`wallpaper` holds a painted one).
+    wallpaper_state: WallpaperState,
+    /// Hidden with `toggle_wallpaper`: kept loaded, not painted, paused.
+    wallpaper_hidden: bool,
+    /// Reads the current wallpaper again after a change.
+    wallpaper_source: Option<Box<dyn Fn() -> WallpaperState>>,
+    /// The `[colors]` from config.toml, applied over every theme.
+    colors: fact_config::ColorOverrides,
 }
 
 impl App {
@@ -865,8 +976,10 @@ impl App {
         width: u16,
         height: u16,
     ) -> Self {
-        let theme =
-            Theme::by_name(&config.theme).with_transparency(config.transparent_background());
+        let colors = config.colors.overrides();
+        let theme = Theme::by_name(&config.theme)
+            .with_colors(&colors)
+            .with_transparency(config.transparent_background());
         Self {
             client,
             config,
@@ -892,11 +1005,76 @@ impl App {
             mouse_position: None,
             scroll_mode: None,
             app_mouse_down: AppMouseCapture::default(),
+            held_chars: HashSet::new(),
+            resize_pending: false,
             status: None,
             exit_message: None,
             fatal: None,
             dirty: true,
             wallpaper: None,
+            wallpaper_state: WallpaperState::None,
+            wallpaper_hidden: false,
+            wallpaper_source: None,
+            colors,
+        }
+    }
+
+    /// The theme `name` with the user's colors, transparent when the host's
+    /// background or a visible wallpaper shows behind the panes.
+    fn set_theme(&mut self, name: &str) {
+        let behind = match self.wallpaper_state {
+            WallpaperState::None => false,
+            WallpaperState::Painted(_) => !self.wallpaper_hidden,
+            WallpaperState::HostDraws => true,
+        };
+        self.theme = Theme::by_name(name)
+            .with_colors(&self.colors)
+            .with_transparency(self.config.transparent_background() || behind);
+        self.sync_wallpaper_base();
+    }
+
+    /// Show `state` behind the panes. Keeps the current wallpaper when a new
+    /// one cannot be loaded.
+    fn show_wallpaper(&mut self, state: WallpaperState) {
+        if let WallpaperState::Painted(spec) = &state {
+            match wallpaper::Wallpaper::load(spec) {
+                Ok(mut loaded) => {
+                    loaded.set_paused(self.wallpaper_hidden);
+                    self.wallpaper = Some(RefCell::new(loaded));
+                }
+                Err(error) => {
+                    self.set_status(format!("Wallpaper: {error}"));
+                    return;
+                }
+            }
+        } else {
+            self.wallpaper = None;
+        }
+        self.wallpaper_state = state;
+        let name = self.theme.name;
+        self.set_theme(name);
+        self.dirty = true;
+    }
+
+    /// The recorded wallpaper may have changed (`fact wallpaper set` or
+    /// `clear`, from any terminal): show the new one.
+    fn reload_wallpaper(&mut self) {
+        let Some(current) = self.wallpaper_source.as_ref().map(|read| read()) else {
+            return;
+        };
+        if current == self.wallpaper_state {
+            return;
+        }
+        let removed = current == WallpaperState::None;
+        self.show_wallpaper(current);
+        if removed {
+            self.set_status("Wallpaper removed.");
+        } else if self.wallpaper.is_some() {
+            self.set_status(if self.wallpaper_hidden {
+                "Wallpaper changed (hidden; prefix B shows it)."
+            } else {
+                "Wallpaper changed."
+            });
         }
     }
 
@@ -923,23 +1101,41 @@ impl App {
                 .and_then(|wallpaper| wallpaper.borrow().next_frame_at())
                 .map(|at| at.saturating_duration_since(Instant::now()));
             let wait = frame_wait.map_or(status_wait, |frame| frame.min(status_wait));
+            let mut batch = Vec::new();
             match self.events.receiver.recv_timeout(wait) {
-                Ok(event) => self.handle_ui_event(event),
+                Ok(event) => batch.push(event),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     self.fatal = Some(anyhow!("FACT event readers stopped unexpectedly"));
                 }
             }
-            let batch = Instant::now();
-            while self.fatal.is_none() && self.exit_message.is_none() && batch.elapsed() < MAX_BATCH
-            {
+            let started = Instant::now();
+            while self.fatal.is_none() {
+                let pasting = trailing_text_keys(&batch) >= 3;
+                let limit = if pasting { MAX_PASTE_BATCH } else { MAX_BATCH };
+                if started.elapsed() >= limit {
+                    break;
+                }
                 match self.events.receiver.try_recv() {
-                    Ok(event) => self.handle_ui_event(event),
+                    Ok(event) => batch.push(event),
+                    // Text pasted into the host terminal arrives as a stream
+                    // of keystrokes. Wait briefly for the rest so the whole
+                    // paste is handled at once.
+                    Err(TryRecvError::Empty) if pasting => {
+                        match self.events.receiver.recv_timeout(PASTE_GAP) {
+                            Ok(event) => batch.push(event),
+                            Err(_) => break,
+                        }
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         self.fatal = Some(anyhow!("FACT event readers stopped unexpectedly"));
                     }
                 }
+            }
+            self.handle_batch(batch);
+            if std::mem::take(&mut self.resize_pending) {
+                self.resize_session();
             }
             if self
                 .status
@@ -949,10 +1145,16 @@ impl App {
                 self.status = None;
                 self.dirty = true;
             }
-            if let Some(wallpaper) = &self.wallpaper {
-                if wallpaper.borrow_mut().tick(Instant::now()) {
+            let message = self.wallpaper.as_ref().and_then(|wallpaper| {
+                let mut wallpaper = wallpaper.borrow_mut();
+                if wallpaper.tick(Instant::now()) {
                     self.dirty = true;
                 }
+                wallpaper.take_message()
+            });
+            if let Some(message) = message {
+                self.set_status(message);
+                self.dirty = true;
             }
         }
 
@@ -962,17 +1164,84 @@ impl App {
         Ok(())
     }
 
+    /// Apply a batch of events in order. Windows Terminal types pasted text
+    /// into console programs as keystrokes; a burst of them (keys a few
+    /// microseconds apart) holding a line break followed by more text goes to
+    /// the pane as one paste instead of running line by line.
+    fn handle_batch(&mut self, batch: Vec<UiEvent>) {
+        let mut run: Vec<KeyEvent> = Vec::new();
+        let mut last_key_at: Option<Instant> = None;
+        for event in batch {
+            if self.fatal.is_some() || self.exit_message.is_some() {
+                break;
+            }
+            let (key, at) = match event {
+                UiEvent::Key(key, at) => (key, at),
+                // Frames only change what is drawn; a paste stays whole.
+                UiEvent::Message(message) => {
+                    self.handle_ui_event(UiEvent::Message(message));
+                    continue;
+                }
+                other => {
+                    self.flush_keys(&mut run);
+                    self.handle_ui_event(other);
+                    continue;
+                }
+            };
+            let Some(key) = key_press(&mut self.held_chars, key) else {
+                continue;
+            };
+            // A pause between keys ends a burst: what came before was typed.
+            if last_key_at.is_some_and(|last| at.saturating_duration_since(last) > PASTE_SPACING) {
+                self.flush_keys(&mut run);
+            }
+            last_key_at = Some(at);
+            if is_text_key(&key) {
+                run.push(key);
+            } else {
+                self.flush_keys(&mut run);
+                self.handle_key(key);
+                self.dirty = true;
+            }
+        }
+        self.flush_keys(&mut run);
+    }
+
+    fn flush_keys(&mut self, run: &mut Vec<KeyEvent>) {
+        let keys = std::mem::take(run);
+        if keys.is_empty() {
+            return;
+        }
+        self.dirty = true;
+        let plain = self.overlay.is_none() && self.scroll_mode.is_none() && !self.prefix_armed;
+        match pasted_text(&keys).filter(|_| plain) {
+            Some(text) => self.paste_text(text),
+            None => {
+                for key in keys {
+                    self.handle_key(key);
+                }
+            }
+        }
+    }
+
     fn handle_ui_event(&mut self, event: UiEvent) {
         match event {
             UiEvent::Message(message) => {
                 self.handle_message(*message);
                 self.dirty = true;
             }
+            UiEvent::WallpaperChanged => self.reload_wallpaper(),
             UiEvent::Closed(reason) => {
                 self.fatal = Some(anyhow!("FACT engine event stream closed: {reason}"));
             }
             UiEvent::InputFailed(reason) => {
                 self.fatal = Some(anyhow!("could not read terminal input: {reason}"));
+            }
+            UiEvent::Key(key, _) => {
+                if let Some(key) = key_press(&mut self.held_chars, key) {
+                    self.handle_key(key);
+                    self.dirty = true;
+                }
             }
             UiEvent::Input(event) => self.handle_input(event),
         }
@@ -980,10 +1249,6 @@ impl App {
 
     fn handle_input(&mut self, event: Event) {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                self.handle_key(key);
-                self.dirty = true;
-            }
             Event::Mouse(mouse) if self.config.mouse => {
                 // Pointer motion only matters to the screen while it changes
                 // a hover state or a drag; skip redraws for idle movement.
@@ -999,11 +1264,13 @@ impl App {
                 self.dirty = true;
             }
             Event::FocusGained => {
+                self.held_chars.clear();
                 if let Some(wallpaper) = &self.wallpaper {
-                    wallpaper.borrow_mut().set_paused(false);
+                    wallpaper.borrow_mut().set_paused(self.wallpaper_hidden);
                 }
             }
             Event::FocusLost => {
+                self.held_chars.clear();
                 // An animated wallpaper costs nothing while nobody watches.
                 if let Some(wallpaper) = &self.wallpaper {
                     wallpaper.borrow_mut().set_paused(true);
@@ -1016,13 +1283,45 @@ impl App {
                 self.dirty = true;
             }
             Event::Resize(cols, rows) => {
+                // Dragging a window edge sends many sizes; the engine only
+                // needs the last one of each batch.
                 self.selection = None;
                 self.width = cols;
                 self.height = rows;
-                self.resize_session();
+                self.resize_pending = true;
                 self.dirty = true;
             }
             _ => {}
+        }
+    }
+
+    /// Hide the wallpaper (and pause a video) or show it again.
+    fn toggle_wallpaper(&mut self) {
+        let Some(wallpaper) = &self.wallpaper else {
+            self.set_status(if self.wallpaper_state == WallpaperState::HostDraws {
+                "Windows Terminal draws this picture. Run `fact --here` in another tab to let FACT paint it (then prefix B hides it)."
+            } else {
+                "No wallpaper. Set one with: fact wallpaper set <picture or video>"
+            });
+            return;
+        };
+        self.wallpaper_hidden = !self.wallpaper_hidden;
+        wallpaper.borrow_mut().set_paused(self.wallpaper_hidden);
+        let name = self.theme.name;
+        self.set_theme(name);
+        self.set_status(if self.wallpaper_hidden {
+            "Wallpaper hidden. Press the prefix, then B, to show it."
+        } else {
+            "Wallpaper shown."
+        });
+    }
+
+    /// Let the wallpaper fade toward the current theme's background.
+    fn sync_wallpaper_base(&self) {
+        if let (Some(wallpaper), ratatui::style::Color::Rgb(r, g, b)) =
+            (&self.wallpaper, self.theme.bg)
+        {
+            wallpaper.borrow_mut().set_base([r, g, b]);
         }
     }
 
@@ -1080,8 +1379,33 @@ impl App {
             }
         }
 
+        // Panes that left the screen send their cells again when they return.
+        self.buffers
+            .retain(|id, _| frame.panes.iter().any(|pane| pane.id == *id));
         self.last_seq = frame.seq;
         self.frame = Some(frame);
+    }
+
+    /// Focus `pane` and treat it as focused right away. The frame confirming
+    /// it comes later; keys and pastes meanwhile must already reach it.
+    fn focus(&mut self, pane: u64) {
+        self.bells.remove(&pane);
+        if self.send(Command::FocusPane { pane }).is_none() {
+            return;
+        }
+        if let Some(frame) = &mut self.frame {
+            if frame.panes.iter().any(|view| view.id == pane) {
+                frame.focus = Some(pane);
+                for view in &mut frame.panes {
+                    view.focused = view.id == pane;
+                }
+            }
+        }
+        // Scroll mode belongs to the pane it started in.
+        if self.scroll_mode.is_some_and(|scrolled| scrolled != pane) {
+            self.scroll_mode = None;
+            self.set_status("Scroll mode ended.");
+        }
     }
 
     fn focused_pane(&self) -> Option<&PaneView> {
@@ -1110,8 +1434,9 @@ impl App {
             Some(ScrollMode::History) => {
                 self.selection = None;
                 self.scroll_mode = Some(pane_id);
+                let lines = if history == 1 { "line" } else { "lines" };
                 self.set_status(format!(
-                    "Scroll mode: {history} lines. Up/Down, PgUp/PgDn, Home/End, Esc exits."
+                    "Scroll mode: {history} {lines}. Up/Down, PgUp/PgDn, Home/End, Esc exits."
                 ));
             }
             Some(ScrollMode::App) => {
@@ -1381,8 +1706,10 @@ impl App {
                 self.paste_or_forward(key);
                 return;
             }
-            CKeyCode::Char('c' | 'C') if copy && control && !shift && self.selection.is_some() => {
+            // Without selected text, Ctrl+C reaches the app as usual.
+            CKeyCode::Char('c' | 'C') if copy && control && !shift && self.has_selection() => {
                 self.copy_selection();
+                self.selection = None;
                 return;
             }
             CKeyCode::Insert if paste && shift => {
@@ -1391,6 +1718,7 @@ impl App {
             }
             CKeyCode::Insert if copy && control => {
                 self.copy_selection();
+                self.selection = None;
                 return;
             }
             _ => {}
@@ -1627,8 +1955,14 @@ impl App {
                     self.set_status("Panes balanced.");
                 }
             }
+            "toggle_wallpaper" => self.toggle_wallpaper(),
             "cycle_theme" => {
-                self.theme = self.theme.next();
+                let next = self.theme.next().name;
+                self.set_theme(next);
+                // Programs that ask for the default colors get the new ones.
+                let _ = self.send(Command::SetTheme {
+                    name: self.theme.name.to_string(),
+                });
                 self.set_status(format!("Theme: {}", self.theme.name));
             }
             other => self.set_status(format!("Unknown action: {other}")),
@@ -1848,10 +2182,8 @@ impl App {
                         palette.selected = 0;
                         self.overlay = Some(Overlay::Palette(palette));
                     }
-                    CKeyCode::Char(c)
-                        if !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT) =>
-                    {
+                    CKeyCode::Char(_) if keymap::typed_char(&key).is_some() => {
+                        let c = keymap::typed_char(&key).unwrap_or_default();
                         if palette.query.chars().count() < 64 {
                             palette.query.push(c);
                         }
@@ -1878,7 +2210,7 @@ impl App {
                                 .map(|hit| (result.pane, hit.line))
                         });
                         if let Some((pane, line)) = hit {
-                            let _ = self.send(Command::FocusPane { pane });
+                            self.focus(pane);
                             let _ = self.send(Command::ScrollToLine { pane, line });
                             self.set_status(format!("Jumped to line {line}."));
                         } else {
@@ -1909,10 +2241,8 @@ impl App {
                     search.query.clear();
                     self.overlay = Some(Overlay::Search(search));
                 }
-                CKeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                {
+                CKeyCode::Char(_) if keymap::typed_char(&key).is_some() => {
+                    let c = keymap::typed_char(&key).unwrap_or_default();
                     if search.query.chars().count() < MAX_SEARCH_QUERY {
                         search.result = None;
                         search.selected = 0;
@@ -1944,10 +2274,8 @@ impl App {
                     prompt.value.pop();
                     self.overlay = Some(Overlay::Prompt(prompt));
                 }
-                CKeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                {
+                CKeyCode::Char(_) if keymap::typed_char(&key).is_some() => {
+                    let c = keymap::typed_char(&key).unwrap_or_default();
                     if prompt.value.chars().count() < 60 {
                         prompt.value.push(c);
                     }
@@ -2045,9 +2373,27 @@ impl App {
                 }
                 return;
             }
-            if self.drag_split.take().is_some() {
+            if let Some(mut drag) = self.drag_split.take() {
+                // Moves are throttled; the release lands exactly.
+                if let Some(content_y) = self.content_row(mouse.row) {
+                    drag.last_sent = Instant::now() - Duration::from_secs(1);
+                    self.drag_split_to(drag, mouse.column, content_y);
+                    self.drag_split = None;
+                }
                 return;
             }
+            // Wherever the button comes up (the tab strip too), a selection
+            // ends here.
+            let dragged = self
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.anchor != selection.end);
+            if dragged && self.config.copy_on_select {
+                self.copy_selection();
+            } else if !dragged {
+                self.selection = None;
+            }
+            return;
         }
         if self.tabs_visible() && mouse.row == 0 {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -2090,18 +2436,14 @@ impl App {
                     && !mouse.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     if let Some(pane) = self.pane_slot_at(mouse.column, content_y) {
-                        let _ = self.send(Command::FocusPane { pane });
-                        self.bells.remove(&pane);
+                        self.focus(pane);
                         self.pane_drag = Some(PaneDrag { pane, target: None });
                         self.set_status("Move pane: drop it on another pane to swap, or on a tab.");
                     }
                     return;
                 }
                 if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
-                    let _ = self.send(Command::FocusPane {
-                        pane: geometry.pane,
-                    });
-                    self.bells.remove(&geometry.pane);
+                    self.focus(geometry.pane);
                     let on_thumb = content_y >= geometry.thumb_y
                         && content_y < geometry.thumb_y.saturating_add(geometry.thumb_height);
                     let base_offset = if on_thumb {
@@ -2142,22 +2484,12 @@ impl App {
                     self.selection = None;
                     return;
                 };
-                let _ = self.send(Command::FocusPane { pane });
-                self.bells.remove(&pane);
+                self.focus(pane);
                 let Some((_pane, local_x, local_y)) = self.pane_at(mouse.column, content_y) else {
                     self.selection = None;
                     return;
                 };
                 let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
-                let clicks = self.register_click(pane, local_x, local_y);
-                if !shift && clicks >= 2 {
-                    if clicks == 2 {
-                        self.select_word(pane, local_x, local_y);
-                    } else {
-                        self.select_line(pane, local_y);
-                    }
-                    return;
-                }
                 if let Some(view) = self
                     .frame
                     .as_ref()
@@ -2165,6 +2497,22 @@ impl App {
                 {
                     let app_mouse =
                         app_tracks_mouse(view.modes) && view.scroll_offset == 0 && !shift;
+                    // Double clicks belong to apps that track the mouse;
+                    // elsewhere they select a word, triple clicks a line.
+                    let clicks = if app_mouse {
+                        self.last_click = None;
+                        1
+                    } else {
+                        self.register_click(pane, local_x, local_y)
+                    };
+                    if clicks >= 2 {
+                        if clicks == 2 {
+                            self.select_word(pane, local_x, local_y);
+                        } else {
+                            self.select_line(pane, local_y);
+                        }
+                        return;
+                    }
                     if app_mouse {
                         self.app_mouse_down.press(MouseButton::Left, pane);
                         self.forward_mouse_button(
@@ -2188,8 +2536,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Right) => {
                 if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                     if let Some(pane) = self.pane_slot_at(mouse.column, content_y) {
-                        let _ = self.send(Command::FocusPane { pane });
-                        self.bells.remove(&pane);
+                        self.focus(pane);
                     }
                     self.open_context_menu(mouse);
                     return;
@@ -2204,8 +2551,7 @@ impl App {
                 let Some(pane) = self.pane_slot_at(mouse.column, content_y) else {
                     return;
                 };
-                let _ = self.send(Command::FocusPane { pane });
-                self.bells.remove(&pane);
+                self.focus(pane);
                 let app_mouse = self
                     .frame
                     .as_ref()
@@ -2294,17 +2640,6 @@ impl App {
                             self.selection.as_mut().unwrap().end = (x, y);
                         }
                     }
-                }
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                let dragged = self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.anchor != selection.end);
-                if dragged && self.config.copy_on_select {
-                    self.copy_selection();
-                } else if !dragged {
-                    self.selection = None;
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -2612,17 +2947,30 @@ impl App {
         let Some(tab) = self.tab_drag else {
             return;
         };
-        let Some(hovered) = self.tab_at(column).filter(|hovered| *hovered != tab) else {
+        let Some(frame) = self.frame.as_ref() else {
             return;
         };
-        let Some(index) = self
-            .frame
-            .as_ref()
-            .and_then(|frame| frame.tabs.iter().position(|view| view.id == hovered))
+        let Some(hovered) = tab_ranges(&frame.tabs, self.width)
+            .into_iter()
+            .find(|range| range.rect.contains(column, 0) && range.id != tab)
         else {
             return;
         };
-        let _ = self.send(Command::MoveTab { tab, index });
+        let position = |id: u32| frame.tabs.iter().position(|view| view.id == id);
+        let (Some(from), Some(index)) = (position(tab), position(hovered.id)) else {
+            return;
+        };
+        // Swap only past the middle of the other tab, so tabs of different
+        // widths do not trade places back and forth under the pointer.
+        let middle = hovered.rect.x + hovered.rect.width / 2;
+        let past_middle = if index > from {
+            column >= middle
+        } else {
+            column <= middle
+        };
+        if past_middle {
+            let _ = self.send(Command::MoveTab { tab, index });
+        }
     }
 
     fn pane_tab(&self, pane: u64) -> Option<u32> {
@@ -2700,6 +3048,83 @@ impl App {
         }
         self.drag_split = Some(drag);
     }
+}
+
+/// The key press FACT acts on, or `None` to skip the event. Console alt
+/// codes (Alt+numpad, and pasted characters the keyboard layout cannot
+/// type) arrive as a release with no press; other releases are skipped. A
+/// release left over from a shortcut that switched to FACT (Win+1) is for a
+/// key the layout has, so it is skipped too.
+fn key_press(held: &mut HashSet<char>, key: KeyEvent) -> Option<KeyEvent> {
+    let CKeyCode::Char(c) = key.code else {
+        return (key.kind != KeyEventKind::Release).then_some(key);
+    };
+    let folded = c.to_lowercase().next().unwrap_or(c);
+    if key.kind != KeyEventKind::Release {
+        held.insert(folded);
+        return Some(key);
+    }
+    if held.is_empty() {
+        if key.modifiers.contains(KeyModifiers::CONTROL) || keymap::layout_types(c) {
+            return None;
+        }
+        return Some(KeyEvent::new(CKeyCode::Char(c), KeyModifiers::NONE));
+    }
+    // The release of a held key, possibly with other modifiers by now
+    // (Shift or AltGr let go first).
+    if !held.remove(&folded) {
+        let any = held.iter().next().copied();
+        if let Some(any) = any {
+            held.remove(&any);
+        }
+    }
+    None
+}
+
+/// Keys that type text: characters (with Shift at most), Enter and Tab.
+fn is_text_key(key: &KeyEvent) -> bool {
+    match key.code {
+        CKeyCode::Char(_) => (key.modifiers - KeyModifiers::SHIFT).is_empty(),
+        CKeyCode::Enter | CKeyCode::Tab => key.modifiers.is_empty(),
+        _ => false,
+    }
+}
+
+/// Text keystrokes (including alt-code releases) at the end of a batch.
+fn trailing_text_keys(batch: &[UiEvent]) -> usize {
+    batch
+        .iter()
+        .rev()
+        .filter(|event| !matches!(event, UiEvent::Message(_)))
+        .take_while(|event| match event {
+            UiEvent::Key(key, _) => {
+                matches!(
+                    key.code,
+                    CKeyCode::Char(_) | CKeyCode::Enter | CKeyCode::Tab
+                ) && !key.modifiers.contains(KeyModifiers::CONTROL)
+            }
+            _ => false,
+        })
+        .count()
+}
+
+/// The text of keystrokes that can only be a paste: a line break followed
+/// by more text. Typing a command and Enter stays keystrokes.
+fn pasted_text(keys: &[KeyEvent]) -> Option<String> {
+    let enter = keys.iter().position(|key| key.code == CKeyCode::Enter)?;
+    if keys.len() < 3 || enter + 1 == keys.len() {
+        return None;
+    }
+    let text = keys
+        .iter()
+        .filter_map(|key| match key.code {
+            CKeyCode::Char(c) => Some(c),
+            CKeyCode::Enter => Some('\n'),
+            CKeyCode::Tab => Some('\t'),
+            _ => None,
+        })
+        .collect();
+    Some(text)
 }
 
 fn palette_items(keys: &CompiledKeybinds) -> Vec<PaletteItem> {
@@ -2914,6 +3339,92 @@ mod tests {
         assert_eq!(capture.release(MouseButton::Left), Some(9));
         assert_eq!(capture.release(MouseButton::Middle), Some(8));
         assert_eq!(capture.release(MouseButton::Right), None);
+    }
+
+    fn press(code: CKeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn keystrokes_with_a_line_break_inside_are_a_paste() {
+        let keys = |text: &str| -> Vec<KeyEvent> {
+            text.chars()
+                .map(|c| match c {
+                    '\n' => press(CKeyCode::Enter),
+                    '\t' => press(CKeyCode::Tab),
+                    c => press(CKeyCode::Char(c)),
+                })
+                .collect()
+        };
+        assert_eq!(pasted_text(&keys("ab\ncd")).as_deref(), Some("ab\ncd"));
+        assert_eq!(
+            pasted_text(&keys("a\tb\nc\n")).as_deref(),
+            Some("a\tb\nc\n")
+        );
+        // A command and Enter, typed quickly, still runs.
+        assert_eq!(pasted_text(&keys("ls\n")), None);
+        assert_eq!(pasted_text(&keys("hello")), None);
+        assert!(is_text_key(&KeyEvent::new(
+            CKeyCode::Char('A'),
+            KeyModifiers::SHIFT
+        )));
+        assert!(!is_text_key(&KeyEvent::new(
+            CKeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_text_key(&KeyEvent::new(
+            CKeyCode::Enter,
+            KeyModifiers::SHIFT
+        )));
+    }
+
+    #[test]
+    fn alt_codes_type_and_key_releases_do_not() {
+        let release = |c: char, modifiers: KeyModifiers| {
+            KeyEvent::new_with_kind(CKeyCode::Char(c), modifiers, KeyEventKind::Release)
+        };
+        let mut held = HashSet::new();
+        // A release with no press of a character no keyboard has: an alt code.
+        let typed = key_press(&mut held, release('✓', KeyModifiers::ALT)).unwrap();
+        assert_eq!(typed.code, CKeyCode::Char('✓'));
+        assert_eq!(typed.modifiers, KeyModifiers::NONE);
+        assert_eq!(typed.kind, KeyEventKind::Press);
+        // A leftover release (Win+1 switched to FACT) types nothing.
+        assert!(key_press(&mut held, release('1', KeyModifiers::NONE)).is_none());
+        // An ordinary key: press types, release does not.
+        let shifted = KeyEvent::new(CKeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert!(key_press(&mut held, shifted).is_some());
+        // Shift let go first: the release reports 'a'.
+        assert!(key_press(&mut held, release('a', KeyModifiers::NONE)).is_none());
+        assert!(held.is_empty());
+        // AltGr+Q types '@'; letting AltGr go first releases 'q'.
+        let at = KeyEvent::new(
+            CKeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert!(key_press(&mut held, at).is_some());
+        assert!(key_press(&mut held, release('q', KeyModifiers::NONE)).is_none());
+        assert!(held.is_empty());
+        let enter_up =
+            KeyEvent::new_with_kind(CKeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
+        assert!(key_press(&mut held, enter_up).is_none());
+    }
+
+    #[test]
+    fn altgr_characters_are_text_not_shortcuts() {
+        let altgr = KeyEvent::new(
+            CKeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        if cfg!(windows) {
+            let chord = keymap::chord_for(altgr).unwrap();
+            assert!(!chord.mods.control && !chord.mods.alt);
+            assert_eq!(keymap::typed_char(&altgr), Some('@'));
+        }
+        let shortcut = KeyEvent::new(CKeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert_eq!(keymap::typed_char(&shortcut), None);
+        let plain = KeyEvent::new(CKeyCode::Char('F'), KeyModifiers::SHIFT);
+        assert_eq!(keymap::typed_char(&plain), Some('F'));
     }
 
     #[test]

@@ -49,6 +49,30 @@ impl Theme {
             .with_transparency(self.transparent)
     }
 
+    /// Apply the user's own colors (`[colors]` in config.toml). A background
+    /// covers panes, tab strip and status line alike, so they stay one
+    /// surface in every theme.
+    pub fn with_colors(mut self, colors: &fact_config::ColorOverrides) -> Self {
+        let rgb = |[r, g, b]: [u8; 3]| Color::Rgb(r, g, b);
+        if let Some(background) = colors.background.map(rgb) {
+            self.bg = background;
+            self.terminal_bg = background;
+            self.tab_bg = background;
+            self.status_bg = background;
+        }
+        if let Some(foreground) = colors.foreground.map(rgb) {
+            self.fg = foreground;
+            self.terminal_fg = foreground;
+        }
+        if let Some(accent) = colors.accent.map(rgb) {
+            self.accent = accent;
+        }
+        if let Some(selection) = colors.selection.map(rgb) {
+            self.selection = selection;
+        }
+        self
+    }
+
     /// Leave terminal and screen backgrounds to the host so its background
     /// image or acrylic shows through. Panels, selection and status keep their
     /// opaque colors so they stay readable over any wallpaper.
@@ -202,6 +226,33 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_colors_replace_the_theme_surface() {
+        let colors = fact_config::ColorOverrides {
+            background: Some([16, 24, 32]),
+            foreground: Some([230, 225, 207]),
+            accent: Some([255, 180, 84]),
+            selection: None,
+        };
+        let theme = Theme::fact_dark().with_colors(&colors);
+        let background = Color::Rgb(16, 24, 32);
+        assert_eq!(theme.bg, background);
+        assert_eq!(theme.terminal_bg, background);
+        assert_eq!(theme.tab_bg, background, "the tab strip follows");
+        assert_eq!(theme.status_bg, background);
+        assert_eq!(theme.terminal_fg, Color::Rgb(230, 225, 207));
+        assert_eq!(theme.accent, Color::Rgb(255, 180, 84));
+        assert_eq!(theme.selection, Theme::fact_dark().selection);
+        // Themes whose strip and status line have their own shade follow too.
+        let nord = Theme::nord().with_colors(&colors);
+        assert_eq!(nord.tab_bg, background);
+        assert_eq!(nord.status_bg, background);
+        // Transparency still clears the painted background afterwards.
+        let clear = theme.with_transparency(true);
+        assert_eq!(clear.terminal_bg, Color::Reset);
+        assert_eq!(clear.bg, background, "panels keep an opaque color");
+    }
 
     #[test]
     fn every_theme_cycles() {

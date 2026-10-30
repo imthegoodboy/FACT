@@ -28,12 +28,13 @@ against the process working directory.
 
 | Path | Contents |
 | --- | --- |
-| `config.toml` | This configuration. |
-| `wallpaper\` | FACT's copy of the image from `fact wallpaper set`, if you use one. |
+| `config.toml` | This configuration (unless `--config` names another file). |
+| `wallpaper\` | Only after `fact wallpaper set`: FACT's copy of an image and its `settings.json`. Always in the base directory, even with `--config`. Videos stay where they are. |
 | No other paths | FACT creates no database, log, runtime identity, saved layout or exports. |
 
-FACT does not accept a `--data-dir` option. The base directory only locates the
-optional configuration file; the rest of the process is in memory.
+FACT does not accept a `--data-dir` option. The base directory only holds the
+optional configuration file and the wallpaper; the rest of the process is in
+memory.
 
 ## Top-level settings
 
@@ -50,8 +51,13 @@ confirm_close = true
 copy_on_select = false
 alt_shortcuts = false
 background = "theme"
+wallpaper_tab = true
 
 default_profile = "auto"
+
+[colors]
+background = "#14213d"
+foreground = "#fca311"
 ```
 
 | Key | Default | Valid values / meaning |
@@ -67,10 +73,27 @@ default_profile = "auto"
 | `copy_on_select` | `false` | Copy a completed mouse selection automatically. |
 | `alt_shortcuts` | `false` | `true` enables the direct `Alt+M` / `Alt+N` / `Alt+T` shortcuts. Off by default because Claude Code, readline and other apps use those chords. |
 | `background` | `theme` | `theme` paints the theme background. `transparent` leaves default backgrounds to the host terminal so its background image or acrylic shows through. `fact --transparent` does the same for one launch. |
+| `wallpaper_tab` | `true` | In Windows Terminal, a plain `fact` opens a FACT tab where a picture wallpaper is drawn at full resolution. `false` always starts in the current tab, like `fact --here`. |
 | `default_profile` | `auto` | `auto` or a key from `[profiles]`. |
 
 Prefix then `T` (the `cycle_theme` action) cycles themes for the current run
 without writing the config. The next launch uses the `theme` value again.
+
+### Your own colors
+
+The optional `[colors]` table replaces theme colors with your own, as
+`"#rrggbb"` (or `"#rgb"`). Any you leave out keep the theme's, and they apply
+on top of every theme, including while cycling.
+
+| Key | What it colors |
+| --- | --- |
+| `background` | Panes, tab strip and status line (everything that used the theme's background). |
+| `foreground` | Terminal text. Programs asking for the default colors (OSC 10/11) get yours. |
+| `accent` | Cursor and highlights. |
+| `selection` | Selected text. |
+
+An invalid color is reported by `fact config validate` and stops FACT from
+starting, like any other config error.
 
 There are no persistence, session-limit or daemon-log settings. Old v0.3 keys
 such as `max_sessions`, `persist_interval_secs` and `daemon_log_level` are
@@ -97,6 +120,10 @@ command = "cmd.exe"
 command = "wsl.exe"
 args = ["-d", "Ubuntu", "--cd", "~"]
 
+[profiles.claude]
+command = "claude"
+title = "Claude Code"
+
 [profiles.disabled-example]
 command = "cmd.exe"
 enabled = false
@@ -104,7 +131,7 @@ enabled = false
 
 | Field | Meaning |
 | --- | --- |
-| `command` | Executable name or absolute path. Omitted/empty uses the detected shell. |
+| `command` | Program name or path. A bare name is looked up in the folders on PATH, trying the PATHEXT extensions a pane can start (`claude` finds `claude.cmd`), never in the current folder; a bare name not on PATH is an error. Batch files run through `cmd.exe`. Omitted uses the detected shell. |
 | `args` | Exact argument list; no shell expansion is performed by FACT. |
 | `cwd` | Initial directory. Supports `~` and `%VARIABLE%`. Defaults to the user profile. |
 | `env` | Extra environment variables, merged over global `[env]`. |
@@ -196,6 +223,7 @@ show the bindings currently compiled from this file.
 | Move the focused pane's edge left/right/up/down | `resize_left`, `resize_right`, `resize_up`, `resize_down` | Prefix then `Shift`+arrow key |
 | Balance pane sizes in the tab | `balance` | Prefix then `=` |
 | Cycle color theme | `cycle_theme` | Prefix then `T` |
+| Hide / show the wallpaper (pauses a video) | `toggle_wallpaper` | Prefix then `B` |
 
 Additional interaction that is not a remappable action:
 
@@ -229,8 +257,9 @@ Additional interaction that is not a remappable action:
   mode: `codex --no-alt-screen`, `/tui default` in Claude Code, or
   `OTUI_USE_ALTERNATE_SCREEN=false` for OpenCode.
 - In a window too small for the configured `min_pane_width`/`min_pane_height`,
-  FACT normally shows only the focused pane. `Alt+N` or the `show_all` action
-  keeps the whole grid visible even below those limits; `Alt+M` maximizes again.
+  FACT normally shows only the focused pane. The `show_all` action (prefix then
+  `N`, or `Alt+N` with `alt_shortcuts = true`) keeps the whole grid visible even
+  below those limits; `maximize` (prefix then `M`) focuses one pane again.
 - Drag a split gutter with the mouse to resize; double-click a gutter to
   balance every pane in the tab.
 - `Alt`+drag a pane onto another pane to swap them, or onto a tab in the tab
@@ -286,20 +315,32 @@ in any terminal: Windows Terminal, the classic console, VS Code and others.
 fact wallpaper set C:\Pictures\sky.jpg               # 35% strength, cover the window
 fact wallpaper set .\forest.png --opacity 20 --fit fit
 fact wallpaper set C:\Videos\rain.mp4                # loops; needs ffmpeg
+fact wallpaper set --opacity 50                      # change the current one in place
 fact wallpaper                                       # show the current wallpaper
 fact wallpaper clear                                 # remove it again
 ```
 
-- **Images** (png, jpg, jpeg, gif, bmp, webp) are copied to
-  `%LOCALAPPDATA%\FACT\wallpaper\`. Animated GIFs loop.
+Running FACT windows switch at once when you set, change or clear the
+wallpaper, from any terminal (a FACT pane included); there is nothing to
+restart. Prefix then `B` hides a wallpaper FACT paints and pauses a video,
+and shows it again; in Windows Terminal's FACT tab the terminal draws the
+picture, so `B` cannot hide it there. A new file keeps the current opacity and fit unless you give
+`--opacity` or `--fit`; `set` without a file changes only those.
+
+- **Images** (png, jpg, jpeg, gif, bmp, webp) are copied to the `wallpaper\`
+  folder in FACT's data folder (`%LOCALAPPDATA%\FACT\wallpaper\`, or under
+  `FACT_HOME` when set), even with `--config`. Animated GIFs loop.
 - **Videos** (mp4, mkv, webm, mov, avi, m4v, wmv, flv) play from where they are,
   in a loop, at their own colors. ffmpeg decodes them and streams frames scaled
   to the window's cell grid at 24 fps, the finest detail a terminal can show
   behind text. Install ffmpeg with `winget install ffmpeg`, or point
   `FACT_FFMPEG` at `ffmpeg.exe`.
-- FACT draws two image pixels per cell and darkens them by `--opacity` (5-100
-  or 0.05-1.0) so text stays readable. Only cells at the default background are
-  painted: the cursor, selections, panels and program colors stay on top.
+- Where FACT paints the wallpaper itself it uses four pixels per cell (2x2
+  quadrant block characters) in Windows Terminal, VS Code and WezTerm, and two
+  (`▀` half blocks) in the classic console, whose fonts may lack quadrants. The
+  image fades toward the theme's background by `--opacity` (5-100 or 0.05-1.0)
+  so text stays readable. Only cells at the default background are painted:
+  the cursor, selections, panels and program colors stay on top.
 - Animation pauses while the FACT window is unfocused, so a video costs nothing
   in the background.
 - `--fit` accepts `fill` (default, cover and crop), `fit` (letterbox),
@@ -310,8 +351,12 @@ fact wallpaper clear                                 # remove it again
 
 For images, `set` also writes a Windows Terminal *fragment*
 (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`) that adds
-a "FACT" profile with the image. Opened with `wt -p FACT`, Windows Terminal draws
-the image at full resolution and FACT stays transparent on top. Your own
+a "FACT" profile with the image, where Windows Terminal draws it at full
+resolution and FACT stays transparent on top. A plain `fact` typed in any other
+Windows Terminal tab opens a FACT tab with that profile, as soon as Windows
+Terminal has loaded it (until then, and with `fact --here` or
+`wallpaper_tab = false`, FACT starts in the current tab). `wt -p FACT` and the FACT entry in the tab menu open it
+too. Your own
 `settings.json` is never edited; FACT only updates its timestamp so Windows
 Terminal reloads at once. Set `FACT_WT_FRAGMENTS_DIR` for a portable Windows
 Terminal.
