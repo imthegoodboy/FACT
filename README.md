@@ -13,6 +13,7 @@
   <a href="#install">Install</a> ·
   <a href="#everyday-use">Get started</a> ·
   <a href="#keyboard-shortcuts">Shortcuts</a> ·
+  <a href="#wallpaper-video-and-transparency">Wallpaper</a> ·
   <a href="#screenshots">Screenshots</a> ·
   <a href="docs/configuration.md">Configure</a> ·
   <a href="docs/architecture.md">Architecture</a>
@@ -43,7 +44,8 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
   a selection, overlay or scroll mode is open, and image paste still works.
 - **Light.** One ~2.5 MB native `fact.exe`. Idle workspaces use no CPU: the
   screen is redrawn only when something changes, and shell output wakes the
-  engine directly instead of a polling timer.
+  engine directly instead of a polling timer. A video wallpaper pauses while
+  the window is unfocused.
 - **Real shells, not fake panes.** `fact --grid 8` starts eight independent
   ConPTY processes. Each pane has its own PID, terminal state, exit code and
   scrollback.
@@ -54,16 +56,10 @@ shows its actual process ID. [Explore the controls ↓](#screenshots)*
   swap. Drag dividers to resize (double-click to balance), `Alt`+drag a pane
   onto another pane or tab to move it, drag tabs to reorder them, or resize from
   the keyboard with the prefix and `Shift`+arrows.
-- **Wallpaper and video.** `fact wallpaper set sky.jpg` or `fact wallpaper set
-  clip.mp4` puts a picture or a looping video behind every pane, in any
-  terminal: Windows Terminal, the classic console, VS Code. In Windows Terminal,
-  `fact` opens a FACT tab where pictures and videos show at their real
-  quality (full HD and beyond, video at up to 60 fps); in other tabs and
-  terminals (and with `fact --here` outside the FACT tab) FACT paints them
-  with block characters. `fact wallpaper transparent` makes the tab
-  see-through instead. Text, the cursor
-  and selections stay readable on top. Changes show in running FACT windows at
-  once, and prefix then `B` hides the wallpaper (pausing a video).
+- **Full-quality wallpapers.** A picture or a looping video behind your panes,
+  at its real resolution in Windows Terminal (full HD and beyond, video at up
+  to 60 fps), or a see-through tab that shows your desktop. Changes apply to
+  running windows at once. [Details ↓](#wallpaper-video-and-transparency)
 - **Your colors.** Five built-in themes, plus a `[colors]` table in
   `config.toml` for your own background, text, accent and selection colors.
 - **Minimal black TUI.** Plain terminal panes with no title rows, buttons or
@@ -142,9 +138,8 @@ fact --grid 8                     # eight shells in a grid
 fact --profile pwsh --grid 4      # use a configured shell profile
 fact --cwd . --grid 1             # start the initial shells in this directory
 fact doctor                       # check terminal, config, duplicate installs and agent CLIs
-fact wallpaper set C:\Pictures\sky.jpg   # background picture, in every terminal
+fact wallpaper set C:\Pictures\sky.jpg   # background picture (see Wallpaper below)
 fact wallpaper set C:\Videos\rain.mp4   # looping video background (needs ffmpeg)
-fact wallpaper set --opacity 50   # adjust the current wallpaper in place
 fact wallpaper transparent        # see-through tab: the desktop shows behind your text
 fact wallpaper clear              # back to the theme background
 fact config path                  # print the configuration file in use
@@ -246,6 +241,7 @@ help and the palette always show the compiled values.
 | Resize: move the focused pane's edge | `Ctrl+Space` then `Shift`+arrow |
 | Balance pane sizes | `Ctrl+Space` then `=` |
 | Cycle color theme | `Ctrl+Space` then `T` |
+| Hide / show the wallpaper (pauses a video) | `Ctrl+Space` then `B` |
 | Help | `F1` |
 | Quit FACT and close every shell | `Ctrl+Space` then `Shift+Q` |
 
@@ -280,6 +276,58 @@ to the app.
 `Ctrl+M` is Enter in terminal input, so it is not available as a direct FACT
 shortcut. `F1`, the direct `Alt` shortcuts and the clipboard aliases are not part
 of the remappable action table.
+
+## Wallpaper, video and transparency
+
+```powershell
+fact wallpaper set C:\Pictures\sky.jpg                 # a picture
+fact wallpaper set C:\Videos\rain.mp4                  # a looping video (needs ffmpeg)
+fact wallpaper set --opacity 100                       # original brightness (default 35)
+fact wallpaper set --fit fit                           # whole picture, no cropping
+fact wallpaper transparent                             # see-through tab
+fact wallpaper transparent --tint 40                   # see-through, darkened for reading
+fact wallpaper                                         # show what is set
+fact wallpaper clear                                   # back to the plain theme
+```
+
+**Best quality: Windows Terminal.** Type `fact` in any Windows Terminal tab and
+FACT opens its own FACT tab, where the wallpaper shows at its real quality
+behind your text:
+
+- **Pictures** are drawn by Windows Terminal at full resolution.
+- **Videos** play in a borderless window that FACT keeps exactly behind the
+  terminal, scaled to the window's real pixel size (up to 4K) at the video's
+  own frame rate (up to 60 fps). It never takes focus or shows in the taskbar,
+  follows the window when you move, resize or minimize it, pauses while the
+  window is unfocused, and closes with FACT.
+- **See-through** (`fact wallpaper transparent`) shows your desktop and the
+  windows behind the terminal. Add `--tint` (0-90) when text gets hard to read
+  over bright windows.
+
+**Other terminals** (the classic console, VS Code, or `fact --here` in a normal
+tab) can only show text cells, so FACT paints the picture or video there with
+block characters.
+
+**Everywhere:**
+
+- Set, change or clear the wallpaper from any terminal, even a FACT pane;
+  running FACT windows switch at once.
+- `Ctrl+Space` then `B` hides the wallpaper (a video pauses) and shows it again.
+- `--opacity` (5-100) is the brightness: 100 is the original, lower fades it
+  toward black so text stays readable. A new file keeps your current opacity
+  and fit.
+- `--fit` is `fill` (default, cover and crop), `fit` (letterbox), `stretch`
+  or `center`.
+- Videos need [ffmpeg](https://ffmpeg.org): `winget install ffmpeg`. FACT finds
+  winget, Chocolatey and Scoop installs even in a terminal opened before the
+  install.
+- `fact --transparent` (or `background = "transparent"`) keeps FACT fully
+  transparent over your terminal's own background image or acrylic, and paints
+  no wallpaper. `wallpaper_tab = false` in `config.toml` keeps `fact` in the
+  current tab.
+
+See [Wallpaper in docs/configuration.md](docs/configuration.md#wallpaper) for
+every detail.
 
 ## Screenshots
 
@@ -368,8 +416,9 @@ from the engine and terminal input. The UI sleeps on that queue and redraws only
 when something changed. Shell output wakes the engine immediately; frames are
 capped at about 120 per second and include only pane cells that changed.
 
-There is no persistence layer, no IPC server and no second process. All state is
-in memory and is discarded when the process exits. Full details and crate
+There is no persistence layer, no IPC server and no second FACT process (a video
+wallpaper runs ffmpeg as a child that exits with FACT). All state is in memory
+and is discarded when the process exits. Full details and crate
 boundaries are in [docs/architecture.md](docs/architecture.md).
 
 ## Data and privacy
@@ -381,7 +430,7 @@ chosen with `--config`. `FACT_HOME` can relocate the default base directory.
 | Path | Contents |
 | --- | --- |
 | `config.toml` | Optional configuration: theme, profiles, keybindings and environment values. |
-| `wallpaper\` | Only after `fact wallpaper set`: FACT's copy of an image and a small `settings.json`. Videos are played from where they are. |
+| `wallpaper\` | Only after `fact wallpaper set` or `transparent`: FACT's copy of an image and a small `settings.json`. Videos are played from where they are. |
 | No other paths | FACT creates no database, log, runtime identity, saved layout or export directory. |
 
 Terminal output, scrollback and process state exist only in memory for the life
