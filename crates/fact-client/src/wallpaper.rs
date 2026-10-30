@@ -866,6 +866,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn chocolatey_launchers_lead_to_the_real_ffmpeg() {
         let dir = tempfile::tempdir().unwrap();
         let shim = dir.path().join(r"chocolatey\bin\ffmpeg.exe");

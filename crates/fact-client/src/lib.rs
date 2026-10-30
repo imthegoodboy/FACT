@@ -998,6 +998,8 @@ struct App {
     backdrop: Option<backdrop::Backdrop>,
     /// Counts video windows, so a failure from a replaced one is ignored.
     backdrop_generation: u64,
+    /// The terminal window has focus; animation pauses without it.
+    focused: bool,
     /// Hidden with `toggle_wallpaper`: kept loaded, not painted, paused.
     wallpaper_hidden: bool,
     /// Reads the current wallpaper again after a change.
@@ -1055,6 +1057,7 @@ impl App {
             wallpaper_wanted: WallpaperState::None,
             backdrop: None,
             backdrop_generation: 0,
+            focused: true,
             wallpaper_hidden: false,
             wallpaper_source: None,
             colors,
@@ -1114,7 +1117,7 @@ impl App {
 
     fn load_painted(&self, spec: &WallpaperSpec) -> Result<wallpaper::Wallpaper, String> {
         let mut loaded = wallpaper::Wallpaper::load(spec)?;
-        loaded.set_paused(self.wallpaper_hidden);
+        loaded.set_paused(self.wallpaper_hidden || !self.focused);
         Ok(loaded)
     }
 
@@ -1162,6 +1165,7 @@ impl App {
         });
         let started = backdrop::Backdrop::start(spec, ffmpeg, gave_up)?;
         started.set_hidden(self.wallpaper_hidden);
+        started.set_paused(!self.focused);
         Ok(started)
     }
 
@@ -1370,6 +1374,7 @@ impl App {
                 self.dirty = true;
             }
             Event::FocusGained => {
+                self.focused = true;
                 self.held_chars.clear();
                 if let Some(wallpaper) = &self.wallpaper {
                     wallpaper.borrow_mut().set_paused(self.wallpaper_hidden);
@@ -1379,6 +1384,7 @@ impl App {
                 }
             }
             Event::FocusLost => {
+                self.focused = false;
                 self.held_chars.clear();
                 // An animated wallpaper costs nothing while nobody watches.
                 if let Some(wallpaper) = &self.wallpaper {
