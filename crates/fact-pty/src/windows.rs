@@ -707,7 +707,7 @@ fn launch_line(command: &str, args: &[String]) -> (Option<Vec<u16>>, Vec<u16>) {
         });
         // `/s` strips exactly the outer quotes added here.
         let inner = joined(command, args, true);
-        let line = format!("{} /d /s /c \"{inner}\"", quote_arg(&shell, false));
+        let line = format!("{} /d /s /c \"{inner}\"", quote_arg(&shell));
         (Some(shell), line)
     } else {
         let full_path = Path::new(command).is_absolute();
@@ -721,24 +721,39 @@ fn launch_line(command: &str, args: &[String]) -> (Option<Vec<u16>>, Vec<u16>) {
 }
 
 fn joined(command: &str, args: &[String], batch: bool) -> String {
-    let mut line = quote_arg(command, batch);
+    let quote = |arg: &str| {
+        if batch {
+            quote_batch_arg(arg)
+        } else {
+            quote_arg(arg)
+        }
+    };
+    let mut line = quote(command);
     for arg in args {
         line.push(' ');
-        line.push_str(&quote_arg(arg, batch));
+        line.push_str(&quote(arg));
     }
     line
 }
 
-/// Quote one argument for the C runtime's parser. Arguments for cmd.exe are
-/// also quoted when they contain characters cmd would interpret.
-fn quote_arg(arg: &str, batch: bool) -> String {
+/// Quote one argument for cmd.exe and a batch file: cmd keeps backslashes as
+/// they are and writes a quote inside quotes as `""`.
+fn quote_batch_arg(arg: &str) -> String {
     let special = |c: char| {
-        c == ' '
-            || c == '\t'
-            || c == '"'
-            || c == '\\'
-            || (batch && matches!(c, '&' | '|' | '<' | '>' | '^' | '(' | ')'))
+        matches!(
+            c,
+            ' ' | '\t' | '"' | '&' | '|' | '<' | '>' | '^' | '(' | ')' | ',' | ';' | '='
+        )
     };
+    if !arg.is_empty() && !arg.chars().any(special) {
+        return arg.to_string();
+    }
+    format!("\"{}\"", arg.replace('"', "\"\""))
+}
+
+/// Quote one argument for the C runtime's parser.
+fn quote_arg(arg: &str) -> String {
+    let special = |c: char| c == ' ' || c == '\t' || c == '"' || c == '\\';
     if !arg.is_empty() && !arg.chars().any(special) {
         return arg.to_string();
     }
@@ -830,14 +845,17 @@ mod tests {
 
     #[test]
     fn quotes_arguments_like_windows() {
-        assert_eq!(quote_arg("plain", false), "plain");
-        assert_eq!(quote_arg("with space", false), "\"with space\"");
-        assert_eq!(quote_arg("a\"b", false), "\"a\\\"b\"");
-        assert_eq!(quote_arg("a\\b", false), "\"a\\b\"");
-        assert_eq!(quote_arg("a\\", false), "\"a\\\\\"");
-        assert_eq!(quote_arg("", false), "\"\"");
-        assert_eq!(quote_arg("a&b", false), "a&b");
-        assert_eq!(quote_arg("a&b", true), "\"a&b\"");
+        assert_eq!(quote_arg("plain"), "plain");
+        assert_eq!(quote_arg("with space"), "\"with space\"");
+        assert_eq!(quote_arg("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote_arg("a\\b"), "\"a\\b\"");
+        assert_eq!(quote_arg("a\\"), "\"a\\\\\"");
+        assert_eq!(quote_arg(""), "\"\"");
+        assert_eq!(quote_arg("a&b"), "a&b");
+        assert_eq!(quote_batch_arg("a&b"), "\"a&b\"");
+        assert_eq!(quote_batch_arg(r"C:\dir\"), r"C:\dir\");
+        assert_eq!(quote_batch_arg(r"C:\my dir\"), r#""C:\my dir\""#);
+        assert_eq!(quote_batch_arg("say \"hi\""), "\"say \"\"hi\"\"\"");
     }
 
     #[test]
@@ -854,7 +872,9 @@ mod tests {
         let application = text(&application.expect("cmd.exe"));
         assert!(application.to_ascii_lowercase().ends_with("cmd.exe"));
         assert!(text(&line)
-            .ends_with(r#" /d /s /c ""C:\Users\me\AppData\Roaming\npm\claude.CMD" --resume""#));
+            .ends_with(r#" /d /s /c "C:\Users\me\AppData\Roaming\npm\claude.CMD --resume""#));
+        let (_, line) = launch_line(r"C:\My Tools\run.bat", &[r"C:\out dir\".into()]);
+        assert!(text(&line).ends_with(r#" /d /s /c ""C:\My Tools\run.bat" "C:\out dir\"""#));
 
         let (application, line) = launch_line("pwsh.exe", &["-NoLogo".into()]);
         assert!(application.is_none(), "bare names are searched by Windows");

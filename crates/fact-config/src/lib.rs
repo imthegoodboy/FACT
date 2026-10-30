@@ -207,8 +207,7 @@ impl Config {
         if self.min_pane_height < 3 {
             issues.push("min_pane_height must be at least 3".to_string());
         }
-        if !["fact-dark", "fact-light", "dracula", "nord", "gruvbox"].contains(&self.theme.as_str())
-        {
+        if !THEMES.contains(&self.theme.as_str()) {
             issues.push(format!(
                 "theme '{}' is unknown (expected fact-dark, fact-light, dracula, nord or gruvbox)",
                 self.theme
@@ -402,10 +401,11 @@ pub fn detect_shell() -> Option<String> {
         .or_else(|| find_on_path("cmd.exe"))
 }
 
-/// Find a program the way the command prompt does: a name with a folder is
-/// used as given, a bare name is looked up on PATH, and a name without a
-/// program extension tries each PATHEXT extension (`claude` finds
-/// `claude.cmd`). The current folder is not searched.
+/// Find a program much like the command prompt does: a name with a folder is
+/// used as given, a bare name is looked up in PATH's absolute folders, and a
+/// name without a program extension tries each PATHEXT extension (`claude`
+/// finds `claude.cmd`). Unlike the prompt, the current folder is never
+/// searched.
 pub fn find_on_path(exe: &str) -> Option<String> {
     let name = Path::new(exe);
     let pathext: Vec<String> = std::env::var("PATHEXT")
@@ -434,8 +434,11 @@ pub fn find_on_path(exe: &str) -> Option<String> {
     if name.is_absolute() || name.components().count() > 1 {
         return first_match(name);
     }
+    // Relative PATH entries (`.`, empty) would mean the current folder.
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).find_map(|dir| first_match(&dir.join(name)))
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .find_map(|dir| first_match(&dir.join(name)))
 }
 
 pub fn home_dir() -> Option<PathBuf> {

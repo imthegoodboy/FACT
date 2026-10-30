@@ -146,13 +146,15 @@ fn winget_package_ffmpeg(packages: &Path) -> Option<PathBuf> {
 }
 
 /// Check that `path` is a picture FACT can show, judging by its content
-/// rather than its name. Returns its size in pixels.
+/// rather than its name, by decoding it in full the way FACT will. Returns
+/// its size in pixels.
 pub fn image_dimensions(path: &Path) -> Result<(u32, u32), String> {
-    ImageReader::open(path)
+    let image = ImageReader::open(path)
         .and_then(|reader| reader.with_guessed_format())
         .map_err(|error| error.to_string())?
-        .into_dimensions()
-        .map_err(|error| error.to_string())
+        .decode()
+        .map_err(|error| error.to_string())?;
+    Ok((image.width(), image.height()))
 }
 
 fn is_gif(path: &Path) -> bool {
@@ -177,6 +179,8 @@ const VIDEO_RETRY: Duration = Duration::from_millis(10);
 const RESIZE_SETTLE: Duration = Duration::from_millis(200);
 /// ffmpeg is restarted this many times after it stops before FACT gives up.
 const VIDEO_ATTEMPTS: u32 = 3;
+/// Playing this long without stopping earns a fresh set of restarts.
+const VIDEO_HEALTHY: Duration = Duration::from_secs(10);
 
 pub struct Wallpaper {
     source: RgbImage,
@@ -213,6 +217,8 @@ struct Video {
     /// Restarts after ffmpeg stopped, and when to try the next one.
     attempts: u32,
     retry_at: Option<Instant>,
+    /// When the running ffmpeg was started.
+    started_at: Instant,
     paused: bool,
     failed: bool,
     /// Why playback stopped, for the status line.
@@ -298,6 +304,7 @@ impl Video {
         let now = Instant::now();
         self.due = now;
         self.check_at = now;
+        self.started_at = now;
     }
 
     /// ffmpeg stopped or could not start: try again a little later, a few
@@ -362,6 +369,7 @@ impl Wallpaper {
                 pending_size: None,
                 attempts: 0,
                 retry_at: None,
+                started_at: now,
                 paused: false,
                 failed: false,
                 message: None,
@@ -502,7 +510,9 @@ impl Wallpaper {
                         video.due + frame_time
                     };
                     video.check_at = video.due;
-                    video.attempts = 0;
+                    if now.saturating_duration_since(video.started_at) >= VIDEO_HEALTHY {
+                        video.attempts = 0;
+                    }
                     let (scale, base) = (self.opacity, self.base);
                     let (pixels, _) = frame.as_chunks::<3>();
                     let pixels = pixels.iter().map(|p| blend(*p, base, scale)).collect();
@@ -576,7 +586,10 @@ impl Wallpaper {
         }
         if let Some(video) = &mut self.video {
             let size = (area.width, area.height);
-            if video.size != size && !video.failed {
+            if video.size == size {
+                // Back to the size playing now: nothing to restart.
+                video.pending_size = None;
+            } else if !video.failed {
                 if video.stream.is_none() && video.retry_at.is_none() {
                     video.start(size.0, size.1);
                 } else if video

@@ -55,6 +55,8 @@ const MAX_BATCH: Duration = Duration::from_millis(8);
 const PASTE_GAP: Duration = Duration::from_millis(8);
 /// Longest stretch of keystrokes gathered into one paste batch.
 const MAX_PASTE_BATCH: Duration = Duration::from_millis(250);
+/// Keys this close together were not typed by hand (key repeat is ~30 ms).
+const PASTE_SPACING: Duration = Duration::from_millis(5);
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 /// Width of the new-tab button in the tab strip.
@@ -199,7 +201,10 @@ fn spawn_readers(mut stream: EventStream) -> UiEvents {
                     Ok(true) => event::read(),
                     Err(error) => Err(error),
                 };
+                // Keys carry when they arrived: a paste arrives as a burst
+                // of keys microseconds apart, typing never does.
                 let message = match event {
+                    Ok(Event::Key(key)) => UiEvent::Key(key, Instant::now()),
                     Ok(event) => UiEvent::Input(event),
                     Err(error) => UiEvent::InputFailed(error.to_string()),
                 };
@@ -220,6 +225,7 @@ fn spawn_readers(mut stream: EventStream) -> UiEvents {
 enum UiEvent {
     Message(Box<fact_protocol::ServerMessage>),
     Closed(String),
+    Key(KeyEvent, Instant),
     Input(Event),
     InputFailed(String),
 }
@@ -999,18 +1005,19 @@ impl App {
         Ok(())
     }
 
-    /// Apply a batch of events in order. Runs of keystrokes that hold a
-    /// line break followed by more text are a paste from the host terminal
-    /// (Windows Terminal types pasted text into console programs), so they
-    /// go to the pane as one paste instead of running line by line.
+    /// Apply a batch of events in order. Windows Terminal types pasted text
+    /// into console programs as keystrokes; a burst of them (keys a few
+    /// microseconds apart) holding a line break followed by more text goes to
+    /// the pane as one paste instead of running line by line.
     fn handle_batch(&mut self, batch: Vec<UiEvent>) {
         let mut run: Vec<KeyEvent> = Vec::new();
+        let mut last_key_at: Option<Instant> = None;
         for event in batch {
             if self.fatal.is_some() || self.exit_message.is_some() {
                 break;
             }
-            let key = match event {
-                UiEvent::Input(Event::Key(key)) => key,
+            let (key, at) = match event {
+                UiEvent::Key(key, at) => (key, at),
                 // Frames only change what is drawn; a paste stays whole.
                 UiEvent::Message(message) => {
                     self.handle_ui_event(UiEvent::Message(message));
@@ -1025,6 +1032,11 @@ impl App {
             let Some(key) = key_press(&mut self.held_chars, key) else {
                 continue;
             };
+            // A pause between keys ends a burst: what came before was typed.
+            if last_key_at.is_some_and(|last| at.saturating_duration_since(last) > PASTE_SPACING) {
+                self.flush_keys(&mut run);
+            }
+            last_key_at = Some(at);
             if is_text_key(&key) {
                 run.push(key);
             } else {
@@ -1065,16 +1077,18 @@ impl App {
             UiEvent::InputFailed(reason) => {
                 self.fatal = Some(anyhow!("could not read terminal input: {reason}"));
             }
+            UiEvent::Key(key, _) => {
+                if let Some(key) = key_press(&mut self.held_chars, key) {
+                    self.handle_key(key);
+                    self.dirty = true;
+                }
+            }
             UiEvent::Input(event) => self.handle_input(event),
         }
     }
 
     fn handle_input(&mut self, event: Event) {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
-                self.handle_key(key);
-                self.dirty = true;
-            }
             Event::Mouse(mouse) if self.config.mouse => {
                 // Pointer motion only matters to the screen while it changes
                 // a hover state or a drag; skip redraws for idle movement.
@@ -1763,6 +1777,10 @@ impl App {
             "cycle_theme" => {
                 self.theme = self.theme.next();
                 self.sync_wallpaper_base();
+                // Programs that ask for the default colors get the new ones.
+                let _ = self.send(Command::SetTheme {
+                    name: self.theme.name.to_string(),
+                });
                 self.set_status(format!("Theme: {}", self.theme.name));
             }
             other => self.set_status(format!("Unknown action: {other}")),
@@ -2895,7 +2913,7 @@ fn trailing_text_keys(batch: &[UiEvent]) -> usize {
         .rev()
         .filter(|event| !matches!(event, UiEvent::Message(_)))
         .take_while(|event| match event {
-            UiEvent::Input(Event::Key(key)) => {
+            UiEvent::Key(key, _) => {
                 matches!(
                     key.code,
                     CKeyCode::Char(_) | CKeyCode::Enter | CKeyCode::Tab

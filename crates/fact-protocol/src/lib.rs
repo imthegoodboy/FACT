@@ -164,6 +164,10 @@ pub enum Command {
         tab: u32,
         index: usize,
     },
+    /// The client switched themes; panes report its colors from now on.
+    SetTheme {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

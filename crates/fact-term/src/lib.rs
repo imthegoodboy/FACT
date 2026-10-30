@@ -392,6 +392,11 @@ impl TerminalModel {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// The colors reported when a program asks for the defaults (OSC 10/11).
+    pub fn set_default_colors(&self, foreground: [u8; 3], background: [u8; 3]) {
+        self.sink.set_default_colors(foreground, background);
+    }
+
     pub fn bracketed_paste(&self) -> bool {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }

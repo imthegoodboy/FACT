@@ -953,10 +953,21 @@ fn cell_style(cell: &CellDto, theme: &crate::theme::Theme) -> Style {
     let mut bg = color(cell.bg, theme);
     let flags = cell.flags;
     if flags & cell_flags::INVERSE != 0 {
-        // With a transparent background the swap would leave the host's
-        // default color for text on a light block; use the theme's.
+        // A transparent background has no color to become the text color;
+        // pick the theme color that contrasts with the new block.
         if bg == Color::Reset {
-            bg = theme.bg;
+            bg = if is_light(fg, theme) {
+                theme.bg
+            } else {
+                theme.terminal_fg
+            };
+            if bg == fg {
+                bg = if is_light(fg, theme) {
+                    Color::Rgb(0, 0, 0)
+                } else {
+                    Color::Rgb(255, 255, 255)
+                };
+            }
         }
         std::mem::swap(&mut fg, &mut bg);
     }
@@ -980,6 +991,54 @@ fn cell_style(cell: &CellDto, theme: &crate::theme::Theme) -> Style {
         style = style.add_modifier(Modifier::CROSSED_OUT);
     }
     style
+}
+
+/// Whether `color` is a light one, judged by its brightness.
+fn is_light(color: Color, theme: &crate::theme::Theme) -> bool {
+    let [r, g, b] = match color {
+        Color::Rgb(r, g, b) => [r, g, b],
+        Color::Indexed(index) => xterm_rgb(index),
+        Color::Reset => match theme.terminal_fg {
+            Color::Rgb(r, g, b) => [r, g, b],
+            _ => [229, 229, 229],
+        },
+        _ => [229, 229, 229],
+    };
+    u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114 > 128_000
+}
+
+/// The usual xterm palette, close enough to judge brightness.
+fn xterm_rgb(index: u8) -> [u8; 3] {
+    const ANSI: [[u8; 3]; 16] = [
+        [0, 0, 0],
+        [205, 49, 49],
+        [13, 188, 121],
+        [229, 229, 16],
+        [36, 114, 200],
+        [188, 63, 188],
+        [17, 168, 205],
+        [229, 229, 229],
+        [102, 102, 102],
+        [241, 76, 76],
+        [35, 209, 139],
+        [245, 245, 67],
+        [59, 142, 234],
+        [214, 112, 214],
+        [41, 184, 219],
+        [255, 255, 255],
+    ];
+    match index {
+        0..=15 => ANSI[usize::from(index)],
+        16..=231 => {
+            let i = index - 16;
+            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            [level(i / 36), level((i % 36) / 6), level(i % 6)]
+        }
+        _ => {
+            let v = 8 + (index - 232) * 10;
+            [v, v, v]
+        }
+    }
 }
 
 fn color(value: ColorDto, theme: &crate::theme::Theme) -> Color {
@@ -1076,6 +1135,15 @@ mod tests {
         assert_eq!(style.bg, Some(theme.terminal_fg));
         assert_eq!(style.fg, Some(theme.bg));
         assert_ne!(style.fg, Some(Color::Reset));
+
+        // Black inverse text (a black block) gets light text, not black.
+        let black = CellDto {
+            fg: ColorDto::Indexed(0),
+            ..cell
+        };
+        let style = cell_style(&black, &theme);
+        assert_eq!(style.bg, Some(Color::Indexed(0)));
+        assert_eq!(style.fg, Some(theme.terminal_fg));
     }
 
     #[test]

@@ -290,6 +290,19 @@ impl SessionManager {
                 self.resize_focused(&key, direction)?;
                 Ok(ResponsePayload::Ack)
             }
+            Command::SetTheme { name } => {
+                if !fact_config::is_valid_theme(&name) {
+                    return Err(ProtocolError::invalid(format!("unknown theme '{name}'")));
+                }
+                self.config.theme = name;
+                let (foreground, background) = self.config.terminal_colors();
+                for session in self.sessions.values() {
+                    for pane in session.panes.values() {
+                        pane.term.set_default_colors(foreground, background);
+                    }
+                }
+                Ok(ResponsePayload::Ack)
+            }
             Command::BalancePanes => {
                 let key = self.require_bound(bound_session)?;
                 self.edit_layout(&key, |layout| layout.balance().map(|()| true))?;

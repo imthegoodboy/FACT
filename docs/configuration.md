@@ -109,7 +109,7 @@ enabled = false
 
 | Field | Meaning |
 | --- | --- |
-| `command` | Program name or path. A bare name is looked up on PATH like at a prompt (`claude` finds `claude.cmd`); batch files run through `cmd.exe`. Omitted/empty uses the detected shell. |
+| `command` | Program name or path. A bare name is looked up in the folders on PATH, trying PATHEXT extensions (`claude` finds `claude.cmd`), but never in the current folder; batch files run through `cmd.exe`. Omitted uses the detected shell. |
 | `args` | Exact argument list; no shell expansion is performed by FACT. |
 | `cwd` | Initial directory. Supports `~` and `%VARIABLE%`. Defaults to the user profile. |
 | `env` | Extra environment variables, merged over global `[env]`. |
