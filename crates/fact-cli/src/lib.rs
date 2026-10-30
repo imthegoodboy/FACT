@@ -53,8 +53,8 @@ struct Cli {
     /// Let the host terminal's background image show through (see `fact wallpaper`).
     #[arg(long)]
     transparent: bool,
-    /// Start in this tab. Otherwise, inside Windows Terminal with a picture
-    /// wallpaper, `fact` opens a FACT tab where the picture is full resolution.
+    /// Start in this tab. Otherwise, inside Windows Terminal with a wallpaper,
+    /// `fact` opens a FACT tab where pictures and videos are full resolution.
     #[arg(long)]
     here: bool,
     #[command(subcommand)]
@@ -324,24 +324,22 @@ fn wallpaper_state(base: &std::path::Path) -> fact_client::WallpaperState {
 fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
     let locations = wallpaper::Locations::resolve(&paths.base)?;
     match action {
-        None => {
-            match wallpaper::current(&locations)? {
-                Some(current) if current.transparent => {
-                    out!("Wallpaper: {}", wallpaper::describe(&current));
-                    out!("In Windows Terminal, `fact` opens a FACT tab that shows the desktop behind your text; prefix then B makes it solid.");
-                    out!("Change it: fact wallpaper transparent --tint N, or fact wallpaper set <file>");
-                }
-                Some(current) => {
-                    out!("Wallpaper: {}", wallpaper::describe(&current));
-                    out!("It shows behind FACT in every terminal; prefix then B hides it.");
-                    if !current.video {
-                        out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
-                    }
-                    out!("Change it: fact wallpaper set [file] [--opacity N] [--fit fill|fit|stretch|center]");
-                }
-                None => out!("No wallpaper set. Use: fact wallpaper set <picture or video>"),
+        None => match wallpaper::current(&locations)? {
+            Some(current) if current.transparent => {
+                out!("Wallpaper: {}", wallpaper::describe(&current));
+                out!("In Windows Terminal, `fact` opens a FACT tab that shows the desktop behind your text; prefix then B makes it solid.");
+                out!(
+                    "Change it: fact wallpaper transparent --tint N, or fact wallpaper set <file>"
+                );
             }
-        }
+            Some(current) => {
+                out!("Wallpaper: {}", wallpaper::describe(&current));
+                out!("It shows behind FACT in every terminal; prefix then B hides it.");
+                out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
+                out!("Change it: fact wallpaper set [file] [--opacity N] [--fit fill|fit|stretch|center]");
+            }
+            None => out!("No wallpaper set. Use: fact wallpaper set <picture or video>"),
+        },
         Some(WallpaperAction::Set {
             image,
             opacity,
@@ -370,11 +368,9 @@ fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
                 None => wallpaper::adjust(&locations, opacity, fit)?,
             };
             out!("Wallpaper set: {}", wallpaper::describe(&current));
-            out!("FACT windows that paint wallpapers show it now; prefix then B hides it.");
+            out!("Running FACT windows show it now; prefix then B hides it.");
             wallpaper::reload_windows_terminal();
-            if !current.video {
-                out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
-            }
+            out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
         }
         Some(WallpaperAction::Transparent { tint }) => {
             let current = wallpaper::set_transparent(&locations, tint)?;
