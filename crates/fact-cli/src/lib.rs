@@ -330,7 +330,7 @@ fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {
                 None => wallpaper::adjust(&locations, opacity, fit)?,
             };
             out!("Wallpaper set: {}", wallpaper::describe(&current));
-            out!("Running FACT windows show it now; prefix then B hides it.");
+            out!("FACT windows that paint wallpapers show it now; prefix then B hides it.");
             wallpaper::reload_windows_terminal();
             if !current.video {
                 out!("In Windows Terminal, `fact` opens a FACT tab with it at full resolution.");
