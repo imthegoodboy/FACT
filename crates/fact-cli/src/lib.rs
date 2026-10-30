@@ -236,32 +236,21 @@ fn launch(
     // `background = "transparent"` in config.toml means the same as the flag:
     // the terminal's own background shows, so FACT never paints.
     let host_background = transparent || config.transparent_background() || inherited;
-    let current = wallpaper::Locations::resolve(&paths.base)
-        .ok()
-        .and_then(|locations| wallpaper::current(&locations).ok().flatten())
-        .filter(|current| current.image.is_file());
-    // In Windows Terminal's FACT profile the terminal draws an image itself.
-    let native = wallpaper::in_fact_profile() && current.as_ref().is_some_and(|w| !w.video);
-    if host_background || native {
+    if host_background {
         config.background = "transparent".to_string();
     }
-    let painted = if host_background {
-        None
-    } else {
-        painted_wallpaper(&paths.base)
-    };
     // Follow `fact wallpaper set` and `clear` while running.
     let source = if host_background {
-        fact_client::WallpaperSource::fixed(None)
+        fact_client::WallpaperSource::none()
     } else {
         let base = paths.base.clone();
         fact_client::WallpaperSource {
-            initial: painted.clone(),
+            initial: wallpaper_state(&paths.base),
             watch: Some(paths.base.clone()),
-            current: Box::new(move || painted_wallpaper(&base)),
+            current: Box::new(move || wallpaper_state(&base)),
         }
     };
-    if config.transparent_background() || painted.is_some() {
+    if config.transparent_background() || source.initial != fact_client::WallpaperState::None {
         config
             .env
             .entry("FACT_BACKGROUND".to_string())
@@ -281,19 +270,24 @@ fn launch(
     result
 }
 
-/// The wallpaper FACT paints itself right now: none inside Windows
-/// Terminal's FACT profile for a picture, which the terminal draws.
-fn painted_wallpaper(base: &std::path::Path) -> Option<fact_client::WallpaperSpec> {
-    let locations = wallpaper::Locations::resolve(base).ok()?;
-    let current = wallpaper::current(&locations).ok().flatten()?;
-    if !current.image.is_file() || (wallpaper::in_fact_profile() && !current.video) {
-        return None;
+/// What is behind the panes right now. Inside Windows Terminal's FACT
+/// profile the terminal draws a picture itself; FACT paints the rest.
+fn wallpaper_state(base: &std::path::Path) -> fact_client::WallpaperState {
+    let current = wallpaper::Locations::resolve(base)
+        .ok()
+        .and_then(|locations| wallpaper::current(&locations).ok().flatten())
+        .filter(|current| current.image.is_file());
+    match current {
+        None => fact_client::WallpaperState::None,
+        Some(current) if wallpaper::in_fact_profile() && !current.video => {
+            fact_client::WallpaperState::HostDraws
+        }
+        Some(current) => fact_client::WallpaperState::Painted(fact_client::WallpaperSpec {
+            image: current.image,
+            opacity: current.opacity as f32,
+            fit: current.fit.into(),
+        }),
     }
-    Some(fact_client::WallpaperSpec {
-        image: current.image,
-        opacity: current.opacity as f32,
-        fit: current.fit.into(),
-    })
 }
 
 fn run_wallpaper(paths: &Paths, action: Option<WallpaperAction>) -> Result<()> {

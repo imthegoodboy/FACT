@@ -112,25 +112,37 @@ pub(crate) fn action_label(action: &str) -> &'static str {
         .unwrap_or("Unknown action")
 }
 
-/// Where the painted wallpaper comes from, so a running FACT follows
+/// What is behind the panes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WallpaperState {
+    /// Nothing: the theme background.
+    None,
+    /// A picture or video FACT paints itself.
+    Painted(WallpaperSpec),
+    /// A picture the host terminal draws (Windows Terminal's FACT profile);
+    /// FACT stays transparent over it.
+    HostDraws,
+}
+
+/// Where the wallpaper comes from, so a running FACT follows
 /// `fact wallpaper set` and `clear` without a restart.
 pub struct WallpaperSource {
-    /// What to paint at start.
-    pub initial: Option<WallpaperSpec>,
+    /// What is behind the panes at start.
+    pub initial: WallpaperState,
     /// A folder (watched with its subfolders) where a change may mean a new
     /// wallpaper. `None` never reloads.
     pub watch: Option<PathBuf>,
-    /// Reads what to paint now.
-    pub current: Box<dyn Fn() -> Option<WallpaperSpec>>,
+    /// Reads what is behind the panes now.
+    pub current: Box<dyn Fn() -> WallpaperState>,
 }
 
 impl WallpaperSource {
-    /// A fixed wallpaper (or none) that never reloads.
-    pub fn fixed(initial: Option<WallpaperSpec>) -> Self {
+    /// No wallpaper, never reloaded (the host terminal's background shows).
+    pub fn none() -> Self {
         Self {
-            initial,
+            initial: WallpaperState::None,
             watch: None,
-            current: Box::new(|| None),
+            current: Box::new(|| WallpaperState::None),
         }
     }
 }
@@ -156,8 +168,8 @@ pub fn run(
 
     let mut app = App::new(client, config, keys, events, size.width, size.height);
     app.wallpaper_source = Some(wallpaper.current);
-    if let Some(spec) = wallpaper.initial {
-        app.show_wallpaper(Some(spec));
+    if wallpaper.initial != WallpaperState::None {
+        app.show_wallpaper(wallpaper.initial);
     }
     let result = app.event_loop(&mut terminal);
     app.stop_events();
@@ -945,12 +957,12 @@ struct App {
     dirty: bool,
     /// Painted behind the panes; `RefCell` because drawing advances its cache.
     wallpaper: Option<RefCell<wallpaper::Wallpaper>>,
-    /// What `wallpaper` was loaded from.
-    wallpaper_spec: Option<WallpaperSpec>,
+    /// What is behind the panes (`wallpaper` holds a painted one).
+    wallpaper_state: WallpaperState,
     /// Hidden with `toggle_wallpaper`: kept loaded, not painted, paused.
     wallpaper_hidden: bool,
     /// Reads the current wallpaper again after a change.
-    wallpaper_source: Option<Box<dyn Fn() -> Option<WallpaperSpec>>>,
+    wallpaper_source: Option<Box<dyn Fn() -> WallpaperState>>,
     /// The `[colors]` from config.toml, applied over every theme.
     colors: fact_config::ColorOverrides,
 }
@@ -1000,7 +1012,7 @@ impl App {
             fatal: None,
             dirty: true,
             wallpaper: None,
-            wallpaper_spec: None,
+            wallpaper_state: WallpaperState::None,
             wallpaper_hidden: false,
             wallpaper_source: None,
             colors,
@@ -1010,31 +1022,35 @@ impl App {
     /// The theme `name` with the user's colors, transparent when the host's
     /// background or a visible wallpaper shows behind the panes.
     fn set_theme(&mut self, name: &str) {
-        let painted = self.wallpaper.is_some() && !self.wallpaper_hidden;
+        let behind = match self.wallpaper_state {
+            WallpaperState::None => false,
+            WallpaperState::Painted(_) => !self.wallpaper_hidden,
+            WallpaperState::HostDraws => true,
+        };
         self.theme = Theme::by_name(name)
             .with_colors(&self.colors)
-            .with_transparency(self.config.transparent_background() || painted);
+            .with_transparency(self.config.transparent_background() || behind);
         self.sync_wallpaper_base();
     }
 
-    /// Paint `spec` behind the panes, or nothing. Keeps the current wallpaper
-    /// when the new one cannot be loaded.
-    fn show_wallpaper(&mut self, spec: Option<WallpaperSpec>) {
-        match spec.as_ref().map(wallpaper::Wallpaper::load) {
-            None => {
-                self.wallpaper = None;
-                self.wallpaper_spec = None;
+    /// Show `state` behind the panes. Keeps the current wallpaper when a new
+    /// one cannot be loaded.
+    fn show_wallpaper(&mut self, state: WallpaperState) {
+        if let WallpaperState::Painted(spec) = &state {
+            match wallpaper::Wallpaper::load(spec) {
+                Ok(mut loaded) => {
+                    loaded.set_paused(self.wallpaper_hidden);
+                    self.wallpaper = Some(RefCell::new(loaded));
+                }
+                Err(error) => {
+                    self.set_status(format!("Wallpaper: {error}"));
+                    return;
+                }
             }
-            Some(Ok(mut loaded)) => {
-                loaded.set_paused(self.wallpaper_hidden);
-                self.wallpaper = Some(RefCell::new(loaded));
-                self.wallpaper_spec = spec;
-            }
-            Some(Err(error)) => {
-                self.set_status(format!("Wallpaper: {error}"));
-                return;
-            }
+        } else {
+            self.wallpaper = None;
         }
+        self.wallpaper_state = state;
         let name = self.theme.name;
         self.set_theme(name);
         self.dirty = true;
@@ -1046,10 +1062,10 @@ impl App {
         let Some(current) = self.wallpaper_source.as_ref().map(|read| read()) else {
             return;
         };
-        if current == self.wallpaper_spec {
+        if current == self.wallpaper_state {
             return;
         }
-        let removed = current.is_none();
+        let removed = current == WallpaperState::None;
         self.show_wallpaper(current);
         if removed {
             self.set_status("Wallpaper removed.");
@@ -1282,7 +1298,11 @@ impl App {
     /// Hide the wallpaper (and pause a video) or show it again.
     fn toggle_wallpaper(&mut self) {
         let Some(wallpaper) = &self.wallpaper else {
-            self.set_status("No wallpaper. Set one with: fact wallpaper set <picture or video>");
+            self.set_status(if self.wallpaper_state == WallpaperState::HostDraws {
+                "Windows Terminal draws this picture. Run `fact --here` in another tab to let FACT paint it (then prefix B hides it)."
+            } else {
+                "No wallpaper. Set one with: fact wallpaper set <picture or video>"
+            });
             return;
         };
         self.wallpaper_hidden = !self.wallpaper_hidden;

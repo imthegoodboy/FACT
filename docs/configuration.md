@@ -322,8 +322,9 @@ fact wallpaper clear                                 # remove it again
 
 Running FACT windows switch at once when you set, change or clear the
 wallpaper, from any terminal (a FACT pane included); there is nothing to
-restart. Prefix then `B` hides the wallpaper and pauses a video, and shows it
-again. A new file keeps the current opacity and fit unless you give
+restart. Prefix then `B` hides a wallpaper FACT paints and pauses a video,
+and shows it again; in Windows Terminal's FACT tab the terminal draws the
+picture, so `B` cannot hide it there. A new file keeps the current opacity and fit unless you give
 `--opacity` or `--fit`; `set` without a file changes only those.
 
 - **Images** (png, jpg, jpeg, gif, bmp, webp) are copied to the `wallpaper\`

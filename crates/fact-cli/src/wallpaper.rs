@@ -266,6 +266,14 @@ pub fn adjust(
             wallpaper.image.display()
         );
     }
+    if !wallpaper.video {
+        fact_client::image_dimensions(&wallpaper.image).map_err(|error| {
+            anyhow!(
+                "{} is no longer a picture FACT can show: {error}; set it again with a file",
+                wallpaper.image.display()
+            )
+        })?;
+    }
     if let Some(opacity) = opacity {
         wallpaper.opacity = opacity;
     }

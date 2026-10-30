@@ -154,7 +154,8 @@ In the running window:
     that pauses when the window loses focus. With FACT running, run
     `fact wallpaper set --opacity 80` and `fact wallpaper clear` from another
     terminal and confirm the window follows; press prefix `B` to hide and show
-    the wallpaper. Add a `[colors]` background and confirm every pane uses it. In PowerShell, `Shift+Enter` gives a `>>` continuation; in Claude
+    the wallpaper. Add a `[colors]` background before launching (FACT reads
+    config.toml at start) and confirm every pane uses it. In PowerShell, `Shift+Enter` gives a `>>` continuation; in Claude
     Code, `Shift+Enter` inserts a new line and `Esc` interrupts.
 13. Note a pane PID, quit with prefix `Shift+Q`, and confirm that process no
     longer exists.
