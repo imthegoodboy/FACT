@@ -24,10 +24,16 @@ ConPTY shells with tabs, nested splits and grids in one ordinary terminal
 window. Everything lives in the `fact.exe` process: close FACT and every shell
 it owns closes with it. There is no background daemon and nothing is saved.
 
-![Eight live PowerShell panes in FACT, each showing its own process ID, with no permanent scrollbar or title row.](docs/screenshots/grid.png)
+![A four-pane FACT workspace in Windows Terminal with a looping anime video playing at full resolution behind the shells.](docs/screenshots/video-wallpaper.webp)
 
-*One `fact --grid 8` workspace. Eight independent ConPTY shells. Each pane above
-shows its actual process ID. [Explore the controls ↓](#screenshots)*
+*`fact wallpaper set clip.mp4`, then `fact --grid 4`: four real shells over a
+full-resolution video wallpaper in Windows Terminal.
+[More about wallpapers ↓](#wallpaper-video-and-transparency)*
+
+![Claude Code and OpenAI Codex running side by side in a FACT grid, with two PowerShell panes below them.](docs/screenshots/agents.png)
+
+*Claude Code and Codex side by side, with two shells below. Each pane is its own
+ConPTY process. [Explore the controls ↓](#screenshots)*
 
 > **Status:** pre-1.0. Windows 11 is the primary, continuously tested target.
 > Windows 10 1809+ is intended to work but is not yet verified; see
@@ -279,6 +285,11 @@ of the remappable action table.
 
 ## Wallpaper, video and transparency
 
+![A see-through FACT tab: the desktop painting and icons show behind four panes while Claude Code starts in the first one.](docs/screenshots/see-through.webp)
+
+*`fact wallpaper transparent`: the FACT tab is see-through, so the desktop shows
+behind the text.*
+
 ```powershell
 fact wallpaper set C:\Pictures\sky.jpg                 # a picture
 fact wallpaper set C:\Videos\rain.mp4                  # a looping video (needs ffmpeg)
@@ -332,8 +343,27 @@ every detail.
 ## Screenshots
 
 These captures come from FACT running in real Windows ConPTY sessions. Click an
-image to inspect it at full size. The demo uses a configured `Ctrl+B` prefix;
-the default is `Ctrl+Space`.
+image to inspect it at full size. The palette and pane-menu demos use a
+configured `Ctrl+B` prefix; the default is `Ctrl+Space`.
+
+<table>
+  <tr>
+    <td width="50%"><strong>Start a grid</strong><br><code>fact --grid 4</code>: four independent shells, no title rows or buttons.</td>
+    <td width="50%"><strong>Run agents side by side</strong><br>Claude Code and Codex get the keys you press: <code>Shift+Enter</code>, <code>Esc</code>, image paste.</td>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/grid-4.png"><img src="docs/screenshots/grid-4.png" alt="Four empty PowerShell panes in a 2x2 FACT grid inside Windows Terminal."></a></td>
+    <td><a href="docs/screenshots/agents.png"><img src="docs/screenshots/agents.png" alt="Claude Code and Codex in the top panes of a FACT grid, PowerShell below."></a></td>
+  </tr>
+  <tr>
+    <td width="50%"><strong>Eight shells at once</strong><br><code>fact --grid 8</code>. Each pane shows its own process ID.</td>
+    <td width="50%"><strong>Full-resolution video behind the text</strong><br>In Windows Terminal's FACT tab, at the video's own frame rate.</td>
+  </tr>
+  <tr>
+    <td><a href="docs/screenshots/grid.png"><img src="docs/screenshots/grid.png" alt="Eight live PowerShell panes in FACT, each showing its own process ID."></a></td>
+    <td><a href="docs/screenshots/video-wallpaper.webp"><img src="docs/screenshots/video-wallpaper.webp" alt="Four FACT panes over a full-resolution video wallpaper."></a></td>
+  </tr>
+</table>
 
 <table>
   <tr>
