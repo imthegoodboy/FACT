@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use image::codecs::gif::GifDecoder;
 use image::imageops::{self, FilterType};
-use image::{AnimationDecoder, Frames, Rgb, RgbImage};
+use image::{AnimationDecoder, Frames, ImageFormat, ImageReader, Rgb, RgbImage};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
@@ -68,9 +68,10 @@ pub fn is_video(path: &Path) -> bool {
 /// Windows Terminal tab inherits it. Inside Windows Terminal the console
 /// window is a hidden pseudo console; a classic console has a real window.
 pub fn in_windows_terminal() -> bool {
+    // Other terminals started from a Windows Terminal tab (VS Code, WezTerm)
+    // also use a pseudo console and inherit WT_SESSION, but set TERM_PROGRAM.
     std::env::var_os("WT_SESSION").is_some()
-        && !std::env::var("TERM_PROGRAM")
-            .is_ok_and(|program| program.eq_ignore_ascii_case("vscode"))
+        && std::env::var_os("TERM_PROGRAM").is_none()
         && console_is_pseudo()
 }
 
@@ -93,7 +94,9 @@ fn console_is_pseudo() -> bool {
     false
 }
 
-/// `FACT_FFMPEG`, then `ffmpeg.exe` on PATH, then the usual install folders.
+/// `FACT_FFMPEG`, then `ffmpeg.exe` on PATH, then where winget, Chocolatey,
+/// Scoop and manual installs put it. A terminal opened before ffmpeg was
+/// installed has an old PATH, so the install folders matter.
 pub fn find_ffmpeg() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("FACT_FFMPEG").map(PathBuf::from) {
         return path.is_file().then_some(path);
@@ -102,13 +105,60 @@ pub fn find_ffmpeg() -> Option<PathBuf> {
         .into_iter()
         .flat_map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
         .map(|dir| dir.join("ffmpeg.exe"));
-    let common = [
-        r"C:\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-    ]
-    .into_iter()
-    .map(PathBuf::from);
-    on_path.chain(common).find(|path| path.is_file())
+    let env_dir = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    let local = env_dir("LOCALAPPDATA");
+    let mut known: Vec<PathBuf> = Vec::new();
+    if let Some(local) = &local {
+        known.push(local.join(r"Microsoft\WinGet\Links\ffmpeg.exe"));
+    }
+    if let Some(data) = env_dir("ProgramData") {
+        known.push(data.join(r"chocolatey\bin\ffmpeg.exe"));
+    }
+    if let Some(home) = env_dir("USERPROFILE") {
+        known.push(home.join(r"scoop\shims\ffmpeg.exe"));
+    }
+    known.push(PathBuf::from(r"C:\ffmpeg\bin\ffmpeg.exe"));
+    known.push(PathBuf::from(r"C:\Program Files\ffmpeg\bin\ffmpeg.exe"));
+    on_path
+        .chain(known)
+        .find(|path| path.is_file())
+        .or_else(|| winget_package_ffmpeg(&local?.join(r"Microsoft\WinGet\Packages")))
+}
+
+/// `<packages>\Gyan.FFmpeg_...\ffmpeg-7.1-full_build\bin\ffmpeg.exe`.
+fn winget_package_ffmpeg(packages: &Path) -> Option<PathBuf> {
+    let children = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default()
+    };
+    children(packages)
+        .into_iter()
+        .filter(|package| {
+            package
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.to_ascii_lowercase().contains("ffmpeg"))
+        })
+        .flat_map(|package| children(&package))
+        .map(|build| build.join(r"bin\ffmpeg.exe"))
+        .find(|path| path.is_file())
+}
+
+/// Check that `path` is a picture FACT can show, judging by its content
+/// rather than its name. Returns its size in pixels.
+pub fn image_dimensions(path: &Path) -> Result<(u32, u32), String> {
+    ImageReader::open(path)
+        .and_then(|reader| reader.with_guessed_format())
+        .map_err(|error| error.to_string())?
+        .into_dimensions()
+        .map_err(|error| error.to_string())
+}
+
+fn is_gif(path: &Path) -> bool {
+    ImageReader::open(path)
+        .and_then(|reader| reader.with_guessed_format())
+        .is_ok_and(|reader| reader.format() == Some(ImageFormat::Gif))
 }
 
 /// Larger images are scaled down once at load; this is plenty for a window
@@ -122,6 +172,11 @@ const MAX_FRAME_TIME: Duration = Duration::from_secs(2);
 const DEFAULT_FRAME_TIME: Duration = Duration::from_millis(100);
 /// How soon to look again when ffmpeg has not delivered the next frame yet.
 const VIDEO_RETRY: Duration = Duration::from_millis(10);
+/// A window being resized keeps its last frame (scaled) until the size has
+/// held this long, instead of restarting ffmpeg for every step.
+const RESIZE_SETTLE: Duration = Duration::from_millis(200);
+/// ffmpeg is restarted this many times after it stops before FACT gives up.
+const VIDEO_ATTEMPTS: u32 = 3;
 
 pub struct Wallpaper {
     source: RgbImage,
@@ -148,9 +203,20 @@ struct Video {
     /// Cell grid the running stream was scaled for.
     size: (u16, u16),
     stream: Option<(Child, Receiver<Vec<u8>>)>,
-    shown_at: Instant,
+    /// When the next frame should appear. Frames keep this schedule, so a
+    /// late frame does not slow down the whole video.
+    due: Instant,
+    /// When to look for the next frame (at or after `due`).
+    check_at: Instant,
+    /// A new window size and when it was first seen.
+    pending_size: Option<((u16, u16), Instant)>,
+    /// Restarts after ffmpeg stopped, and when to try the next one.
+    attempts: u32,
+    retry_at: Option<Instant>,
     paused: bool,
     failed: bool,
+    /// Why playback stopped, for the status line.
+    message: Option<String>,
 }
 
 impl Video {
@@ -203,12 +269,12 @@ impl Video {
             command.creation_flags(CREATE_NO_WINDOW);
         }
         let Ok(mut child) = command.spawn() else {
-            self.failed = true;
+            self.stopped(Instant::now());
             return;
         };
         let Some(mut stdout) = child.stdout.take() else {
             let _ = child.kill();
-            self.failed = true;
+            self.stopped(Instant::now());
             return;
         };
         let frame_bytes = width as usize * height as usize * 3;
@@ -225,11 +291,29 @@ impl Video {
             });
         if spawned.is_err() {
             let _ = child.kill();
-            self.failed = true;
+            self.stopped(Instant::now());
             return;
         }
         self.stream = Some((child, rx));
-        self.shown_at = Instant::now();
+        let now = Instant::now();
+        self.due = now;
+        self.check_at = now;
+    }
+
+    /// ffmpeg stopped or could not start: try again a little later, a few
+    /// times, then keep the last frame and say why.
+    fn stopped(&mut self, now: Instant) {
+        self.stop();
+        self.attempts += 1;
+        if self.attempts < VIDEO_ATTEMPTS {
+            self.retry_at = Some(now + Duration::from_secs(u64::from(self.attempts)));
+        } else {
+            self.failed = true;
+            self.message = Some(format!(
+                "Video wallpaper stopped: ffmpeg could not play {}.",
+                self.path.display()
+            ));
+        }
     }
 
     fn stop(&mut self) {
@@ -265,6 +349,7 @@ impl Wallpaper {
                 failed("video wallpapers need ffmpeg (winget install ffmpeg)".into())
             })?;
             let mut wallpaper = Self::from_image(RgbImage::new(1, 1), spec.opacity, spec.fit);
+            let now = Instant::now();
             wallpaper.video = Some(Video {
                 across: wallpaper.across,
                 path: spec.image.clone(),
@@ -272,17 +357,18 @@ impl Wallpaper {
                 fit: spec.fit,
                 size: (0, 0),
                 stream: None,
-                shown_at: Instant::now(),
+                due: now,
+                check_at: now,
+                pending_size: None,
+                attempts: 0,
+                retry_at: None,
                 paused: false,
                 failed: false,
+                message: None,
             });
             return Ok(wallpaper);
         }
-        let is_gif = spec
-            .image
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"));
-        if is_gif && open_frames(&spec.image).map_err(failed)?.take(2).count() > 1 {
+        if is_gif(&spec.image) && open_frames(&spec.image).map_err(failed)?.take(2).count() > 1 {
             let mut frames = open_frames(&spec.image).map_err(failed)?;
             let first = frames
                 .next()
@@ -299,7 +385,12 @@ impl Wallpaper {
             });
             return Ok(wallpaper);
         }
-        let image = image::open(&spec.image).map_err(|error| failed(error.to_string()))?;
+        // Judge the format by content: a renamed file still loads.
+        let image = ImageReader::open(&spec.image)
+            .and_then(|reader| reader.with_guessed_format())
+            .map_err(|error| failed(error.to_string()))?
+            .decode()
+            .map_err(|error| failed(error.to_string()))?;
         let image = if image.width() > MAX_SOURCE || image.height() > MAX_SOURCE {
             image.thumbnail(MAX_SOURCE, MAX_SOURCE)
         } else {
@@ -337,11 +428,20 @@ impl Wallpaper {
         }
     }
 
+    /// Why the wallpaper stopped playing, once, for the status line.
+    pub fn take_message(&mut self) -> Option<String> {
+        self.video.as_mut().and_then(|video| video.message.take())
+    }
+
     /// When the next animation frame is due, if the wallpaper is playing.
     pub fn next_frame_at(&self) -> Option<Instant> {
         if let Some(video) = &self.video {
-            return (!video.paused && !video.failed && video.stream.is_some())
-                .then(|| video.shown_at + Video::frame_time());
+            if video.paused || video.failed {
+                return None;
+            }
+            let settle = video.pending_size.map(|(_, at)| at + RESIZE_SETTLE);
+            let frame = video.stream.as_ref().map(|_| video.check_at);
+            return [settle, frame, video.retry_at].into_iter().flatten().min();
         }
         self.animation
             .as_ref()
@@ -353,7 +453,9 @@ impl Wallpaper {
     pub fn set_paused(&mut self, paused: bool) {
         if let Some(video) = &mut self.video {
             if video.paused && !paused {
-                video.shown_at = Instant::now();
+                let now = Instant::now();
+                video.due = now;
+                video.check_at = now;
             }
             video.paused = paused;
         }
@@ -369,7 +471,22 @@ impl Wallpaper {
     /// picture changed and the screen should be redrawn.
     pub fn tick(&mut self, now: Instant) -> bool {
         if let Some(video) = &mut self.video {
-            if video.paused || now < video.shown_at + Video::frame_time() {
+            if video.paused || video.failed {
+                return false;
+            }
+            if let Some((size, since)) = video.pending_size {
+                if now >= since + RESIZE_SETTLE {
+                    video.pending_size = None;
+                    video.start(size.0, size.1);
+                    return false;
+                }
+            }
+            if video.retry_at.is_some_and(|at| now >= at) {
+                video.retry_at = None;
+                video.start(video.size.0, video.size.1);
+                return false;
+            }
+            if now < video.check_at {
                 return false;
             }
             let Some((_, frames)) = &video.stream else {
@@ -377,25 +494,39 @@ impl Wallpaper {
             };
             return match frames.try_recv() {
                 Ok(frame) => {
-                    video.shown_at = now;
+                    let frame_time = Video::frame_time();
+                    // Keep the schedule unless far behind (after a stall).
+                    video.due = if now.saturating_duration_since(video.due) > frame_time * 2 {
+                        now + frame_time
+                    } else {
+                        video.due + frame_time
+                    };
+                    video.check_at = video.due;
+                    video.attempts = 0;
                     let (scale, base) = (self.opacity, self.base);
                     let (pixels, _) = frame.as_chunks::<3>();
                     let pixels = pixels.iter().map(|p| blend(*p, base, scale)).collect();
-                    self.cache = Some((video.size.0, video.size.1, pixels));
+                    let (cols, rows) = video.size;
+                    self.cache = Some((cols, rows, pixels));
+                    // Kept to show, scaled, while the window is resized.
+                    let (width, height) = (
+                        u32::from(cols) * u32::from(video.across),
+                        u32::from(rows) * 2,
+                    );
+                    if let Some(image) = RgbImage::from_raw(width, height, frame) {
+                        self.source = image;
+                    }
                     true
                 }
                 // Not decoded yet: look again shortly instead of spinning on
                 // a deadline that has already passed.
                 Err(TryRecvError::Empty) => {
-                    video.shown_at = (now + VIDEO_RETRY)
-                        .checked_sub(Video::frame_time())
-                        .unwrap_or(now);
+                    video.check_at = now + VIDEO_RETRY;
                     false
                 }
                 Err(TryRecvError::Disconnected) => {
-                    // ffmpeg stopped (unreadable file); keep the last frame.
-                    video.stop();
-                    video.failed = true;
+                    // ffmpeg stopped; keep the last frame and try again.
+                    video.stopped(now);
                     false
                 }
             };
@@ -417,8 +548,14 @@ impl Wallpaper {
         };
         match next {
             Some(frame) => {
+                // Keep the GIF's own timing unless far behind.
+                let due = animation.shown_at + animation.delay;
+                animation.shown_at = if now.saturating_duration_since(due) > animation.delay * 2 {
+                    now
+                } else {
+                    due
+                };
                 animation.delay = frame_time(&frame);
-                animation.shown_at = now;
                 self.source = frame_image(frame);
                 self.cache = None;
                 true
@@ -438,15 +575,20 @@ impl Wallpaper {
             return;
         }
         if let Some(video) = &mut self.video {
-            if video.size != (area.width, area.height) && !video.failed {
-                video.start(area.width, area.height);
+            let size = (area.width, area.height);
+            if video.size != size && !video.failed {
+                if video.stream.is_none() && video.retry_at.is_none() {
+                    video.start(size.0, size.1);
+                } else if video
+                    .pending_size
+                    .is_none_or(|(pending, _)| pending != size)
+                {
+                    video.pending_size = Some((size, Instant::now()));
+                }
             }
-            // Until a frame of this size arrives, leave the background alone.
-            if self
-                .cache
-                .as_ref()
-                .is_none_or(|(c, r, _)| (*c, *r) != (area.width, area.height))
-            {
+            // Before the first frame arrives, leave the background alone.
+            // Later, a frame of another size is shown scaled.
+            if self.cache.is_none() {
                 return;
             }
         }

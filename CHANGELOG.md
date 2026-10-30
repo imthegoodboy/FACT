@@ -39,6 +39,34 @@ All notable changes to FACT are documented here. The format follows
   inherited `WT_SESSION`, so a classic console started from a Windows
   Terminal tab is treated as a classic console.
 
+### Fixed
+
+- Profiles whose `command` is a bare name (`pwsh.exe`, `claude`) are found on
+  PATH, and batch files such as npm's `claude.cmd` start through `cmd.exe`.
+- Text pasted in Windows Terminal reaches the pane as one paste instead of
+  running line by line, and characters the keyboard cannot type (Alt codes,
+  pasted accents and symbols) are no longer dropped. AltGr characters work in
+  the palette, search and rename fields and never trigger Ctrl+Alt shortcuts.
+- Clicking a pane focuses it at once: keys and a right-click paste typed right
+  after go to that pane. Scroll mode ends when another pane is focused.
+- Ctrl+C copies only when text is selected and clears the selection after
+  copying; a selection released over the tab strip no longer lingers.
+- Double and triple clicks reach programs that track the mouse instead of
+  selecting text. Dragged gutters land exactly where released, and dragging
+  tabs of different widths no longer flips them back and forth.
+- A program that starts a synchronized update and never ends it can no longer
+  freeze its pane. Programs asking for the default colors get the theme's.
+- Inverse text stays readable over a wallpaper or transparent background.
+- Video wallpapers keep their pace, hold the last frame while the window is
+  resized, restart ffmpeg if it stops and say so if it keeps failing. ffmpeg
+  installed by winget, Chocolatey or Scoop is found even with an old PATH.
+- `fact wallpaper set` checks that a picture really is one (by content, not
+  name) and leaves the previous wallpaper intact if anything fails. The
+  Windows Terminal tab opens only once Windows Terminal has loaded FACT's
+  profile.
+- Closing a pane can no longer hang on older Windows 10 and 11 builds, and the
+  pane process joins its job before it starts children.
+
 ## [0.5.1] - 2026-10-30
 
 ### Fixed

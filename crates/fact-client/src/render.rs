@@ -953,6 +953,11 @@ fn cell_style(cell: &CellDto, theme: &crate::theme::Theme) -> Style {
     let mut bg = color(cell.bg, theme);
     let flags = cell.flags;
     if flags & cell_flags::INVERSE != 0 {
+        // With a transparent background the swap would leave the host's
+        // default color for text on a light block; use the theme's.
+        if bg == Color::Reset {
+            bg = theme.bg;
+        }
         std::mem::swap(&mut fg, &mut bg);
     }
     if flags & cell_flags::HIDDEN != 0 {
@@ -1055,6 +1060,22 @@ mod tests {
         assert_eq!(beam_glyph(CursorShape::Beam, " "), Some("│"));
         assert_eq!(beam_glyph(CursorShape::Beam, "x"), None);
         assert_eq!(beam_glyph(CursorShape::Block, " "), None);
+    }
+
+    #[test]
+    fn inverse_text_stays_readable_on_a_transparent_background() {
+        let theme = crate::theme::Theme::fact_dark().with_transparency(true);
+        let cell = CellDto {
+            ch: 'x',
+            zero: Vec::new(),
+            fg: ColorDto::Named(semantic_color::FOREGROUND),
+            bg: ColorDto::Named(semantic_color::BACKGROUND),
+            flags: cell_flags::INVERSE,
+        };
+        let style = cell_style(&cell, &theme);
+        assert_eq!(style.bg, Some(theme.terminal_fg));
+        assert_eq!(style.fg, Some(theme.bg));
+        assert_ne!(style.fg, Some(Color::Reset));
     }
 
     #[test]

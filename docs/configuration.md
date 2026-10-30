@@ -97,6 +97,10 @@ command = "cmd.exe"
 command = "wsl.exe"
 args = ["-d", "Ubuntu", "--cd", "~"]
 
+[profiles.claude]
+command = "claude"
+title = "Claude Code"
+
 [profiles.disabled-example]
 command = "cmd.exe"
 enabled = false
@@ -104,7 +108,7 @@ enabled = false
 
 | Field | Meaning |
 | --- | --- |
-| `command` | Executable name or absolute path. Omitted/empty uses the detected shell. |
+| `command` | Program name or path. A bare name is looked up on PATH like at a prompt (`claude` finds `claude.cmd`); batch files run through `cmd.exe`. Omitted/empty uses the detected shell. |
 | `args` | Exact argument list; no shell expansion is performed by FACT. |
 | `cwd` | Initial directory. Supports `~` and `%VARIABLE%`. Defaults to the user profile. |
 | `env` | Extra environment variables, merged over global `[env]`. |

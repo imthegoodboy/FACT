@@ -160,8 +160,9 @@ fn open_wallpaper_tab(paths: &Paths, cli: &Cli) -> bool {
         .ok()
         .flatten()
         .is_some_and(|current| !current.video && current.image.is_file());
-    // The profile only exists while FACT's fragment is installed.
-    if !picture || !locations.fragment.is_file() {
+    // The profile only exists while FACT's fragment is installed, and only
+    // once Windows Terminal has loaded it.
+    if !picture || !locations.fragment.is_file() || !wallpaper::terminal_knows_profile() {
         return false;
     }
     if Config::load(paths).is_ok_and(|config| config.transparent_background()) {
@@ -169,6 +170,15 @@ fn open_wallpaper_tab(paths: &Paths, cli: &Cli) -> bool {
     }
     let Ok(exe) = std::env::current_exe() else {
         return false;
+    };
+    // The new tab starts elsewhere, so relative paths are made absolute here.
+    // `~` and `%VAR%` are left for FACT to expand.
+    let here = std::env::current_dir().ok();
+    let absolute = |path: &str| -> PathBuf {
+        match &here {
+            Some(here) if !path.starts_with('~') && !path.contains('%') => here.join(path),
+            _ => PathBuf::from(path),
+        }
     };
     let mut fact_args: Vec<std::ffi::OsString> = Vec::new();
     if let Some(grid) = cli.grid {
@@ -178,16 +188,19 @@ fn open_wallpaper_tab(paths: &Paths, cli: &Cli) -> bool {
         fact_args.extend(["--profile".into(), profile.into()]);
     }
     if let Some(cwd) = &cli.cwd {
-        fact_args.extend(["--cwd".into(), cwd.into()]);
+        fact_args.extend(["--cwd".into(), absolute(cwd).into_os_string()]);
     }
     if let Some(config) = &cli.config {
-        fact_args.extend(["--config".into(), config.into()]);
+        let config = here
+            .as_ref()
+            .map_or_else(|| config.clone(), |here| here.join(config));
+        fact_args.extend(["--config".into(), config.into_os_string()]);
     }
-    let dir = cli
-        .cwd
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok());
+    let dir = match &cli.cwd {
+        Some(cwd) if !cwd.starts_with('~') && !cwd.contains('%') => Some(absolute(cwd)),
+        Some(_) => None,
+        None => here.clone(),
+    };
     let Some(args) = wallpaper::new_tab_arguments(&exe, dir.as_deref(), &fact_args) else {
         return false;
     };

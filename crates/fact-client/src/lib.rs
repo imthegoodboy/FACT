@@ -10,8 +10,8 @@ mod theme;
 mod wallpaper;
 
 pub use wallpaper::{
-    find_ffmpeg, in_windows_terminal, is_video as is_video_file, Fit as WallpaperFit,
-    WallpaperSpec, VIDEO_EXTENSIONS,
+    find_ffmpeg, image_dimensions, in_windows_terminal, is_video as is_video_file,
+    Fit as WallpaperFit, WallpaperSpec, VIDEO_EXTENSIONS,
 };
 
 use std::cell::RefCell;
@@ -51,6 +51,10 @@ const READER_POLL: Duration = Duration::from_millis(100);
 const STATUS_LIFETIME: Duration = Duration::from_secs(2);
 /// Upper bound on one batch of queued events before the screen is redrawn.
 const MAX_BATCH: Duration = Duration::from_millis(8);
+/// How long to wait for the rest of a paste that arrives as keystrokes.
+const PASTE_GAP: Duration = Duration::from_millis(8);
+/// Longest stretch of keystrokes gathered into one paste batch.
+const MAX_PASTE_BATCH: Duration = Duration::from_millis(250);
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
 /// Width of the new-tab button in the tab strip.
@@ -849,6 +853,11 @@ struct App {
     mouse_position: Option<(u16, u16)>,
     scroll_mode: Option<u64>,
     app_mouse_down: AppMouseCapture,
+    /// Characters whose key is down, to tell a key's release from a console
+    /// alt code, which arrives as a release alone.
+    held_chars: HashSet<char>,
+    /// The window was resized during this batch; tell the engine once.
+    resize_pending: bool,
     status: Option<(String, Instant)>,
     exit_message: Option<String>,
     fatal: Option<anyhow::Error>,
@@ -894,6 +903,8 @@ impl App {
             mouse_position: None,
             scroll_mode: None,
             app_mouse_down: AppMouseCapture::default(),
+            held_chars: HashSet::new(),
+            resize_pending: false,
             status: None,
             exit_message: None,
             fatal: None,
@@ -925,23 +936,41 @@ impl App {
                 .and_then(|wallpaper| wallpaper.borrow().next_frame_at())
                 .map(|at| at.saturating_duration_since(Instant::now()));
             let wait = frame_wait.map_or(status_wait, |frame| frame.min(status_wait));
+            let mut batch = Vec::new();
             match self.events.receiver.recv_timeout(wait) {
-                Ok(event) => self.handle_ui_event(event),
+                Ok(event) => batch.push(event),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     self.fatal = Some(anyhow!("FACT event readers stopped unexpectedly"));
                 }
             }
-            let batch = Instant::now();
-            while self.fatal.is_none() && self.exit_message.is_none() && batch.elapsed() < MAX_BATCH
-            {
+            let started = Instant::now();
+            while self.fatal.is_none() {
+                let pasting = trailing_text_keys(&batch) >= 3;
+                let limit = if pasting { MAX_PASTE_BATCH } else { MAX_BATCH };
+                if started.elapsed() >= limit {
+                    break;
+                }
                 match self.events.receiver.try_recv() {
-                    Ok(event) => self.handle_ui_event(event),
+                    Ok(event) => batch.push(event),
+                    // Text pasted into the host terminal arrives as a stream
+                    // of keystrokes. Wait briefly for the rest so the whole
+                    // paste is handled at once.
+                    Err(TryRecvError::Empty) if pasting => {
+                        match self.events.receiver.recv_timeout(PASTE_GAP) {
+                            Ok(event) => batch.push(event),
+                            Err(_) => break,
+                        }
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         self.fatal = Some(anyhow!("FACT event readers stopped unexpectedly"));
                     }
                 }
+            }
+            self.handle_batch(batch);
+            if std::mem::take(&mut self.resize_pending) {
+                self.resize_session();
             }
             if self
                 .status
@@ -951,10 +980,16 @@ impl App {
                 self.status = None;
                 self.dirty = true;
             }
-            if let Some(wallpaper) = &self.wallpaper {
-                if wallpaper.borrow_mut().tick(Instant::now()) {
+            let message = self.wallpaper.as_ref().and_then(|wallpaper| {
+                let mut wallpaper = wallpaper.borrow_mut();
+                if wallpaper.tick(Instant::now()) {
                     self.dirty = true;
                 }
+                wallpaper.take_message()
+            });
+            if let Some(message) = message {
+                self.set_status(message);
+                self.dirty = true;
             }
         }
 
@@ -962,6 +997,60 @@ impl App {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Apply a batch of events in order. Runs of keystrokes that hold a
+    /// line break followed by more text are a paste from the host terminal
+    /// (Windows Terminal types pasted text into console programs), so they
+    /// go to the pane as one paste instead of running line by line.
+    fn handle_batch(&mut self, batch: Vec<UiEvent>) {
+        let mut run: Vec<KeyEvent> = Vec::new();
+        for event in batch {
+            if self.fatal.is_some() || self.exit_message.is_some() {
+                break;
+            }
+            let key = match event {
+                UiEvent::Input(Event::Key(key)) => key,
+                // Frames only change what is drawn; a paste stays whole.
+                UiEvent::Message(message) => {
+                    self.handle_ui_event(UiEvent::Message(message));
+                    continue;
+                }
+                other => {
+                    self.flush_keys(&mut run);
+                    self.handle_ui_event(other);
+                    continue;
+                }
+            };
+            let Some(key) = key_press(&mut self.held_chars, key) else {
+                continue;
+            };
+            if is_text_key(&key) {
+                run.push(key);
+            } else {
+                self.flush_keys(&mut run);
+                self.handle_key(key);
+                self.dirty = true;
+            }
+        }
+        self.flush_keys(&mut run);
+    }
+
+    fn flush_keys(&mut self, run: &mut Vec<KeyEvent>) {
+        let keys = std::mem::take(run);
+        if keys.is_empty() {
+            return;
+        }
+        self.dirty = true;
+        let plain = self.overlay.is_none() && self.scroll_mode.is_none() && !self.prefix_armed;
+        match pasted_text(&keys).filter(|_| plain) {
+            Some(text) => self.paste_text(text),
+            None => {
+                for key in keys {
+                    self.handle_key(key);
+                }
+            }
+        }
     }
 
     fn handle_ui_event(&mut self, event: UiEvent) {
@@ -1001,11 +1090,13 @@ impl App {
                 self.dirty = true;
             }
             Event::FocusGained => {
+                self.held_chars.clear();
                 if let Some(wallpaper) = &self.wallpaper {
                     wallpaper.borrow_mut().set_paused(false);
                 }
             }
             Event::FocusLost => {
+                self.held_chars.clear();
                 // An animated wallpaper costs nothing while nobody watches.
                 if let Some(wallpaper) = &self.wallpaper {
                     wallpaper.borrow_mut().set_paused(true);
@@ -1018,10 +1109,12 @@ impl App {
                 self.dirty = true;
             }
             Event::Resize(cols, rows) => {
+                // Dragging a window edge sends many sizes; the engine only
+                // needs the last one of each batch.
                 self.selection = None;
                 self.width = cols;
                 self.height = rows;
-                self.resize_session();
+                self.resize_pending = true;
                 self.dirty = true;
             }
             _ => {}
@@ -1091,8 +1184,33 @@ impl App {
             }
         }
 
+        // Panes that left the screen send their cells again when they return.
+        self.buffers
+            .retain(|id, _| frame.panes.iter().any(|pane| pane.id == *id));
         self.last_seq = frame.seq;
         self.frame = Some(frame);
+    }
+
+    /// Focus `pane` and treat it as focused right away. The frame confirming
+    /// it comes later; keys and pastes meanwhile must already reach it.
+    fn focus(&mut self, pane: u64) {
+        self.bells.remove(&pane);
+        if self.send(Command::FocusPane { pane }).is_none() {
+            return;
+        }
+        if let Some(frame) = &mut self.frame {
+            if frame.panes.iter().any(|view| view.id == pane) {
+                frame.focus = Some(pane);
+                for view in &mut frame.panes {
+                    view.focused = view.id == pane;
+                }
+            }
+        }
+        // Scroll mode belongs to the pane it started in.
+        if self.scroll_mode.is_some_and(|scrolled| scrolled != pane) {
+            self.scroll_mode = None;
+            self.set_status("Scroll mode ended.");
+        }
     }
 
     fn focused_pane(&self) -> Option<&PaneView> {
@@ -1393,8 +1511,10 @@ impl App {
                 self.paste_or_forward(key);
                 return;
             }
-            CKeyCode::Char('c' | 'C') if copy && control && !shift && self.selection.is_some() => {
+            // Without selected text, Ctrl+C reaches the app as usual.
+            CKeyCode::Char('c' | 'C') if copy && control && !shift && self.has_selection() => {
                 self.copy_selection();
+                self.selection = None;
                 return;
             }
             CKeyCode::Insert if paste && shift => {
@@ -1403,6 +1523,7 @@ impl App {
             }
             CKeyCode::Insert if copy && control => {
                 self.copy_selection();
+                self.selection = None;
                 return;
             }
             _ => {}
@@ -1861,10 +1982,8 @@ impl App {
                         palette.selected = 0;
                         self.overlay = Some(Overlay::Palette(palette));
                     }
-                    CKeyCode::Char(c)
-                        if !key.modifiers.contains(KeyModifiers::CONTROL)
-                            && !key.modifiers.contains(KeyModifiers::ALT) =>
-                    {
+                    CKeyCode::Char(_) if keymap::typed_char(&key).is_some() => {
+                        let c = keymap::typed_char(&key).unwrap_or_default();
                         if palette.query.chars().count() < 64 {
                             palette.query.push(c);
                         }
@@ -1891,7 +2010,7 @@ impl App {
                                 .map(|hit| (result.pane, hit.line))
                         });
                         if let Some((pane, line)) = hit {
-                            let _ = self.send(Command::FocusPane { pane });
+                            self.focus(pane);
                             let _ = self.send(Command::ScrollToLine { pane, line });
                             self.set_status(format!("Jumped to line {line}."));
                         } else {
@@ -1922,10 +2041,8 @@ impl App {
                     search.query.clear();
                     self.overlay = Some(Overlay::Search(search));
                 }
-                CKeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                {
+                CKeyCode::Char(_) if keymap::typed_char(&key).is_some() => {
+                    let c = keymap::typed_char(&key).unwrap_or_default();
                     if search.query.chars().count() < MAX_SEARCH_QUERY {
                         search.result = None;
                         search.selected = 0;
@@ -1957,10 +2074,8 @@ impl App {
                     prompt.value.pop();
                     self.overlay = Some(Overlay::Prompt(prompt));
                 }
-                CKeyCode::Char(c)
-                    if !key.modifiers.contains(KeyModifiers::CONTROL)
-                        && !key.modifiers.contains(KeyModifiers::ALT) =>
-                {
+                CKeyCode::Char(_) if keymap::typed_char(&key).is_some() => {
+                    let c = keymap::typed_char(&key).unwrap_or_default();
                     if prompt.value.chars().count() < 60 {
                         prompt.value.push(c);
                     }
@@ -2058,9 +2173,27 @@ impl App {
                 }
                 return;
             }
-            if self.drag_split.take().is_some() {
+            if let Some(mut drag) = self.drag_split.take() {
+                // Moves are throttled; the release lands exactly.
+                if let Some(content_y) = self.content_row(mouse.row) {
+                    drag.last_sent = Instant::now() - Duration::from_secs(1);
+                    self.drag_split_to(drag, mouse.column, content_y);
+                    self.drag_split = None;
+                }
                 return;
             }
+            // Wherever the button comes up (the tab strip too), a selection
+            // ends here.
+            let dragged = self
+                .selection
+                .as_ref()
+                .is_some_and(|selection| selection.anchor != selection.end);
+            if dragged && self.config.copy_on_select {
+                self.copy_selection();
+            } else if !dragged {
+                self.selection = None;
+            }
+            return;
         }
         if self.tabs_visible() && mouse.row == 0 {
             if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -2103,18 +2236,14 @@ impl App {
                     && !mouse.modifiers.contains(KeyModifiers::CONTROL)
                 {
                     if let Some(pane) = self.pane_slot_at(mouse.column, content_y) {
-                        let _ = self.send(Command::FocusPane { pane });
-                        self.bells.remove(&pane);
+                        self.focus(pane);
                         self.pane_drag = Some(PaneDrag { pane, target: None });
                         self.set_status("Move pane: drop it on another pane to swap, or on a tab.");
                     }
                     return;
                 }
                 if let Some(geometry) = self.scrollbar_at(mouse.column, content_y) {
-                    let _ = self.send(Command::FocusPane {
-                        pane: geometry.pane,
-                    });
-                    self.bells.remove(&geometry.pane);
+                    self.focus(geometry.pane);
                     let on_thumb = content_y >= geometry.thumb_y
                         && content_y < geometry.thumb_y.saturating_add(geometry.thumb_height);
                     let base_offset = if on_thumb {
@@ -2155,22 +2284,12 @@ impl App {
                     self.selection = None;
                     return;
                 };
-                let _ = self.send(Command::FocusPane { pane });
-                self.bells.remove(&pane);
+                self.focus(pane);
                 let Some((_pane, local_x, local_y)) = self.pane_at(mouse.column, content_y) else {
                     self.selection = None;
                     return;
                 };
                 let shift = mouse.modifiers.contains(KeyModifiers::SHIFT);
-                let clicks = self.register_click(pane, local_x, local_y);
-                if !shift && clicks >= 2 {
-                    if clicks == 2 {
-                        self.select_word(pane, local_x, local_y);
-                    } else {
-                        self.select_line(pane, local_y);
-                    }
-                    return;
-                }
                 if let Some(view) = self
                     .frame
                     .as_ref()
@@ -2178,6 +2297,22 @@ impl App {
                 {
                     let app_mouse =
                         app_tracks_mouse(view.modes) && view.scroll_offset == 0 && !shift;
+                    // Double clicks belong to apps that track the mouse;
+                    // elsewhere they select a word, triple clicks a line.
+                    let clicks = if app_mouse {
+                        self.last_click = None;
+                        1
+                    } else {
+                        self.register_click(pane, local_x, local_y)
+                    };
+                    if clicks >= 2 {
+                        if clicks == 2 {
+                            self.select_word(pane, local_x, local_y);
+                        } else {
+                            self.select_line(pane, local_y);
+                        }
+                        return;
+                    }
                     if app_mouse {
                         self.app_mouse_down.press(MouseButton::Left, pane);
                         self.forward_mouse_button(
@@ -2201,8 +2336,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Right) => {
                 if mouse.modifiers.contains(KeyModifiers::SHIFT) {
                     if let Some(pane) = self.pane_slot_at(mouse.column, content_y) {
-                        let _ = self.send(Command::FocusPane { pane });
-                        self.bells.remove(&pane);
+                        self.focus(pane);
                     }
                     self.open_context_menu(mouse);
                     return;
@@ -2217,8 +2351,7 @@ impl App {
                 let Some(pane) = self.pane_slot_at(mouse.column, content_y) else {
                     return;
                 };
-                let _ = self.send(Command::FocusPane { pane });
-                self.bells.remove(&pane);
+                self.focus(pane);
                 let app_mouse = self
                     .frame
                     .as_ref()
@@ -2307,17 +2440,6 @@ impl App {
                             self.selection.as_mut().unwrap().end = (x, y);
                         }
                     }
-                }
-            }
-            MouseEventKind::Up(MouseButton::Left) => {
-                let dragged = self
-                    .selection
-                    .as_ref()
-                    .is_some_and(|selection| selection.anchor != selection.end);
-                if dragged && self.config.copy_on_select {
-                    self.copy_selection();
-                } else if !dragged {
-                    self.selection = None;
                 }
             }
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
@@ -2625,17 +2747,30 @@ impl App {
         let Some(tab) = self.tab_drag else {
             return;
         };
-        let Some(hovered) = self.tab_at(column).filter(|hovered| *hovered != tab) else {
+        let Some(frame) = self.frame.as_ref() else {
             return;
         };
-        let Some(index) = self
-            .frame
-            .as_ref()
-            .and_then(|frame| frame.tabs.iter().position(|view| view.id == hovered))
+        let Some(hovered) = tab_ranges(&frame.tabs, self.width)
+            .into_iter()
+            .find(|range| range.rect.contains(column, 0) && range.id != tab)
         else {
             return;
         };
-        let _ = self.send(Command::MoveTab { tab, index });
+        let position = |id: u32| frame.tabs.iter().position(|view| view.id == id);
+        let (Some(from), Some(index)) = (position(tab), position(hovered.id)) else {
+            return;
+        };
+        // Swap only past the middle of the other tab, so tabs of different
+        // widths do not trade places back and forth under the pointer.
+        let middle = hovered.rect.x + hovered.rect.width / 2;
+        let past_middle = if index > from {
+            column >= middle
+        } else {
+            column <= middle
+        };
+        if past_middle {
+            let _ = self.send(Command::MoveTab { tab, index });
+        }
     }
 
     fn pane_tab(&self, pane: u64) -> Option<u32> {
@@ -2713,6 +2848,81 @@ impl App {
         }
         self.drag_split = Some(drag);
     }
+}
+
+/// The key press FACT acts on, or `None` to skip the event. Console alt
+/// codes (Alt+numpad, and pasted characters the keyboard layout cannot
+/// type) arrive as a release with no press; other releases are skipped.
+fn key_press(held: &mut HashSet<char>, key: KeyEvent) -> Option<KeyEvent> {
+    let CKeyCode::Char(c) = key.code else {
+        return (key.kind != KeyEventKind::Release).then_some(key);
+    };
+    let folded = c.to_lowercase().next().unwrap_or(c);
+    if key.kind != KeyEventKind::Release {
+        held.insert(folded);
+        return Some(key);
+    }
+    if held.is_empty() {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+        return Some(KeyEvent::new(CKeyCode::Char(c), KeyModifiers::NONE));
+    }
+    // The release of a held key, possibly with other modifiers by now
+    // (Shift or AltGr let go first).
+    if !held.remove(&folded) {
+        let any = held.iter().next().copied();
+        if let Some(any) = any {
+            held.remove(&any);
+        }
+    }
+    None
+}
+
+/// Keys that type text: characters (with Shift at most), Enter and Tab.
+fn is_text_key(key: &KeyEvent) -> bool {
+    match key.code {
+        CKeyCode::Char(_) => (key.modifiers - KeyModifiers::SHIFT).is_empty(),
+        CKeyCode::Enter | CKeyCode::Tab => key.modifiers.is_empty(),
+        _ => false,
+    }
+}
+
+/// Text keystrokes (including alt-code releases) at the end of a batch.
+fn trailing_text_keys(batch: &[UiEvent]) -> usize {
+    batch
+        .iter()
+        .rev()
+        .filter(|event| !matches!(event, UiEvent::Message(_)))
+        .take_while(|event| match event {
+            UiEvent::Input(Event::Key(key)) => {
+                matches!(
+                    key.code,
+                    CKeyCode::Char(_) | CKeyCode::Enter | CKeyCode::Tab
+                ) && !key.modifiers.contains(KeyModifiers::CONTROL)
+            }
+            _ => false,
+        })
+        .count()
+}
+
+/// The text of keystrokes that can only be a paste: a line break followed
+/// by more text. Typing a command and Enter stays keystrokes.
+fn pasted_text(keys: &[KeyEvent]) -> Option<String> {
+    let enter = keys.iter().position(|key| key.code == CKeyCode::Enter)?;
+    if keys.len() < 3 || enter + 1 == keys.len() {
+        return None;
+    }
+    let text = keys
+        .iter()
+        .filter_map(|key| match key.code {
+            CKeyCode::Char(c) => Some(c),
+            CKeyCode::Enter => Some('\n'),
+            CKeyCode::Tab => Some('\t'),
+            _ => None,
+        })
+        .collect();
+    Some(text)
 }
 
 fn palette_items(keys: &CompiledKeybinds) -> Vec<PaletteItem> {
@@ -2927,6 +3137,90 @@ mod tests {
         assert_eq!(capture.release(MouseButton::Left), Some(9));
         assert_eq!(capture.release(MouseButton::Middle), Some(8));
         assert_eq!(capture.release(MouseButton::Right), None);
+    }
+
+    fn press(code: CKeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn keystrokes_with_a_line_break_inside_are_a_paste() {
+        let keys = |text: &str| -> Vec<KeyEvent> {
+            text.chars()
+                .map(|c| match c {
+                    '\n' => press(CKeyCode::Enter),
+                    '\t' => press(CKeyCode::Tab),
+                    c => press(CKeyCode::Char(c)),
+                })
+                .collect()
+        };
+        assert_eq!(pasted_text(&keys("ab\ncd")).as_deref(), Some("ab\ncd"));
+        assert_eq!(
+            pasted_text(&keys("a\tb\nc\n")).as_deref(),
+            Some("a\tb\nc\n")
+        );
+        // A command and Enter, typed quickly, still runs.
+        assert_eq!(pasted_text(&keys("ls\n")), None);
+        assert_eq!(pasted_text(&keys("hello")), None);
+        assert!(is_text_key(&KeyEvent::new(
+            CKeyCode::Char('A'),
+            KeyModifiers::SHIFT
+        )));
+        assert!(!is_text_key(&KeyEvent::new(
+            CKeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_text_key(&KeyEvent::new(
+            CKeyCode::Enter,
+            KeyModifiers::SHIFT
+        )));
+    }
+
+    #[test]
+    fn alt_codes_type_and_key_releases_do_not() {
+        let release = |c: char, modifiers: KeyModifiers| {
+            KeyEvent::new_with_kind(CKeyCode::Char(c), modifiers, KeyEventKind::Release)
+        };
+        let mut held = HashSet::new();
+        // A release with no press: an alt code such as Alt+0233.
+        let typed = key_press(&mut held, release('é', KeyModifiers::ALT)).unwrap();
+        assert_eq!(typed.code, CKeyCode::Char('é'));
+        assert_eq!(typed.modifiers, KeyModifiers::NONE);
+        assert_eq!(typed.kind, KeyEventKind::Press);
+        // An ordinary key: press types, release does not.
+        let shifted = KeyEvent::new(CKeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert!(key_press(&mut held, shifted).is_some());
+        // Shift let go first: the release reports 'a'.
+        assert!(key_press(&mut held, release('a', KeyModifiers::NONE)).is_none());
+        assert!(held.is_empty());
+        // AltGr+Q types '@'; letting AltGr go first releases 'q'.
+        let at = KeyEvent::new(
+            CKeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        assert!(key_press(&mut held, at).is_some());
+        assert!(key_press(&mut held, release('q', KeyModifiers::NONE)).is_none());
+        assert!(held.is_empty());
+        let enter_up =
+            KeyEvent::new_with_kind(CKeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
+        assert!(key_press(&mut held, enter_up).is_none());
+    }
+
+    #[test]
+    fn altgr_characters_are_text_not_shortcuts() {
+        let altgr = KeyEvent::new(
+            CKeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        );
+        if cfg!(windows) {
+            let chord = keymap::chord_for(altgr).unwrap();
+            assert!(!chord.mods.control && !chord.mods.alt);
+            assert_eq!(keymap::typed_char(&altgr), Some('@'));
+        }
+        let shortcut = KeyEvent::new(CKeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert_eq!(keymap::typed_char(&shortcut), None);
+        let plain = KeyEvent::new(CKeyCode::Char('F'), KeyModifiers::SHIFT);
+        assert_eq!(keymap::typed_char(&plain), Some('F'));
     }
 
     #[test]

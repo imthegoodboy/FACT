@@ -186,13 +186,16 @@ fn engine_loop(
     // or a pane still has queued output.
     let mut pending = false;
     loop {
-        let timeout = if pending {
+        let mut timeout = if pending {
             MIN_FRAME_INTERVAL.saturating_sub(last_output_frame.elapsed())
         } else if manager.frames_blocked() {
             BLOCKED_RETRY
         } else {
             IDLE_TICK
         };
+        if let Some(deadline) = manager.next_sync_deadline() {
+            timeout = timeout.min(deadline.saturating_duration_since(Instant::now()));
+        }
         match requests.recv_timeout(timeout) {
             Ok(Request::Command { command, reply }) => {
                 let result = manager.handle(command, Some(SESSION_NAME));

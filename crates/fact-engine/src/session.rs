@@ -311,6 +311,16 @@ impl SessionManager {
         backlog
     }
 
+    /// The earliest moment a pane's unfinished synchronized update must be
+    /// shown anyway; the owner wakes then even without new output.
+    pub(crate) fn next_sync_deadline(&self) -> Option<Instant> {
+        self.sessions
+            .values()
+            .flat_map(|session| session.panes.values())
+            .filter_map(|pane| pane.term.sync_deadline())
+            .min()
+    }
+
     /// Send every subscriber the frame it needs.
     pub(crate) fn publish(&mut self) {
         self.frames_blocked = self.pump_frames();
@@ -354,6 +364,9 @@ impl SessionManager {
                         }
                     }
                     backlog |= !emptied;
+                    if pane.term.flush_expired_sync(Instant::now()) {
+                        dirty = true;
+                    }
                     if dirty {
                         pane.version = pane.version.wrapping_add(1);
                     }
@@ -569,6 +582,11 @@ impl SessionManager {
             .ok_or_else(|| ProtocolError::not_found(format!("pane {pane}")))?;
         let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
         let bytes = if live.term.bracketed_paste() {
+            // Pasted text must not be able to end the paste early and have the
+            // rest run as typed input.
+            let normalized = normalized
+                .replace(BRACKETED_PASTE_START, "")
+                .replace(BRACKETED_PASTE_END, "");
             format!("{BRACKETED_PASTE_START}{normalized}{BRACKETED_PASTE_END}").into_bytes()
         } else {
             normalized.into_bytes()
@@ -1592,8 +1610,11 @@ fn spawn_pane(
         sanitize_title(title_hint)
     };
     let sink = TerminalEventSink::new();
-    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(16);
+    // Startup bursts of terminal queries must not drop replies.
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(256);
     sink.attach_writer(response_tx);
+    let (foreground, background) = config.terminal_colors();
+    sink.set_default_colors(foreground, background);
     let term = TerminalModel::new(cols, rows, config.scrollback_lines, sink);
 
     let mut options = SpawnOptions::new(resolved.command.clone(), cols, rows);

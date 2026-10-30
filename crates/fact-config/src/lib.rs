@@ -320,7 +320,9 @@ impl Config {
             )));
         }
         let command = match profile.command.as_deref().map(str::trim) {
-            Some(c) if !c.is_empty() => c.to_string(),
+            // `claude` or `pwsh.exe` work like at a prompt. A command that is
+            // not found is passed on unchanged so the pane reports the error.
+            Some(c) if !c.is_empty() => find_on_path(c).unwrap_or_else(|| c.to_string()),
             _ => detect_shell().ok_or_else(|| {
                 ConfigError::NoShell(
                     name.to_string(),
@@ -348,6 +350,18 @@ impl Config {
 
     pub fn transparent_background(&self) -> bool {
         self.background == "transparent"
+    }
+
+    /// The theme's terminal text and background colors, reported to programs
+    /// that ask (OSC 10/11). Kept in step with fact-client's themes.
+    pub fn terminal_colors(&self) -> ([u8; 3], [u8; 3]) {
+        match self.theme.as_str() {
+            "fact-light" => ([31, 35, 40], [255, 255, 255]),
+            "dracula" => ([248, 248, 242], [33, 34, 44]),
+            "nord" => ([216, 222, 233], [36, 41, 51]),
+            "gruvbox" => ([235, 219, 178], [29, 32, 33]),
+            _ => ([231, 233, 237], [0, 0, 0]),
+        }
     }
 
     pub fn has_profile(&self, name: &str) -> bool {
@@ -388,18 +402,40 @@ pub fn detect_shell() -> Option<String> {
         .or_else(|| find_on_path("cmd.exe"))
 }
 
+/// Find a program the way the command prompt does: a name with a folder is
+/// used as given, a bare name is looked up on PATH, and a name without a
+/// program extension tries each PATHEXT extension (`claude` finds
+/// `claude.cmd`). The current folder is not searched.
 pub fn find_on_path(exe: &str) -> Option<String> {
-    if Path::new(exe).is_absolute() && Path::new(exe).is_file() {
-        return Some(exe.to_string());
+    let name = Path::new(exe);
+    let pathext: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .map(|ext| ext.trim().to_ascii_lowercase())
+        .filter(|ext| ext.starts_with('.') && ext.len() > 1)
+        .collect();
+    let has_program_extension = name
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| pathext.contains(&format!(".{}", ext.to_ascii_lowercase())));
+    let extensions: Vec<&str> = if has_program_extension {
+        vec![""]
+    } else {
+        pathext.iter().map(String::as_str).collect()
+    };
+    let first_match = |base: &Path| {
+        extensions.iter().find_map(|ext| {
+            let mut file = base.as_os_str().to_os_string();
+            file.push(ext);
+            let file = PathBuf::from(file);
+            file.is_file().then(|| file.to_string_lossy().into_owned())
+        })
+    };
+    if name.is_absolute() || name.components().count() > 1 {
+        return first_match(name);
     }
     let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(exe);
-        if candidate.is_file() {
-            return Some(candidate.to_string_lossy().into_owned());
-        }
-    }
-    None
+    std::env::split_paths(&path).find_map(|dir| first_match(&dir.join(name)))
 }
 
 pub fn home_dir() -> Option<PathBuf> {
@@ -657,9 +693,22 @@ mod tests {
             },
         );
         let p = config.resolve_profile(Some("test")).unwrap();
-        assert_eq!(p.command, "cmd.exe");
+        // Found on PATH, so the pane can start it.
+        assert!(Path::new(&p.command).is_absolute(), "{}", p.command);
+        assert!(p.command.to_ascii_lowercase().ends_with("cmd.exe"));
         assert_eq!(p.label(), "Test");
         assert!(config.resolve_profile(Some("missing")).is_err());
+    }
+
+    #[test]
+    fn commands_without_extension_find_batch_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("tool.cmd"), "@echo off\n").unwrap();
+        let bare = dir.path().join("tool");
+        let found = find_on_path(&bare.to_string_lossy()).unwrap();
+        assert!(found.to_ascii_lowercase().ends_with("tool.cmd"), "{found}");
+        assert!(find_on_path(&dir.path().join("missing").to_string_lossy()).is_none());
+        assert!(find_on_path("fact-surely-not-installed-anywhere").is_none());
     }
 
     #[test]
