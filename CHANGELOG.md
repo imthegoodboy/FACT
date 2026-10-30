@@ -52,7 +52,8 @@ All notable changes to FACT are documented here. The format follows
 ### Fixed
 
 - Profiles whose `command` is a bare name (`pwsh.exe`, `claude`) are found on
-  PATH, and batch files such as npm's `claude.cmd` start through `cmd.exe`.
+  PATH (never in the current folder; a missing one is reported by name), and
+  batch files such as npm's `claude.cmd` start through `cmd.exe`.
 - Text pasted in Windows Terminal reaches the pane as one paste instead of
   running line by line, and characters the keyboard cannot type (Alt codes,
   pasted accents and symbols) are no longer dropped. AltGr characters work in

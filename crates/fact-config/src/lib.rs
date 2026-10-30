@@ -397,9 +397,20 @@ impl Config {
             )));
         }
         let command = match profile.command.as_deref().map(str::trim) {
-            // `claude` or `pwsh.exe` work like at a prompt. A command that is
-            // not found is passed on unchanged so the pane reports the error.
-            Some(c) if !c.is_empty() => find_on_path(c).unwrap_or_else(|| c.to_string()),
+            // `claude` or `pwsh.exe` are looked up on PATH. A bare name that
+            // is not there is an error rather than a search of the current
+            // folder; a path that does not exist is left for the pane to
+            // report.
+            Some(c) if !c.is_empty() => match find_on_path(c) {
+                Some(found) => found,
+                None if Path::new(c).components().count() == 1 => {
+                    return Err(ConfigError::NoShell(
+                        name.to_string(),
+                        format!("'{c}' was not found on PATH"),
+                    ));
+                }
+                None => c.to_string(),
+            },
             _ => detect_shell().ok_or_else(|| {
                 ConfigError::NoShell(
                     name.to_string(),
@@ -497,6 +508,13 @@ pub fn find_on_path(exe: &str) -> Option<String> {
         .map(|ext| ext.trim().to_ascii_lowercase())
         .filter(|ext| ext.starts_with('.') && ext.len() > 1)
         .collect();
+    // Only what a pane can start: scripts such as `.vbs` or `.ps1` in
+    // PATHEXT need their interpreter.
+    let launchable: Vec<&str> = pathext
+        .iter()
+        .map(String::as_str)
+        .filter(|ext| [".com", ".exe", ".bat", ".cmd"].contains(ext))
+        .collect();
     let has_program_extension = name
         .extension()
         .and_then(|ext| ext.to_str())
@@ -504,7 +522,7 @@ pub fn find_on_path(exe: &str) -> Option<String> {
     let extensions: Vec<&str> = if has_program_extension {
         vec![""]
     } else {
-        pathext.iter().map(String::as_str).collect()
+        launchable
     };
     let first_match = |base: &Path| {
         extensions.iter().find_map(|ext| {
@@ -807,6 +825,24 @@ mod tests {
         assert!(found.to_ascii_lowercase().ends_with("tool.cmd"), "{found}");
         assert!(find_on_path(&dir.path().join("missing").to_string_lossy()).is_none());
         assert!(find_on_path("fact-surely-not-installed-anywhere").is_none());
+        // A script PATHEXT lists but a pane cannot start is skipped.
+        fs::write(dir.path().join("other.vbs"), "").unwrap();
+        assert!(find_on_path(&dir.path().join("other").to_string_lossy()).is_none());
+
+        let mut config = Config::default();
+        config.profiles.insert(
+            "ghost".to_string(),
+            Profile {
+                command: Some("fact-surely-not-installed-anywhere".to_string()),
+                enabled: true,
+                ..Profile::default()
+            },
+        );
+        let error = config
+            .resolve_profile(Some("ghost"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not found on PATH"), "{error}");
     }
 
     #[test]

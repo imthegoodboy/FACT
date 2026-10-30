@@ -289,6 +289,18 @@ pub fn encode_key_win32(key: KeyEvent) -> Option<Vec<u8>> {
     )
 }
 
+/// Whether the active keyboard layout has a key for `c`. Windows types a
+/// character it has no key for as an Alt code, which arrives as a key release.
+#[cfg(windows)]
+pub(crate) fn layout_types(c: char) -> bool {
+    vk_for_char(c) != 0
+}
+
+#[cfg(not(windows))]
+pub(crate) fn layout_types(_c: char) -> bool {
+    true
+}
+
 #[cfg(windows)]
 fn vk_for_char(c: char) -> u16 {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;

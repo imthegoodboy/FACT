@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Bumped when command or frame semantics change. It identifies the message
 /// shape used inside this build and in tests.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 pub const MAX_INPUT_CHUNK: usize = 256 * 1024;
 pub const MAX_PASTE_BYTES: usize = 4 * 1024 * 1024;
 pub const BRACKETED_PASTE_START: &str = "\x1b[200~";

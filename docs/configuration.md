@@ -131,7 +131,7 @@ enabled = false
 
 | Field | Meaning |
 | --- | --- |
-| `command` | Program name or path. A bare name is looked up in the folders on PATH, trying PATHEXT extensions (`claude` finds `claude.cmd`), but never in the current folder; batch files run through `cmd.exe`. Omitted uses the detected shell. |
+| `command` | Program name or path. A bare name is looked up in the folders on PATH, trying the PATHEXT extensions a pane can start (`claude` finds `claude.cmd`), never in the current folder; a bare name not on PATH is an error. Batch files run through `cmd.exe`. Omitted uses the detected shell. |
 | `args` | Exact argument list; no shell expansion is performed by FACT. |
 | `cwd` | Initial directory. Supports `~` and `%VARIABLE%`. Defaults to the user profile. |
 | `env` | Extra environment variables, merged over global `[env]`. |
@@ -352,8 +352,9 @@ For images, `set` also writes a Windows Terminal *fragment*
 (`%LOCALAPPDATA%\Microsoft\Windows Terminal\Fragments\FACT\fact.json`) that adds
 a "FACT" profile with the image, where Windows Terminal draws it at full
 resolution and FACT stays transparent on top. A plain `fact` typed in any other
-Windows Terminal tab opens a FACT tab with that profile; `fact --here` (or
-`wallpaper_tab = false`) starts in the current tab instead. `wt -p FACT` and the FACT entry in the tab menu open it
+Windows Terminal tab opens a FACT tab with that profile, as soon as Windows
+Terminal has loaded it (until then, and with `fact --here` or
+`wallpaper_tab = false`, FACT starts in the current tab). `wt -p FACT` and the FACT entry in the tab menu open it
 too. Your own
 `settings.json` is never edited; FACT only updates its timestamp so Windows
 Terminal reloads at once. Set `FACT_WT_FRAGMENTS_DIR` for a portable Windows

@@ -332,7 +332,8 @@ Options:
   launch, so its background image shows through (the wallpaper profile uses it).
 - `--here` starts in the current tab. Without it, `fact` typed in a Windows
   Terminal tab while a picture wallpaper is set opens a new FACT tab where
-  Windows Terminal draws the picture at full resolution. Videos, `--transparent`,
+  Windows Terminal draws the picture at full resolution, once Windows Terminal
+  has loaded FACT's profile (until then FACT starts in place). Videos, `--transparent`,
   `background = "transparent"` and `wallpaper_tab = false` always start in place.
 - `--config FILE` overrides the default `config.toml`.
 - `FACT_HOME` changes the base directory used to find `config.toml`. There is no

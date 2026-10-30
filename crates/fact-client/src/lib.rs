@@ -3032,7 +3032,9 @@ impl App {
 
 /// The key press FACT acts on, or `None` to skip the event. Console alt
 /// codes (Alt+numpad, and pasted characters the keyboard layout cannot
-/// type) arrive as a release with no press; other releases are skipped.
+/// type) arrive as a release with no press; other releases are skipped. A
+/// release left over from a shortcut that switched to FACT (Win+1) is for a
+/// key the layout has, so it is skipped too.
 fn key_press(held: &mut HashSet<char>, key: KeyEvent) -> Option<KeyEvent> {
     let CKeyCode::Char(c) = key.code else {
         return (key.kind != KeyEventKind::Release).then_some(key);
@@ -3043,7 +3045,7 @@ fn key_press(held: &mut HashSet<char>, key: KeyEvent) -> Option<KeyEvent> {
         return Some(key);
     }
     if held.is_empty() {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.modifiers.contains(KeyModifiers::CONTROL) || keymap::layout_types(c) {
             return None;
         }
         return Some(KeyEvent::new(CKeyCode::Char(c), KeyModifiers::NONE));
@@ -3362,11 +3364,13 @@ mod tests {
             KeyEvent::new_with_kind(CKeyCode::Char(c), modifiers, KeyEventKind::Release)
         };
         let mut held = HashSet::new();
-        // A release with no press: an alt code such as Alt+0233.
-        let typed = key_press(&mut held, release('é', KeyModifiers::ALT)).unwrap();
-        assert_eq!(typed.code, CKeyCode::Char('é'));
+        // A release with no press of a character no keyboard has: an alt code.
+        let typed = key_press(&mut held, release('✓', KeyModifiers::ALT)).unwrap();
+        assert_eq!(typed.code, CKeyCode::Char('✓'));
         assert_eq!(typed.modifiers, KeyModifiers::NONE);
         assert_eq!(typed.kind, KeyEventKind::Press);
+        // A leftover release (Win+1 switched to FACT) types nothing.
+        assert!(key_press(&mut held, release('1', KeyModifiers::NONE)).is_none());
         // An ordinary key: press types, release does not.
         let shifted = KeyEvent::new(CKeyCode::Char('A'), KeyModifiers::SHIFT);
         assert!(key_press(&mut held, shifted).is_some());
